@@ -278,6 +278,27 @@ wrong answer back consistently.
 The partition table is written by `mkfs_fat32.py` rather than declared in
 `stage1.asm`, so the image geometry has exactly one definition.
 
+## ELF loading
+
+`elf::load()` maps every `PT_LOAD` segment at its own `p_vaddr`, reading through
+the VFS rather than off a raw device. It is the piece `execve()` will reuse
+unchanged.
+
+The distinction between `p_filesz` and `p_memsz` is the one that matters: the
+difference is `.bss`, which exists in memory but not in the file and must read
+as zero. Pages are cleared as they are mapped, so the tail of a segment is
+already correct when the file bytes land in front of it.
+
+`user/test.asm` is a real ELF built by the Makefile and placed on the image,
+not a synthetic one built by the test. It stores a value in `.bss`, adds it to
+one in `.rodata`, and returns the sum — so a wrong answer distinguishes "`.bss`
+was not zeroed" from "the segment was not mapped at all".
+
+It links at `0x600000000000` rather than the conventional `0x400000` because
+there is only one address space today, and mapping over `0x400000` would
+replace the identity mapping of physical memory the PMM is still handing out.
+Once processes have their own address spaces, the conventional address is fine.
+
 ## Roadmap
 
 - [x] stage 1/2 bootloader, real → protected → long mode
@@ -297,7 +318,8 @@ The partition table is written by `mkfs_fat32.py` rather than declared in
 - [ ] exFAT and ext2/3/4
 - [ ] AHCI with DMA, replacing PIO
 - [x] relocate the kernel to the higher half
-- [ ] ELF loading, ring 3, `syscall`/`sysret`
+- [x] ELF64 loading from the filesystem
+- [ ] ring 3, `syscall`/`sysret`
 - [ ] scheduler and processes; `fork`/`execve`/`wait`
 - [ ] USB: xHCI, then the HID and mass-storage class drivers
 - [ ] libc and a userland shell

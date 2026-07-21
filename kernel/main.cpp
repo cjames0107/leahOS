@@ -3,6 +3,7 @@
 #include <leah/bootinfo.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
+#include <leah/elf.hpp>
 #include <leah/fat32.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
@@ -415,6 +416,40 @@ void print_filesystem()
     print_tree("/", 0);
 }
 
+// Loads a real ELF off the filesystem and calls it. Still ring 0 and still the
+// kernel's address space - what this proves is the parsing, the mapping and
+// the zero-fill, which is the part execve() will reuse unchanged.
+void self_test_elf()
+{
+    elf::Image image{};
+    const elf::Error error = elf::load("/BIN/TEST.ELF", image);
+    if (error != elf::Error::None) {
+        console::set_color(console::Color::LightRed);
+        console::printf("\n  elf: %s\n", elf::error_name(error));
+        panic("elf: could not load /BIN/TEST.ELF");
+    }
+
+    using Program = u64 (*)();
+    const auto program = reinterpret_cast<Program>(image.entry);
+    const u64 result = program();
+
+    // The program adds a value it stored in .bss to one in .rodata. A zero
+    // return is its way of saying .bss arrived non-zero.
+    constexpr u64 kExpected = 0x1EA405C0DEull + 0x11;
+    if (result == 0)
+        panic("elf: .bss was not zeroed before the program ran");
+    if (result != kExpected)
+        panic("elf: loaded program produced the wrong result");
+
+    console::set_color(console::Color::DarkGray);
+    console::printf("\n  elf  /BIN/TEST.ELF  %u segments, %p..%p, entry %p -> 0x%llx\n",
+                    image.segments,
+                    reinterpret_cast<void*>(image.lowest),
+                    reinterpret_cast<void*>(image.highest),
+                    reinterpret_cast<void*>(image.entry), result);
+    console::set_color(console::Color::LightGray);
+}
+
 void echo_loop()
 {
     console::set_color(console::Color::White);
@@ -492,6 +527,9 @@ extern "C" void kernel_main(const boot::MemoryMap* memory_map)
 
     self_test_fs_write();
     step("FAT32 write path verified");
+
+    self_test_elf();
+    step("ELF64 loaded from disk and executed");
 
     print_memory(*memory_map);
     print_pci();

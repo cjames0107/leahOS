@@ -296,6 +296,8 @@ def main():
     parser.add_argument("start_lba", type=int)
     parser.add_argument("--label", default="LEAHOS")
     parser.add_argument("--sectors-per-cluster", type=int, default=1)
+    parser.add_argument("--add", action="append", default=[], metavar="PATH=FILE",
+                        help="place FILE in the image at PATH (one directory deep)")
     args = parser.parse_args()
 
     with open(args.image, "rb") as handle:
@@ -323,6 +325,21 @@ def main():
         "a-long-file-name-for-leahos.txt":
             b"This file needs long filename entries to be named correctly.\n",
     }
+
+    for spec in args.add:
+        target, _, source = spec.partition("=")
+        if not source:
+            raise SystemExit(f"error: --add expects PATH=FILE, got {spec!r}")
+        with open(source, "rb") as handle:
+            payload = handle.read()
+
+        parts = [p for p in target.split("/") if p]
+        node = tree
+        for directory in parts[:-1]:
+            node = node.setdefault(directory, {})
+            if not isinstance(node, dict):
+                raise SystemExit(f"error: {directory} is a file, not a directory")
+        node[parts[-1]] = payload
 
     root = 2
     volume.allocate()                     # cluster 2 is the root directory

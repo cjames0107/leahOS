@@ -80,6 +80,7 @@ KERNEL_OBJS := $(KERNEL_ASM_SRCS:%.asm=$(BUILD)/%.asm.o) \
 
 KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
+USER_TEST  := $(BUILD)/test.elf
 STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
 
@@ -132,13 +133,21 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	   echo "error: kernel exceeds its slot in the image - raise KERNEL_MAX_SECTORS"; \
 	   exit 1; fi
 
+# --- userland ---------------------------------------------------------------
+# A real ELF for the kernel's loader to chew on, rather than a synthetic one
+# built by the test itself.
+$(USER_TEST): user/test.asm user/test.ld | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(AS) -f elf64 user/test.asm -o $(BUILD)/test.o
+	$(LD) -nostdlib -T user/test.ld -o $@ $(BUILD)/test.o
+
 # --- disk image -------------------------------------------------------------
-$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) | $(BUILD)
+$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(USER_TEST) | $(BUILD)
 	@dd if=/dev/zero of=$@ bs=1048576 count=$(IMAGE_MIB) status=none
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 seek=0               conv=notrunc status=none
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=$(STAGE2_LBA)   conv=notrunc status=none
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_LBA)   conv=notrunc status=none
-	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA)
+	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA) --add BIN/TEST.ELF=$(USER_TEST)
 	@echo "image:  $@"
 
 $(BUILD):
