@@ -1,0 +1,11 @@
+build/
+*.o
+*.d
+*.elf
+*.bin
+*.img
+*.log
+.DS_Store
+
+# Machine-local tool permissions; shared .claude/ config stays trackable.
+.claude/settings.local.json
