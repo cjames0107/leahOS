@@ -127,9 +127,40 @@ tools/          run-headless.sh
 
 ## Status
 
-Boots to long mode, installs its own descriptor tables, and handles interrupts.
-Faults produce a register dump instead of a silent reset. No memory management
-yet, so there is still nothing to run.
+Boots to long mode, owns its descriptor tables, handles interrupts, manages
+physical and virtual memory, and enumerates the PCI bus. Faults produce a
+register dump instead of a silent reset. No storage or filesystem yet, so there
+is still nothing to load.
+
+## Memory management
+
+Three layers, each built on the one below:
+
+**Physical** — a bitmap allocator over the E820 map, one bit per 4 KiB frame.
+It starts from "everything is used" and clears only what E820 called usable, so
+holes stay reserved by default. The bitmap is placed immediately after the
+kernel image, because the thing that allocates memory cannot allocate its own
+bookkeeping.
+
+**Virtual** — a 4-level page table the kernel builds itself, replacing the
+throwaway map from stage 2. The low 4 GiB is identity mapped with 2 MiB pages,
+which covers RAM plus the MMIO window where the LAPIC, PCI BARs and any
+framebuffer live. `map()` works at 4 KiB granularity and splits a containing
+2 MiB page when it has to, so callers never need to know how a region was
+originally mapped.
+
+Note the bound on the high identity map: it stops at the highest *usable*
+address, not the highest address E820 described. Firmware routinely reports
+reserved regions near the top of the 64-bit space, and spanning that hole costs
+megabytes of page tables describing memory that does not exist.
+
+**Heap** — first-fit free list with splitting and coalescing, grown on demand
+by mapping fresh frames at 1 TiB. Backs `kmalloc`/`kfree` and the global
+`operator new`/`delete`.
+
+Those `operator new` overloads must be declared with the ABI's `size_t`
+(`unsigned long`) rather than the kernel's `u64` (`unsigned long long`). Both
+are 64 bits, but they are distinct types and the compiler rejects a near miss.
 
 ## Interrupts
 
@@ -156,10 +187,18 @@ decode `CR2` and the error code into a readable cause.
 - [x] freestanding C++ environment, VGA + serial console
 - [x] GDT and TSS owned by the kernel rather than inherited from stage 2
 - [x] IDT, exception handlers with register dumps, PIC remap, PIT, keyboard
-- [ ] physical frame allocator over the E820 map
-- [ ] virtual memory manager; relocate the kernel to the higher half
-- [ ] kernel heap, `kmalloc`/`operator new`
+- [x] physical frame allocator over the E820 map
+- [x] virtual memory manager, 4-level page tables, NX
+- [x] kernel heap, `kmalloc`/`operator new`
+- [x] PCI enumeration
+- [x] PS/2 mouse
+- [ ] unreal mode in stage 2 — the 64 KiB kernel ceiling blocks everything below
+- [ ] VBE mode set in stage 2, linear framebuffer, bitmap font console
+- [ ] APIC + HPET, retiring the PIC and PIT
+- [ ] AHCI and ATA block drivers
+- [ ] VFS layer, then FAT32; exFAT and ext2/3/4 after
+- [ ] relocate the kernel to the higher half
 - [ ] ELF loading, ring 3, `syscall`/`sysret`
 - [ ] scheduler and processes; `fork`/`execve`/`wait`
-- [ ] VFS, initrd, then a real block driver and filesystem
+- [ ] USB: xHCI, then the HID and mass-storage class drivers
 - [ ] libc and a userland shell
