@@ -1,5 +1,6 @@
 #pragma once
 
+#include <leah/bootinfo.hpp>
 #include <leah/types.hpp>
 
 // The kernel's only output device for now: the VGA text buffer, mirrored to
@@ -14,7 +15,11 @@ enum class Color : u8 {
     LightRed,    LightMagenta, Yellow,       White,
 };
 
-void init();
+void init(const boot::Info& info);
+
+bool graphical();
+u32 columns();
+u32 rows();
 void clear();
 void set_color(Color fg, Color bg = Color::Black);
 

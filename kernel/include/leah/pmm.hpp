@@ -21,7 +21,7 @@ constexpr u64 page_align_up(u64 address)
     return (address + kPageSize - 1) & ~(kPageSize - 1);
 }
 
-void init(const boot::MemoryMap& map);
+void init(const boot::Info& info);
 
 // Returns a physical address, or 0 on exhaustion. Frames are not zeroed.
 paddr_t alloc();

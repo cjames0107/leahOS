@@ -299,6 +299,37 @@ there is only one address space today, and mapping over `0x400000` would
 replace the identity mapping of physical memory the PMM is still handing out.
 Once processes have their own address spaces, the conventional address is fine.
 
+## Display
+
+Stage 2 walks the VBE mode list and picks the largest mode that is no bigger
+than 1024x768x32 and reports a linear framebuffer. Banked modes are rejected:
+they need a bank switch every 64 KiB, which is not worth supporting when every
+card since the 90s offers an LFB.
+
+The font is not embedded in the kernel. Every VGA BIOS carries the 8x16 font it
+uses for text mode, and `INT 10h AX=1130h` hands back a pointer to it — so
+stage 2 copies it out before leaving text mode. It is the same typeface the
+firmware already used, so switching to a framebuffer does not change what the
+console looks like.
+
+The console keeps both backends. If the mode set fails, `boot::Info` carries a
+zero framebuffer address and everything falls back to the VGA text buffer,
+which is what keeps the kernel debuggable on hardware where VBE does not
+cooperate. The 16-colour palette is shared, so code written against either
+backend renders identically.
+
+Two ordering constraints, both learned the hard way:
+
+The console comes up **before** the VMM, so early failures can be seen. That
+means `framebuffer::init()` cannot map anything — it relies on the 4 GiB
+identity map stage 2 builds, which exists precisely because a VBE framebuffer
+sits in the MMIO window just under 4 GiB. `framebuffer::remap_as_device()`
+tightens the attributes once the VMM is running.
+
+A failed mapping falls back silently to the text buffer, which in graphics mode
+means a black screen with a perfectly healthy serial log. Worth remembering as
+a symptom.
+
 ## Roadmap
 
 - [x] stage 1/2 bootloader, real → protected → long mode
@@ -312,7 +343,7 @@ Once processes have their own address spaces, the conventional address is fine.
 - [x] PS/2 mouse
 - [x] unreal mode in stage 2 — kernel ceiling raised from 64 KiB to 8 MiB
 - [x] ATA/IDE block driver, PIO, LBA28 and LBA48
-- [ ] VBE mode set in stage 2, linear framebuffer, bitmap font console
+- [x] VBE mode set in stage 2, linear framebuffer console
 - [ ] APIC + HPET, retiring the PIC and PIT
 - [x] VFS layer and FAT32, read and write, including long filenames
 - [ ] exFAT and ext2/3/4

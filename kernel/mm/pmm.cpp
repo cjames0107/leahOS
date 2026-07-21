@@ -74,11 +74,14 @@ void release(u64 base, u64 length)
 
 } // namespace
 
-void init(const boot::MemoryMap& map)
+void init(const boot::Info& info)
 {
+    const boot::MemoryRegion* regions = boot::memory_map();
+    const u32 count = info.e820_count;
+
     // Pass 1: how much address space do we have to describe?
-    for (u32 i = 0; i < map.count; ++i) {
-        const boot::MemoryRegion& r = map.regions[i];
+    for (u32 i = 0; i < count; ++i) {
+        const boot::MemoryRegion& r = regions[i];
         const u64 end = r.base + r.length;
         if (end > g_total_bytes)
             g_total_bytes = end;
@@ -88,8 +91,8 @@ void init(const boot::MemoryMap& map)
 
     // Tracking every frame up to the top of a machine with sparse high MMIO
     // would waste a lot of bitmap on holes, so cap at the highest usable byte.
-    for (u32 i = 0; i < map.count; ++i) {
-        const boot::MemoryRegion& r = map.regions[i];
+    for (u32 i = 0; i < count; ++i) {
+        const boot::MemoryRegion& r = regions[i];
         if (r.type == boot::RegionType::Usable && r.base + r.length > g_highest_usable)
             g_highest_usable = r.base + r.length;
     }
@@ -112,8 +115,8 @@ void init(const boot::MemoryMap& map)
     const u64 bitmap_base  = page_align_up(kernel_phys_end);
 
     bool bitmap_fits = false;
-    for (u32 i = 0; i < map.count; ++i) {
-        const boot::MemoryRegion& r = map.regions[i];
+    for (u32 i = 0; i < count; ++i) {
+        const boot::MemoryRegion& r = regions[i];
         if (r.type != boot::RegionType::Usable)
             continue;
         if (bitmap_base >= r.base && bitmap_base + bitmap_bytes <= r.base + r.length) {
@@ -130,8 +133,8 @@ void init(const boot::MemoryMap& map)
     g_used_frames = g_frame_count;
     g_free_frames = 0;
 
-    for (u32 i = 0; i < map.count; ++i) {
-        const boot::MemoryRegion& r = map.regions[i];
+    for (u32 i = 0; i < count; ++i) {
+        const boot::MemoryRegion& r = regions[i];
         if (r.type == boot::RegionType::Usable)
             release(r.base, r.length);
     }

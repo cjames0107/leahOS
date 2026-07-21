@@ -1,4 +1,5 @@
 #include <leah/console.hpp>
+#include <leah/framebuffer.hpp>
 #include <leah/io.hpp>
 #include <leah/string.hpp>
 
@@ -7,28 +8,61 @@
 namespace console {
 namespace {
 
-// --- VGA text mode ---------------------------------------------------------
+// --- backends --------------------------------------------------------------
+//
+// Two display targets behind one cursor. The framebuffer is used when stage 2
+// managed to set a VBE mode; the VGA text buffer is the fallback, and is what
+// keeps the kernel debuggable on hardware where the mode set failed.
 
-constexpr u16   kVgaWidth  = 80;
-constexpr u16   kVgaHeight = 25;
-constexpr u64   kVgaBuffer = 0xB8000;
-constexpr u16   kCrtcIndex = 0x3D4;
-constexpr u16   kCrtcData  = 0x3D5;
+constexpr u16 kVgaWidth  = 80;
+constexpr u16 kVgaHeight = 25;
+constexpr u64 kVgaBuffer = 0xB8000;
+constexpr u16 kCrtcIndex = 0x3D4;
+constexpr u16 kCrtcData  = 0x3D5;
 
 volatile u16* const g_vga = reinterpret_cast<volatile u16*>(kVgaBuffer);
 
-u16 g_row    = 0;
-u16 g_column = 0;
+bool g_graphical = false;
+u32  g_columns = kVgaWidth;
+u32  g_rows    = kVgaHeight;
+
+u32 g_row    = 0;
+u32 g_column = 0;
 u8  g_attr   = static_cast<u8>(Color::LightGray);
+
+// The IBM PC's 16 colours, as the RGB a framebuffer needs. Keeping the palette
+// means code written against the text console renders identically either way.
+constexpr u32 kPalette[16] = {
+    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
+    0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
+    0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
+    0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+};
 
 constexpr u16 vga_cell(char c, u8 attr)
 {
     return static_cast<u16>(static_cast<u8>(c)) | static_cast<u16>(attr) << 8;
 }
 
+u32 foreground_rgb() { return kPalette[g_attr & 0x0F]; }
+u32 background_rgb() { return kPalette[g_attr >> 4 & 0x0F]; }
+
+void render(u32 row, u32 column, char c)
+{
+    if (g_graphical)
+        framebuffer::draw_glyph(column, row, c, foreground_rgb(), background_rgb());
+    else
+        g_vga[row * kVgaWidth + column] = vga_cell(c, g_attr);
+}
+
 void update_cursor()
 {
-    const u16 pos = g_row * kVgaWidth + g_column;
+    // The CRTC cursor only exists in text mode. In graphics mode the caret is
+    // drawn by whoever wants one; nothing here pretends otherwise.
+    if (g_graphical)
+        return;
+
+    const u16 pos = static_cast<u16>(g_row * kVgaWidth + g_column);
     io::out8(kCrtcIndex, 0x0F);
     io::out8(kCrtcData, static_cast<u8>(pos & 0xFF));
     io::out8(kCrtcIndex, 0x0E);
@@ -37,19 +71,20 @@ void update_cursor()
 
 void scroll()
 {
-    // The buffer is MMIO but plain volatile u16 stores are fine here; go
-    // through a loop rather than memmove to keep the volatile qualifier.
-    for (u16 row = 1; row < kVgaHeight; ++row) {
-        for (u16 col = 0; col < kVgaWidth; ++col)
-            g_vga[(row - 1) * kVgaWidth + col] = g_vga[row * kVgaWidth + col];
+    if (g_graphical) {
+        framebuffer::scroll_up(background_rgb());
+    } else {
+        for (u32 row = 1; row < kVgaHeight; ++row) {
+            for (u32 col = 0; col < kVgaWidth; ++col)
+                g_vga[(row - 1) * kVgaWidth + col] = g_vga[row * kVgaWidth + col];
+        }
+        for (u32 col = 0; col < kVgaWidth; ++col)
+            g_vga[(kVgaHeight - 1) * kVgaWidth + col] = vga_cell(' ', g_attr);
     }
-    for (u16 col = 0; col < kVgaWidth; ++col)
-        g_vga[(kVgaHeight - 1) * kVgaWidth + col] = vga_cell(' ', g_attr);
-
-    g_row = kVgaHeight - 1;
+    g_row = g_rows - 1;
 }
 
-void vga_put(char c)
+void display_put(char c)
 {
     switch (c) {
     case '\n':
@@ -60,29 +95,30 @@ void vga_put(char c)
         g_column = 0;
         break;
     case '\t':
-        g_column = static_cast<u16>((g_column + 8) & ~7u);
+        g_column = (g_column + 8) & ~7u;
         break;
     case '\b':
         if (g_column > 0)
             --g_column;
         break;
     default:
-        g_vga[g_row * kVgaWidth + g_column] = vga_cell(c, g_attr);
+        render(g_row, g_column, c);
         ++g_column;
         break;
     }
 
-    if (g_column >= kVgaWidth) {
+    if (g_column >= g_columns) {
         g_column = 0;
         ++g_row;
     }
-    while (g_row >= kVgaHeight)
+    while (g_row >= g_rows)
         scroll();
 }
 
 // --- COM1 ------------------------------------------------------------------
 
 constexpr u16 kCom1 = 0x3F8;
+bool g_serial_ok = false;
 
 bool serial_init()
 {
@@ -94,7 +130,6 @@ bool serial_init()
     io::out8(kCom1 + 2, 0xC7);      // FIFO on, cleared, 14-byte threshold
     io::out8(kCom1 + 4, 0x1E);      // loopback for the self-test below
 
-    // Bounce a byte off the loopback to confirm something is actually there.
     io::out8(kCom1 + 0, 0xAE);
     if (io::in8(kCom1 + 0) != 0xAE)
         return false;
@@ -103,13 +138,11 @@ bool serial_init()
     return true;
 }
 
-bool g_serial_ok = false;
-
 void serial_put(char c)
 {
     if (!g_serial_ok)
         return;
-    while ((io::in8(kCom1 + 5) & 0x20) == 0)    // wait for THR empty
+    while ((io::in8(kCom1 + 5) & 0x20) == 0)
         ;
     io::out8(kCom1, static_cast<u8>(c));
 }
@@ -137,7 +170,6 @@ void put_signed(i64 value, u32 min_width, char pad)
 {
     if (value < 0) {
         put('-');
-        // Negating i64 min overflows, so widen through the unsigned domain.
         put_unsigned(~static_cast<u64>(value) + 1, 10, false,
                      min_width > 0 ? min_width - 1 : 0, pad);
         return;
@@ -147,16 +179,34 @@ void put_signed(i64 value, u32 min_width, char pad)
 
 } // namespace
 
-void init()
+void init(const boot::Info& info)
 {
     g_serial_ok = serial_init();
+
+    g_graphical = framebuffer::init(info);
+    if (g_graphical) {
+        g_columns = framebuffer::columns();
+        g_rows    = framebuffer::rows();
+    } else {
+        g_columns = kVgaWidth;
+        g_rows    = kVgaHeight;
+    }
+
     clear();
 }
 
+bool graphical() { return g_graphical; }
+u32 columns() { return g_columns; }
+u32 rows() { return g_rows; }
+
 void clear()
 {
-    for (u16 i = 0; i < kVgaWidth * kVgaHeight; ++i)
-        g_vga[i] = vga_cell(' ', g_attr);
+    if (g_graphical) {
+        framebuffer::clear(background_rgb());
+    } else {
+        for (u32 i = 0; i < kVgaWidth * kVgaHeight; ++i)
+            g_vga[i] = vga_cell(' ', g_attr);
+    }
     g_row = 0;
     g_column = 0;
     update_cursor();
@@ -169,7 +219,7 @@ void set_color(Color fg, Color bg)
 
 void put(char c)
 {
-    vga_put(c);
+    display_put(c);
     if (c == '\n')
         serial_put('\r');
     serial_put(c);

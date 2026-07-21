@@ -4,6 +4,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/elf.hpp>
+#include <leah/framebuffer.hpp>
 #include <leah/fat32.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
@@ -61,7 +62,7 @@ void step(const char* what)
     console::printf("%s\n", what);
 }
 
-void print_memory(const boot::MemoryMap& map)
+void print_memory(const boot::Info& info)
 {
     console::set_color(console::Color::White);
     console::printf("\n  physical memory  %llu MiB usable, top of RAM at %p\n",
@@ -69,7 +70,7 @@ void print_memory(const boot::MemoryMap& map)
                     reinterpret_cast<void*>(pmm::highest_usable()));
     console::set_color(console::Color::LightGray);
     console::printf("    %llu MiB free, %llu MiB reserved, across %u E820 regions\n",
-                    pmm::free_bytes() / kMiB, pmm::used_bytes() / kMiB, map.count);
+                    pmm::free_bytes() / kMiB, pmm::used_bytes() / kMiB, info.e820_count);
     console::printf("    kernel at %p virtual, %p physical, %llu KiB\n",
                     static_cast<void*>(__kernel_start),
                     reinterpret_cast<void*>(memory::kernel_virt_to_phys(
@@ -469,9 +470,9 @@ void echo_loop()
 
 void run_global_constructors();
 
-extern "C" void kernel_main(const boot::MemoryMap* memory_map)
+extern "C" void kernel_main(const boot::Info* info)
 {
-    console::init();
+    console::init(*info);
 
     // Before anything else that could depend on a global: constructors here
     // run with no heap, so they must not allocate.
@@ -488,10 +489,11 @@ extern "C" void kernel_main(const boot::MemoryMap* memory_map)
     step("IDT installed, 256 vectors");
 
     // Memory next, because every driver past this point wants to allocate.
-    pmm::init(*memory_map);
+    pmm::init(*info);
     step("physical frame allocator online");
 
     vmm::init();
+    framebuffer::remap_as_device();
     step("page tables rebuilt, 4 GiB identity mapped, NX enabled");
 
     heap::init();
@@ -521,6 +523,13 @@ extern "C" void kernel_main(const boot::MemoryMap* memory_map)
     cpu::sti();
     step("interrupts enabled");
 
+    if (console::graphical()) {
+        console::printf("  [ ok ] framebuffer %ux%u, %llux%llu text, BIOS ROM font\n",
+                        framebuffer::width(), framebuffer::height(),
+                        static_cast<u64>(console::columns()),
+                        static_cast<u64>(console::rows()));
+    }
+
     mount_root();
     self_test_fs();
     step("FAT32 mounted, read path verified");
@@ -531,7 +540,7 @@ extern "C" void kernel_main(const boot::MemoryMap* memory_map)
     self_test_elf();
     step("ELF64 loaded from disk and executed");
 
-    print_memory(*memory_map);
+    print_memory(*info);
     print_pci();
     print_disks();
     print_filesystem();

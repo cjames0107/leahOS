@@ -42,8 +42,11 @@ stage2_start:
 
     call enable_a20
     call enter_unreal
+    call clear_bootinfo
     call detect_memory
+    call copy_rom_font
     call load_kernel
+    call set_video_mode
 
     mov si, msg_pmode
     call print
@@ -143,9 +146,9 @@ check_a20:
 ; physical memory manager.
 ; ----------------------------------------------------------------------------
 detect_memory:
-    mov ax, E820_SEG
+    mov ax, E820_ENTRIES_SEG
     mov es, ax
-    mov di, E820_ENTRIES_OFF
+    xor di, di
 
     xor ebx, ebx                        ; continuation value, 0 = start
     xor bp, bp                          ; accepted entry count
@@ -187,8 +190,10 @@ detect_memory:
     jnz .next
 
 .done:
-    mov [es:E820_COUNT_OFF], bp
-    mov word [es:E820_COUNT_OFF + 2], 0
+    mov ax, BOOTINFO_SEG
+    mov es, ax
+    mov [es:BI_E820_COUNT], bp
+    mov word [es:BI_E820_COUNT + 2], 0
     xor ax, ax
     mov es, ax
     ret
@@ -315,6 +320,212 @@ copy_chunk_to_high:
     ret
 
 ; ----------------------------------------------------------------------------
+; clear_bootinfo - the kernel reads every field, so none may be stale
+; ----------------------------------------------------------------------------
+clear_bootinfo:
+    push es
+    push di
+    push cx
+    mov ax, BOOTINFO_SEG
+    mov es, ax
+    xor di, di
+    xor ax, ax
+    mov cx, 128                         ; 256 bytes
+    rep stosw
+    pop cx
+    pop di
+    pop es
+    ret
+
+; ----------------------------------------------------------------------------
+; copy_rom_font - take the video BIOS 8x16 font before we leave text mode
+;
+; Every VGA BIOS carries the font it uses for text mode. Borrowing it saves
+; embedding one in the kernel, and it is the same typeface the firmware and
+; the boot messages already used, so the switch to a framebuffer does not
+; change what the console looks like.
+;
+; INT 10h AX=1130h returns the pointer in ES:BP, which is why both are saved.
+; ----------------------------------------------------------------------------
+copy_rom_font:
+    push es
+    push bp
+    push ds
+    push si
+    push di
+    push cx
+
+    mov ax, 0x1130
+    mov bh, 0x06                        ; 8x16 ROM font
+    int 0x10                            ; -> ES:BP
+
+    push es
+    pop ds
+    mov si, bp                          ; DS:SI = font
+
+    mov ax, FONT_SEG
+    mov es, ax
+    xor di, di
+
+    mov cx, FONT_BYTES / 2
+    rep movsw
+
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+
+    mov ax, BOOTINFO_SEG
+    mov es, ax
+    mov dword [es:BI_FONT_ADDRESS], FONT_BUFFER
+    xor ax, ax
+    mov es, ax
+
+    pop cx
+    pop di
+    pop si
+    pop ds
+    pop bp
+    pop es
+    ret
+
+; ----------------------------------------------------------------------------
+; set_video_mode - find a linear-framebuffer VBE mode and switch to it
+;
+; Done last, after everything that wants to print: once this succeeds there is
+; no text console until the kernel builds one.
+;
+; A mode is only usable if it reports a linear framebuffer. The banked
+; alternative needs a bank switch every 64 KiB, which is not worth supporting
+; when every card made since the 90s offers LFB.
+; ----------------------------------------------------------------------------
+set_video_mode:
+    push es
+    push di
+
+    ; --- controller info, for the mode list ---------------------------------
+    mov ax, VBE_INFO_SEG
+    mov es, ax
+    xor di, di
+    mov dword [es:di], 'VBE2'           ; ask for VBE 2.0+ information
+    mov ax, 0x4F00
+    int 0x10
+    cmp ax, 0x004F
+    jne .give_up
+
+    ; VideoModePtr is a far pointer at offset 14 of the info block.
+    mov ax, [es:14]                     ; offset
+    mov dx, [es:16]                     ; segment
+    mov [mode_list_off], ax
+    mov [mode_list_seg], dx
+
+    mov word [best_mode], 0xFFFF
+    mov dword [best_score], 0
+
+.next_mode:
+    mov es, [mode_list_seg]
+    mov di, [mode_list_off]
+    mov cx, [es:di]
+    cmp cx, 0xFFFF
+    je  .choose
+    add word [mode_list_off], 2
+    mov [current_mode], cx
+
+    mov ax, VBE_MODE_INFO_SEG
+    mov es, ax
+    xor di, di
+    mov ax, 0x4F01
+    int 0x10
+    cmp ax, 0x004F
+    jne .next_mode
+
+    ; attributes bit 4 = graphics, bit 7 = linear framebuffer
+    mov ax, [es:0]
+    test ax, 1 << 4
+    jz  .next_mode
+    test ax, 1 << 7
+    jz  .next_mode
+
+    cmp byte [es:0x19], FB_WANT_BPP     ; bits per pixel
+    jne .next_mode
+
+    ; Score by pixel count, capped at what we asked for, so the largest mode
+    ; that is no bigger than the target wins.
+    mov ax, [es:0x12]                   ; width
+    cmp ax, FB_WANT_WIDTH
+    ja  .next_mode
+    mov bx, [es:0x14]                   ; height
+    cmp bx, FB_WANT_HEIGHT
+    ja  .next_mode
+
+    mul bx                              ; dx:ax = width * height
+    mov cx, dx
+    shl ecx, 16
+    mov cx, ax                          ; ecx = pixel count
+
+    cmp ecx, [best_score]
+    jbe .next_mode
+    mov [best_score], ecx
+    mov ax, [current_mode]
+    mov [best_mode], ax
+    jmp .next_mode
+
+.choose:
+    mov cx, [best_mode]
+    cmp cx, 0xFFFF
+    je  .give_up
+
+    ; Re-read the winner's details; the scratch block holds the last mode we
+    ; looked at, not the one we picked.
+    mov ax, VBE_MODE_INFO_SEG
+    mov es, ax
+    xor di, di
+    mov ax, 0x4F01
+    int 0x10
+    cmp ax, 0x004F
+    jne .give_up
+
+    mov ax, [es:0x10]                   ; bytes per scanline
+    mov [saved_pitch], ax
+    mov ax, [es:0x12]
+    mov [saved_width], ax
+    mov ax, [es:0x14]
+    mov [saved_height], ax
+    mov al, [es:0x19]
+    mov [saved_bpp], al
+    mov eax, [es:0x28]                  ; physical framebuffer base
+    mov [saved_fb], eax
+
+    mov bx, [best_mode]
+    or  bx, 0x4000                      ; use the linear framebuffer
+    mov ax, 0x4F02
+    int 0x10
+    cmp ax, 0x004F
+    jne .give_up
+
+    mov ax, BOOTINFO_SEG
+    mov es, ax
+    mov eax, [saved_fb]
+    mov [es:BI_FB_ADDRESS], eax
+    mov dword [es:BI_FB_ADDRESS + 4], 0
+    movzx eax, word [saved_pitch]
+    mov [es:BI_FB_PITCH], eax
+    movzx eax, word [saved_width]
+    mov [es:BI_FB_WIDTH], eax
+    movzx eax, word [saved_height]
+    mov [es:BI_FB_HEIGHT], eax
+    mov al, [saved_bpp]
+    mov [es:BI_FB_BPP], al
+
+.give_up:
+    ; A zero framebuffer address in the boot info tells the kernel to fall
+    ; back to the VGA text buffer, so failing here is not fatal.
+    xor ax, ax
+    mov es, ax
+    pop di
+    pop es
+    ret
+
+; ----------------------------------------------------------------------------
 ; print / fail - 16-bit only
 ; ----------------------------------------------------------------------------
 print:
@@ -359,15 +570,25 @@ pm_entry:
     ; there is nothing left to relocate.
 
     ; --- build the initial page tables --------------------------------------
-    ; Identity map the first 1 GiB with 2 MiB pages. Crude, but it keeps every
-    ; address the bootloader already handed out valid across the CR0.PG write.
+    ; Identity map the first 4 GiB with 2 MiB pages. Crude, but it keeps every
+    ; address the bootloader already handed out valid across the CR0.PG write,
+    ; and it reaches the MMIO window where a VBE framebuffer lives.
     mov edi, PML4_BASE
     mov ecx, (PAGE_TABLES_END - PML4_BASE) / 4
     xor eax, eax
     rep stosd
 
     mov dword [PML4_BASE], PDPT_BASE | PAGE_PRESENT | PAGE_WRITE
-    mov dword [PDPT_BASE], PD_BASE   | PAGE_PRESENT | PAGE_WRITE
+
+    ; One PDPT entry per gigabyte, each pointing at its own page directory.
+    mov edi, PDPT_BASE
+    mov eax, PD_BASE | PAGE_PRESENT | PAGE_WRITE
+    mov ecx, PD_COUNT
+.map_pdpt:
+    mov [edi], eax
+    add eax, 0x1000
+    add edi, 8
+    loop .map_pdpt
 
     ; The same page directory is mapped a second time high up, so the kernel
     ; is reachable at both its physical and its linked address. The identity
@@ -378,7 +599,7 @@ pm_entry:
 
     mov edi, PD_BASE
     mov eax, PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
-    mov ecx, 512
+    mov ecx, 512 * PD_COUNT
 .map_pd:
     mov [edi], eax                      ; high dword is already zero
     add eax, 0x200000                   ; next 2 MiB frame
@@ -426,7 +647,7 @@ lm_entry:
     ; System V AMD64: first argument in RDI. Hand the kernel its memory map.
     ; The jump goes to the linked higher-half address, not the physical one,
     ; so every symbol the kernel resolves from here on is already correct.
-    mov rdi, E820_COUNT
+    mov rdi, BOOTINFO_BASE
     mov rax, KERNEL_VIRT_BASE
     jmp rax
 
@@ -466,6 +687,16 @@ drive_number:  db 0
 
 ALIGN 4
 dest_linear:   dd 0                     ; next 32-bit destination address
+mode_list_off: dw 0
+mode_list_seg: dw 0
+current_mode:  dw 0
+best_mode:     dw 0xFFFF
+best_score:    dd 0
+saved_fb:      dd 0
+saved_pitch:   dw 0
+saved_width:   dw 0
+saved_height:  dw 0
+saved_bpp:     db 0
 sectors_left:  dw 0
 chunk_sectors: dw 0
 

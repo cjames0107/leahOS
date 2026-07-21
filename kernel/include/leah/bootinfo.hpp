@@ -2,8 +2,8 @@
 
 #include <leah/types.hpp>
 
-// What stage 2 leaves behind for the kernel. The layout here must match
-// boot/layout.inc exactly - there is no negotiation, just an agreed address.
+// What stage 2 leaves behind for the kernel. Field offsets are mirrored by the
+// BI_* constants in boot/layout.inc; the two must be changed together.
 
 namespace boot {
 
@@ -26,12 +26,27 @@ struct [[gnu::packed]] MemoryRegion {
 
 static_assert(sizeof(MemoryRegion) == 24, "E820 entries are 24 bytes");
 
-// Written by stage 2 at E820_COUNT: a count, twelve bytes of slack so the
-// array starts on a tidy 16-byte boundary, then the entries themselves.
-struct [[gnu::packed]] MemoryMap {
-    u32 count;
-    u8  reserved[12];
-    MemoryRegion regions[];
+struct [[gnu::packed]] Info {
+    u32 e820_count;         // 0x00
+    u32 reserved0;          // 0x04
+    u64 framebuffer;        // 0x08  physical, 0 when no VBE mode was set
+    u32 pitch;              // 0x10  bytes per scanline, not pixels
+    u32 width;              // 0x14
+    u32 height;             // 0x18
+    u8  bits_per_pixel;     // 0x1C
+    u8  reserved1[3];       // 0x1D
+    u32 font;               // 0x20  physical, 256 glyphs of 8x16
 };
+
+static_assert(sizeof(Info) == 0x24);
+
+// The entries live in their own page so the header above can grow without
+// colliding with them.
+constexpr paddr_t kMemoryMapAddress = 0x21000;
+
+inline const MemoryRegion* memory_map()
+{
+    return reinterpret_cast<const MemoryRegion*>(kMemoryMapAddress);
+}
 
 } // namespace boot
