@@ -106,7 +106,18 @@ msg_no_ext:   db "stage1: no int13h ext", 13, 10, 0
 msg_disk_err: db "stage1: disk error", 13, 10, 0
 
 ; ----------------------------------------------------------------------------
-; boot signature
+; partition table + boot signature
+;
+; The last 66 bytes of an MBR are not ours: four 16-byte partition entries and
+; the signature. tools/mkfs_fat32.py fills the entries in after the image is
+; assembled, so the filesystem's geometry has exactly one definition.
+;
+; If the code above ever outgrows 446 bytes this TIMES goes negative and the
+; assembler stops us, which is the correct moment to find out.
 ; ----------------------------------------------------------------------------
-TIMES 510 - ($ - $$) db 0
+TIMES 446 - ($ - $$) db 0
+
+partition_table:
+    TIMES 64 db 0
+
 dw 0xAA55

@@ -131,20 +131,24 @@ Physical addresses during boot. Nothing here may overlap; see
 ```
 boot/           stage1.asm, stage2.asm, layout.inc
 kernel/
-  arch/x86_64/  entry.asm, console.cpp        architecture-specific
-  include/leah/ types, io, console, string, bootinfo
+  arch/x86_64/  entry.asm, isr.asm, gdt, idt, pic, timer, keyboard,
+                mouse, pci, console, panic
+  drivers/      ata.cpp, blockdev.cpp
+  fs/           vfs.cpp, fat32.cpp
+  mm/           pmm.cpp, vmm.cpp, heap.cpp
+  include/leah/ public headers
   lib/          string.cpp, cxx.cpp           freestanding runtime
   main.cpp      kernel_main
   linker.ld
-tools/          run-headless.sh
+tools/          run-headless.sh, mkfs_fat32.py
 ```
 
 ## Status
 
 Boots to long mode, owns its descriptor tables, handles interrupts, manages
-physical and virtual memory, enumerates PCI, and reads and writes ATA disks.
-Faults produce a register dump instead of a silent reset. No filesystem yet, so
-the disk is still just sectors.
+physical and virtual memory, enumerates PCI, reads and writes ATA disks, and
+mounts a FAT32 filesystem it can read files out of. Faults produce a register
+dump instead of a silent reset. No userland, so nothing runs but the kernel.
 
 ## Memory management
 
@@ -212,6 +216,47 @@ different route, the two agreeing validates the driver and the unreal-mode
 loader against each other. Writes are then checked separately against a scratch
 sector, because writing is the operation that can quietly corrupt a disk.
 
+## Filesystem
+
+`vfs` is the filesystem-independent layer; `fs::Fat32` is the first thing
+behind it. The interface is path-based rather than handle-based on purpose:
+open/close/seek needs a file descriptor table, and that belongs with processes
+rather than ahead of them.
+
+FAT32 first because it is the format every other system can already write. The
+image is built by `tools/mkfs_fat32.py` and checked with `fsck_msdos` before
+the kernel ever sees it, so the reader is validated against a real
+implementation instead of only against the tool that produced the image.
+
+Two details in the format are worth knowing:
+
+**A volume is identified by what is zero, not by the "FAT32" string.** FAT12
+and FAT16 put non-zero values in the 16-bit FAT-size and root-entry-count
+fields; FAT32 leaves both at zero. The type string further down the BPB is
+advisory and some formatters get it wrong.
+
+**Long filenames are stored in fake directory entries.** They carry every one
+of the low four attribute bits set at once — a combination no real file can
+have — so systems predating long filenames skip them rather than showing
+garbage. They also appear *before* the 8.3 entry they belong to, in reverse
+order, which is why the reader accumulates them until the short entry arrives.
+
+`block::Partition` bounds-checks and rebases every access, so a filesystem bug
+cannot reach outside its partition — notably not into the kernel image sitting
+earlier on the same disk.
+
+## Disk image
+
+| LBA | Contents |
+|---|---|
+| 0 | stage 1 / MBR, with the partition table at offset 446 |
+| 1–32 | stage 2 |
+| 64–16447 | kernel (8 MiB reserved) |
+| 20480+ | FAT32 partition (54 MiB) |
+
+The partition table is written by `mkfs_fat32.py` rather than declared in
+`stage1.asm`, so the image geometry has exactly one definition.
+
 ## Roadmap
 
 - [x] stage 1/2 bootloader, real → protected → long mode
@@ -227,7 +272,9 @@ sector, because writing is the operation that can quietly corrupt a disk.
 - [x] ATA/IDE block driver, PIO, LBA28 and LBA48
 - [ ] VBE mode set in stage 2, linear framebuffer, bitmap font console
 - [ ] APIC + HPET, retiring the PIC and PIT
-- [ ] VFS layer, then FAT32; exFAT and ext2/3/4 after
+- [x] VFS layer and FAT32 read support, including long filenames
+- [ ] FAT32 write support: cluster allocation, directory entries, FSInfo
+- [ ] exFAT and ext2/3/4
 - [ ] AHCI with DMA, replacing PIO
 - [ ] relocate the kernel to the higher half
 - [ ] ELF loading, ring 3, `syscall`/`sysret`

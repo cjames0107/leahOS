@@ -18,7 +18,8 @@ STAGE2_LBA      := 1
 STAGE2_SECTORS  := 32
 KERNEL_LBA      := 64
 KERNEL_MAX_SECTORS := 16384              # 8 MiB of image reserved for the kernel
-IMAGE_MIB       := 32
+IMAGE_MIB       := 64
+FAT32_LBA       := 20480          # 10 MiB in, clear of the kernel's slot
 
 # --- knobs ------------------------------------------------------------------
 # Override on the command line, e.g. `make run MEM=2G` or
@@ -135,6 +136,7 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) | $(BUILD)
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 seek=0               conv=notrunc status=none
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=$(STAGE2_LBA)   conv=notrunc status=none
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_LBA)   conv=notrunc status=none
+	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA)
 	@echo "image:  $@"
 
 $(BUILD):

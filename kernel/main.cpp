@@ -1,7 +1,9 @@
 #include <leah/ata.hpp>
+#include <leah/blockdev.hpp>
 #include <leah/bootinfo.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
+#include <leah/fat32.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
 #include <leah/interrupts.hpp>
@@ -14,6 +16,7 @@
 #include <leah/timer.hpp>
 #include <leah/types.hpp>
 #include <leah/string.hpp>
+#include <leah/vfs.hpp>
 #include <leah/vmm.hpp>
 
 namespace boot {
@@ -193,6 +196,146 @@ void self_test_disk()
     kfree(out);
 }
 
+block::Device* g_disk = nullptr;
+block::Device* g_partition = nullptr;
+
+void mount_root()
+{
+    g_disk = new block::AtaDevice(0);
+
+    block::PartitionInfo parts[4];
+    const usize found = block::scan_partitions(*g_disk, parts, 4);
+
+    console::set_color(console::Color::White);
+    console::printf("\n  partitions  %llu found\n", static_cast<u64>(found));
+    console::set_color(console::Color::LightGray);
+
+    for (usize i = 0; i < found; ++i) {
+        console::printf("    %llu  type 0x%02x  %s  LBA %llu, %llu MiB\n",
+                        static_cast<u64>(i), parts[i].type,
+                        block::partition_type_name(parts[i].type),
+                        parts[i].start_lba,
+                        parts[i].sectors * block::kSectorSize / kMiB);
+    }
+
+    for (usize i = 0; i < found; ++i) {
+        if (parts[i].type != 0x0B && parts[i].type != 0x0C)
+            continue;
+
+        g_partition = new block::Partition(g_disk, parts[i].start_lba, parts[i].sectors);
+        fs::Fat32* filesystem = fs::Fat32::probe(g_partition);
+        if (filesystem == nullptr) {
+            delete g_partition;
+            g_partition = nullptr;
+            continue;
+        }
+        vfs::mount(filesystem);
+        return;
+    }
+}
+
+void print_tree(const char* path, int depth)
+{
+    vfs::Entry entries[32];
+    usize count = 0;
+    if (!vfs::list(path, entries, 32, count))
+        return;
+
+    for (usize i = 0; i < count; ++i) {
+        for (int d = 0; d < depth; ++d)
+            console::write("  ");
+
+        if (entries[i].type == vfs::Type::Directory) {
+            console::set_color(console::Color::LightCyan);
+            console::printf("    %s/\n", entries[i].name);
+            console::set_color(console::Color::LightGray);
+
+            char child[vfs::kMaxPath];
+            usize n = 0;
+            for (const char* p = path; *p != '\0' && n + 1 < sizeof(child); ++p)
+                child[n++] = *p;
+            if (n > 0 && child[n - 1] != '/')
+                child[n++] = '/';
+            for (const char* p = entries[i].name; *p != '\0' && n + 1 < sizeof(child); ++p)
+                child[n++] = *p;
+            child[n] = '\0';
+
+            print_tree(child, depth + 1);
+        } else {
+            console::printf("    %s  (%llu bytes)\n", entries[i].name, entries[i].size);
+        }
+    }
+}
+
+// Checks the three things that are easy to get subtly wrong: reading a file
+// smaller than a cluster, following a FAT chain across several clusters, and
+// resolving a name that only exists as long filename entries.
+void self_test_fs()
+{
+    if (vfs::mounted() == nullptr)
+        panic("vfs: no filesystem mounted");
+
+    u64 size = 0;
+    char* hello = vfs::read_entire_file("/HELLO.TXT", &size);
+    if (hello == nullptr || size != 18)
+        panic("fat32: /HELLO.TXT did not read back at its stated size");
+    if (memcmp(hello, "Hello from FAT32.\n", 18) != 0)
+        panic("fat32: /HELLO.TXT contents are wrong");
+    kfree(hello);
+
+    // Larger than one 512-byte cluster, so this only works if next_cluster()
+    // walks the chain correctly.
+    vfs::Stat readme{};
+    if (!vfs::stat("/README.MD", readme) || readme.size < 2048)
+        panic("fat32: /README.MD is missing or unexpectedly small");
+
+    char* text = vfs::read_entire_file("/README.MD", &size);
+    if (text == nullptr || size != readme.size)
+        panic("fat32: short read on a multi-cluster file");
+    if (memcmp(text, "# leahOS", 8) != 0)
+        panic("fat32: multi-cluster read returned the wrong bytes");
+    // The tail matters more than the head: a broken chain still gets cluster
+    // one right.
+    if (memcmp(text + size - 2, ". ", 2) != 0)
+        panic("fat32: the end of a multi-cluster file is wrong");
+    kfree(text);
+
+    // Case-insensitive lookup, and a path through a subdirectory.
+    char* notes = vfs::read_entire_file("/docs/notes.txt", &size);
+    if (notes == nullptr || size != 30)
+        panic("fat32: /docs/notes.txt did not resolve");
+    kfree(notes);
+
+    // Only reachable through long filename entries: its 8.3 name is mangled.
+    static const char kLongNameText[] =
+        "This file needs long filename entries to be named correctly.\n";
+
+    char* lfn = vfs::read_entire_file("/a-long-file-name-for-leahos.txt", &size);
+    if (lfn == nullptr)
+        panic("fat32: could not resolve a long filename");
+    if (size != sizeof(kLongNameText) - 1 || memcmp(lfn, kLongNameText, size) != 0)
+        panic("fat32: long filename resolved but its contents are wrong");
+    kfree(lfn);
+
+    if (vfs::stat("/nope.txt", readme))
+        panic("fat32: stat succeeded on a file that does not exist");
+}
+
+void print_filesystem()
+{
+    auto* filesystem = vfs::mounted();
+    if (filesystem == nullptr) {
+        console::write("\n  no filesystem mounted\n");
+        return;
+    }
+
+    console::set_color(console::Color::White);
+    console::printf("\n  %s  volume \"%s\"\n",
+                    filesystem->type_name(), filesystem->volume_label());
+    console::set_color(console::Color::LightGray);
+    print_tree("/", 0);
+}
+
 void echo_loop()
 {
     console::set_color(console::Color::White);
@@ -264,9 +407,14 @@ extern "C" void kernel_main(const boot::MemoryMap* memory_map)
     cpu::sti();
     step("interrupts enabled");
 
+    mount_root();
+    self_test_fs();
+    step("FAT32 mounted and verified");
+
     print_memory(*memory_map);
     print_pci();
     print_disks();
+    print_filesystem();
 
     echo_loop();
 }
