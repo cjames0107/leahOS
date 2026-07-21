@@ -28,6 +28,38 @@ bool list(const char* path, Entry* out, usize max, usize& count)
     return g_root != nullptr && g_root->list(path, out, max, count);
 }
 
+isize write(const char* path, u64 offset, const void* buffer, usize bytes)
+{
+    return g_root != nullptr ? g_root->write(path, offset, buffer, bytes) : -1;
+}
+
+bool create(const char* path, Type type)
+{
+    return g_root != nullptr && g_root->create(path, type);
+}
+
+bool remove(const char* path)
+{
+    return g_root != nullptr && g_root->remove(path);
+}
+
+bool write_entire_file(const char* path, const void* buffer, usize bytes)
+{
+    // Removing first rather than truncating keeps this honest: a shorter
+    // rewrite must not leave the tail of the previous contents behind.
+    Stat existing{};
+    if (stat(path, existing))
+        remove(path);
+
+    if (!create(path, Type::File))
+        return false;
+    if (bytes == 0)
+        return true;
+
+    const isize written = write(path, 0, buffer, bytes);
+    return written >= 0 && static_cast<usize>(written) == bytes;
+}
+
 char* read_entire_file(const char* path, u64* size_out)
 {
     Stat info{};

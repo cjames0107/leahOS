@@ -147,8 +147,8 @@ tools/          run-headless.sh, mkfs_fat32.py
 
 Boots to long mode, owns its descriptor tables, handles interrupts, manages
 physical and virtual memory, enumerates PCI, reads and writes ATA disks, and
-mounts a FAT32 filesystem it can read files out of. Faults produce a register
-dump instead of a silent reset. No userland, so nothing runs but the kernel.
+mounts a FAT32 filesystem it reads and writes. Faults produce a register dump
+instead of a silent reset. No userland, so nothing runs but the kernel.
 
 ## Memory management
 
@@ -245,6 +245,17 @@ order, which is why the reader accumulates them until the short entry arrives.
 cannot reach outside its partition — notably not into the kernel image sitting
 earlier on the same disk.
 
+Writing allocates clusters, links FAT chains, creates directory entries with
+long filenames when 8.3 cannot hold the name, and maintains FSInfo. Every FAT
+copy is updated on each change, because a repair tool comparing them treats a
+mismatch as corruption.
+
+The check that matters is external: after the kernel has written to the volume,
+`fsck_msdos` must still report it clean. That is what caught the FSInfo free
+count being maintained from zero instead of seeded from disk — a bug the
+kernel's own read-back tests could never have found, because it read its own
+wrong answer back consistently.
+
 ## Disk image
 
 | LBA | Contents |
@@ -272,8 +283,7 @@ The partition table is written by `mkfs_fat32.py` rather than declared in
 - [x] ATA/IDE block driver, PIO, LBA28 and LBA48
 - [ ] VBE mode set in stage 2, linear framebuffer, bitmap font console
 - [ ] APIC + HPET, retiring the PIC and PIT
-- [x] VFS layer and FAT32 read support, including long filenames
-- [ ] FAT32 write support: cluster allocation, directory entries, FSInfo
+- [x] VFS layer and FAT32, read and write, including long filenames
 - [ ] exFAT and ext2/3/4
 - [ ] AHCI with DMA, replacing PIO
 - [ ] relocate the kernel to the higher half

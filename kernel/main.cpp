@@ -321,6 +321,77 @@ void self_test_fs()
         panic("fat32: stat succeeded on a file that does not exist");
 }
 
+// Writing is where a filesystem gets to corrupt itself, so this covers the
+// cases that actually allocate: a fresh file, one that outgrows a cluster, a
+// name needing long filename entries, a subdirectory, and deletion.
+void self_test_fs_write()
+{
+    // Small file, short name, exercises the lowercase-flag path.
+    static const char kSmall[] = "written by leahOS\n";
+    if (!vfs::write_entire_file("/wrote.txt", kSmall, sizeof(kSmall) - 1))
+        panic("fat32: could not create /wrote.txt");
+
+    u64 size = 0;
+    char* back = vfs::read_entire_file("/wrote.txt", &size);
+    if (back == nullptr || size != sizeof(kSmall) - 1 ||
+        memcmp(back, kSmall, size) != 0)
+        panic("fat32: /wrote.txt did not read back as written");
+    kfree(back);
+
+    // Several clusters, so allocation and chain linking both have to work.
+    constexpr usize kBigSize = 9000;
+    auto* big = static_cast<u8*>(kmalloc(kBigSize));
+    if (big == nullptr)
+        panic("fat32: out of memory for the write test");
+    for (usize i = 0; i < kBigSize; ++i)
+        big[i] = static_cast<u8>(i * 31 + 7);
+
+    if (!vfs::write_entire_file("/BIG.BIN", big, kBigSize))
+        panic("fat32: could not write a multi-cluster file");
+
+    auto* big_back = static_cast<u8*>(kmalloc(kBigSize));
+    if (big_back == nullptr)
+        panic("fat32: out of memory verifying the write test");
+    if (vfs::read("/BIG.BIN", 0, big_back, kBigSize) != static_cast<isize>(kBigSize))
+        panic("fat32: short read on a file we just wrote");
+    if (memcmp(big, big_back, kBigSize) != 0)
+        panic("fat32: multi-cluster write did not round trip");
+    kfree(big_back);
+    kfree(big);
+
+    // A name that cannot be expressed as 8.3, so create() must emit LFN
+    // entries and then find them again.
+    static const char kLongText[] = "long names survive a round trip\n";
+    if (!vfs::write_entire_file("/a-file-written-with-a-long-name.txt",
+                                kLongText, sizeof(kLongText) - 1))
+        panic("fat32: could not create a file with a long name");
+
+    char* long_back = vfs::read_entire_file("/a-file-written-with-a-long-name.txt", &size);
+    if (long_back == nullptr || size != sizeof(kLongText) - 1)
+        panic("fat32: long-named file did not read back");
+    kfree(long_back);
+
+    // Directory creation, including its "." and ".." entries.
+    if (!vfs::create("/OUT", vfs::Type::Directory))
+        panic("fat32: could not create a directory");
+    if (!vfs::write_entire_file("/OUT/nested.txt", kSmall, sizeof(kSmall) - 1))
+        panic("fat32: could not write inside a created directory");
+
+    // Deletion, and the space coming back.
+    if (!vfs::write_entire_file("/temp.txt", kSmall, sizeof(kSmall) - 1))
+        panic("fat32: could not create the file to be deleted");
+    if (!vfs::remove("/temp.txt"))
+        panic("fat32: remove failed");
+
+    vfs::Stat gone{};
+    if (vfs::stat("/temp.txt", gone))
+        panic("fat32: a removed file is still there");
+
+    // A non-empty directory must refuse to disappear and orphan its contents.
+    if (vfs::remove("/OUT"))
+        panic("fat32: removed a directory that still had a file in it");
+}
+
 void print_filesystem()
 {
     auto* filesystem = vfs::mounted();
@@ -409,7 +480,10 @@ extern "C" void kernel_main(const boot::MemoryMap* memory_map)
 
     mount_root();
     self_test_fs();
-    step("FAT32 mounted and verified");
+    step("FAT32 mounted, read path verified");
+
+    self_test_fs_write();
+    step("FAT32 write path verified");
 
     print_memory(*memory_map);
     print_pci();
