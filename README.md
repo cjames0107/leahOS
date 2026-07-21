@@ -127,14 +127,35 @@ tools/          run-headless.sh
 
 ## Status
 
-Boots to long mode and prints the E820 map. That is all it does.
+Boots to long mode, installs its own descriptor tables, and handles interrupts.
+Faults produce a register dump instead of a silent reset. No memory management
+yet, so there is still nothing to run.
+
+## Interrupts
+
+The kernel owns its GDT, TSS and IDT rather than inheriting stage 2's. Two
+details there are worth knowing because they are invisible until they bite:
+
+**#DF runs on its own stack (IST1).** A double fault usually means the kernel
+stack overflowed. If the handler pushed onto that same broken stack it would
+fault again, and a fault while handling a double fault is a triple fault — which
+the CPU answers by resetting the machine with no diagnostic at all. IST1 gives
+`#DF` known-good ground to stand on.
+
+**GDT selector order is fixed by `SYSCALL`/`SYSRET`.** Both derive four
+selectors from one base in the `STAR` MSR at hard-coded offsets, so kernel code
+must be `0x08` and user data `0x18`. Renumbering them to something tidier
+silently breaks ring 3 much later.
+
+Exceptions panic with a full register dump plus `CR0`–`CR4`; page faults also
+decode `CR2` and the error code into a readable cause.
 
 ## Roadmap
 
 - [x] stage 1/2 bootloader, real → protected → long mode
 - [x] freestanding C++ environment, VGA + serial console
-- [ ] GDT and TSS owned by the kernel rather than inherited from stage 2
-- [ ] IDT, exception handlers, PIC remap, PIT, keyboard
+- [x] GDT and TSS owned by the kernel rather than inherited from stage 2
+- [x] IDT, exception handlers with register dumps, PIC remap, PIT, keyboard
 - [ ] physical frame allocator over the E820 map
 - [ ] virtual memory manager; relocate the kernel to the higher half
 - [ ] kernel heap, `kmalloc`/`operator new`

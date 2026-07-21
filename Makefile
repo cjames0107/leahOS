@@ -70,7 +70,7 @@ LDFLAGS := -nostdlib -z noexecstack --build-id=none
 
 # --- sources ----------------------------------------------------------------
 KERNEL_CXX_SRCS := $(shell find kernel -name '*.cpp' | sort)
-KERNEL_ASM_SRCS := kernel/arch/x86_64/entry.asm
+KERNEL_ASM_SRCS := $(shell find kernel -name '*.asm' | sort)
 
 KERNEL_OBJS := $(KERNEL_ASM_SRCS:%.asm=$(BUILD)/%.asm.o) \
                $(KERNEL_CXX_SRCS:%.cpp=$(BUILD)/%.o)
