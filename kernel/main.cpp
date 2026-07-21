@@ -1,3 +1,4 @@
+#include <leah/ata.hpp>
 #include <leah/bootinfo.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
@@ -12,6 +13,7 @@
 #include <leah/pmm.hpp>
 #include <leah/timer.hpp>
 #include <leah/types.hpp>
+#include <leah/string.hpp>
 #include <leah/vmm.hpp>
 
 namespace boot {
@@ -29,6 +31,8 @@ const char* region_type_name(RegionType type)
 }
 
 } // namespace boot
+
+extern "C" u8 __kernel_start[];
 
 namespace {
 
@@ -117,6 +121,78 @@ void self_test_heap()
     kfree(big);
 }
 
+void print_disks()
+{
+    console::set_color(console::Color::White);
+    console::printf("\n  ATA  %llu drives\n", static_cast<u64>(ata::drive_count()));
+    console::set_color(console::Color::LightGray);
+
+    for (usize i = 0; i < ata::drive_count(); ++i) {
+        const ata::Drive& d = ata::drive_at(i);
+        console::printf("    hd%llu  %llu MiB  %s  %s\n",
+                        static_cast<u64>(i),
+                        ata::capacity_bytes(i) / kMiB,
+                        d.lba48 ? "LBA48" : "LBA28",
+                        d.model);
+    }
+}
+
+// The strongest check available right now: the kernel was loaded from LBA 64 by
+// the bootloader, so reading those same sectors back through an entirely
+// different code path must reproduce the image already in memory. It validates
+// the ATA driver and the unreal-mode loader against each other.
+void self_test_disk()
+{
+    if (ata::drive_count() == 0)
+        panic("ata: no drives found, but we booted off one");
+
+    auto* sector = static_cast<u8*>(kmalloc(ata::kSectorSize));
+    if (sector == nullptr)
+        panic("ata: out of memory for a sector buffer");
+
+    if (!ata::read(0, 0, 1, sector))
+        panic("ata: cannot read LBA 0");
+    if (sector[510] != 0x55 || sector[511] != 0xAA)
+        panic("ata: LBA 0 is not the boot sector we wrote");
+    kfree(sector);
+
+    constexpr u32 kSectors = 32;      // 16 KiB of kernel
+    auto* image = static_cast<u8*>(kmalloc(kSectors * ata::kSectorSize));
+    if (image == nullptr)
+        panic("ata: out of memory for the verification buffer");
+
+    if (!ata::read(0, 64, kSectors, image))
+        panic("ata: cannot read the kernel image back");
+    if (memcmp(image, __kernel_start, kSectors * ata::kSectorSize) != 0)
+        panic("ata: kernel read from disk does not match the loaded image");
+
+    kfree(image);
+
+    // Writes get their own check: they are the operation that can quietly
+    // corrupt the disk, and the cache-flush step is easy to get wrong. Use a
+    // scratch LBA well past the kernel's slot in the image.
+    constexpr u64 kScratchLba = 20000;
+    auto* out = static_cast<u8*>(kmalloc(ata::kSectorSize));
+    auto* back = static_cast<u8*>(kmalloc(ata::kSectorSize));
+    if (out == nullptr || back == nullptr)
+        panic("ata: out of memory for the write test");
+
+    for (usize i = 0; i < ata::kSectorSize; ++i)
+        out[i] = static_cast<u8>(i * 7 + 3);
+
+    if (!ata::write(0, kScratchLba, 1, out))
+        panic("ata: write failed");
+
+    memset(back, 0, ata::kSectorSize);
+    if (!ata::read(0, kScratchLba, 1, back))
+        panic("ata: cannot read back what we just wrote");
+    if (memcmp(out, back, ata::kSectorSize) != 0)
+        panic("ata: read-back does not match the data written");
+
+    kfree(back);
+    kfree(out);
+}
+
 void echo_loop()
 {
     console::set_color(console::Color::White);
@@ -134,9 +210,16 @@ void echo_loop()
 
 } // namespace
 
+void run_global_constructors();
+
 extern "C" void kernel_main(const boot::MemoryMap* memory_map)
 {
     console::init();
+
+    // Before anything else that could depend on a global: constructors here
+    // run with no heap, so they must not allocate.
+    run_global_constructors();
+
     print_banner();
 
     // Descriptor tables first: everything below can fault, and a fault before
@@ -174,11 +257,16 @@ extern "C" void kernel_main(const boot::MemoryMap* memory_map)
     pci::enumerate();
     step("PCI bus enumerated");
 
+    ata::init();
+    self_test_disk();
+    step("ATA drives identified, read-back verified against the loaded kernel");
+
     cpu::sti();
     step("interrupts enabled");
 
     print_memory(*memory_map);
     print_pci();
+    print_disks();
 
     echo_loop();
 }

@@ -11,7 +11,7 @@
 ;   0x07E00 - 0x07FFF   free
 ;   0x08000 - 0x0BFFF   stage 2                        (16 KiB)
 ;   0x0C000 - 0x0FFFF   free
-;   0x10000 - 0x1FFFF   kernel staging buffer          (64 KiB)
+;   0x10000 - 0x17FFF   disk bounce buffer             (32 KiB)
 ;   0x20000 - 0x20FFF   E820 memory map
 ;   0x70000 - 0x72FFF   PML4 / PDPT / PD page tables
 ;   0xA0000 - 0xFFFFF   video memory + BIOS ROM        (untouchable)
@@ -25,17 +25,25 @@ STAGE2_SEG          equ 0x0000
 STAGE2_OFF          equ 0x8000
 
 ; --- kernel ----------------------------------------------------------------
-; The kernel is read into a real-mode-addressable buffer and then copied to
-; its final home at 1 MiB once we are in 32-bit protected mode. That caps the
-; kernel at 64 KiB for now; unreal mode will lift the limit when we need it.
+; int 13h can only write through a real-mode segment:offset, so the BIOS can
+; never place data above 1 MiB directly. Each chunk lands in a low bounce
+; buffer and is then copied to its final home with unreal mode's 32-bit
+; addressing, which is what lifts the old 64 KiB kernel ceiling.
 KERNEL_LBA          equ 64
-KERNEL_SECTORS      equ 128                 ; 64 KiB
-KERNEL_BUFFER       equ 0x10000
-KERNEL_BUFFER_SEG   equ 0x1000
+
+; Supplied by the Makefile as -DKERNEL_SECTORS=<actual>, computed from the size
+; of the linked kernel so we never read more of the disk than exists.
+%ifndef KERNEL_SECTORS
+%define KERNEL_SECTORS 128
+%endif
+
+BOUNCE_BUFFER       equ 0x10000
+BOUNCE_SEG          equ 0x1000
 KERNEL_PHYS_BASE    equ 0x100000            ; 1 MiB
 
 ; Largest number of sectors we hand to a single int 13h call. Real BIOSes are
-; only required to support 127, so stay well under it.
+; only required to support 127, so stay well under it. Also sizes the bounce
+; buffer: 64 sectors = 32 KiB, which fits between 0x10000 and the E820 map.
 DISK_CHUNK_SECTORS  equ 64
 
 ; --- E820 memory map -------------------------------------------------------

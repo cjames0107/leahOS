@@ -32,6 +32,19 @@ SECTIONS
         *(.data .data.*)
     }
 
+    /* Constructors for objects with static storage duration. KEEP stops
+     * --gc-sections from discarding them: nothing references these pointers,
+     * they are found by walking the section. Without this the constructors are
+     * emitted and then silently never run. */
+    .init_array : ALIGN(8)
+    {
+        __init_array_start = .;
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+        KEEP(*(.ctors))
+        __init_array_end = .;
+    }
+
     /* NOBITS, so objcopy leaves it out of the flat image entirely - the entry
      * stub is responsible for zeroing it before any C++ runs. */
     .bss : ALIGN(4K)

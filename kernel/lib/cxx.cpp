@@ -6,6 +6,26 @@
 
 #include <leah/types.hpp>
 
+// Placed by the linker script. Nothing references these pointers by name, so
+// the only way constructors ever run is by walking the array ourselves.
+extern "C" void (*__init_array_start[])();
+extern "C" void (*__init_array_end[])();
+
+// Run constructors for objects with static storage duration.
+//
+// Worth knowing what this protects against: when GCC cannot constant-evaluate
+// an initialiser - exceeding the constexpr loop limit is enough - it silently
+// demotes the object to .bss plus a runtime constructor. With no one calling
+// that constructor the object is simply zero forever, and nothing warns. Mark
+// such objects constinit if they must be compile-time initialised.
+//
+// Called before the heap exists, so a constructor here must not allocate.
+void run_global_constructors()
+{
+    for (auto** entry = __init_array_start; entry != __init_array_end; ++entry)
+        (*entry)();
+}
+
 extern "C" {
 
 // Emitted for a call through a pure-virtual slot, which means the object was

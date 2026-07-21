@@ -17,8 +17,8 @@ SERIAL  := $(BUILD)/serial.log
 STAGE2_LBA      := 1
 STAGE2_SECTORS  := 32
 KERNEL_LBA      := 64
-KERNEL_SECTORS  := 128
-IMAGE_MIB       := 16
+KERNEL_MAX_SECTORS := 16384              # 8 MiB of image reserved for the kernel
+IMAGE_MIB       := 32
 
 # --- knobs ------------------------------------------------------------------
 # Override on the command line, e.g. `make run MEM=2G` or
@@ -94,9 +94,14 @@ $(STAGE1_BIN): boot/stage1.asm boot/layout.inc | $(BUILD)
 	 if [ $$size -ne 512 ]; then \
 	   echo "error: stage1 is $$size bytes, must be exactly 512"; exit 1; fi
 
-$(STAGE2_BIN): boot/stage2.asm boot/layout.inc | $(BUILD)
+# stage 2 is built after the kernel because it needs to be told how many
+# sectors to read. Baking the real size in beats guessing a generous constant
+# and reading megabytes of empty disk on every boot.
+$(STAGE2_BIN): boot/stage2.asm boot/layout.inc $(KERNEL_BIN) | $(BUILD)
 	@mkdir -p $(dir $@)
-	$(AS) $(ASFLAGS_BIN) $< -o $@
+	@sectors=$$(( ($$(stat -f%z $(KERNEL_BIN)) + 511) / 512 )); \
+	 $(AS) $(ASFLAGS_BIN) -DKERNEL_SECTORS=$$sectors $< -o $@ && \
+	 echo "$(AS) $(ASFLAGS_BIN) -DKERNEL_SECTORS=$$sectors boot/stage2.asm -o $@"
 	@size=$$(stat -f%z $@); limit=$$(( $(STAGE2_SECTORS) * 512 )); \
 	 if [ $$size -gt $$limit ]; then \
 	   echo "error: stage2 is $$size bytes, exceeds $$limit"; exit 1; fi
@@ -113,12 +118,15 @@ $(BUILD)/%.o: %.cpp
 $(KERNEL_ELF): $(KERNEL_OBJS) kernel/linker.ld
 	$(LD) $(LDFLAGS) -T kernel/linker.ld -o $@ $(KERNEL_OBJS)
 
+# The kernel is no longer bounded by a real-mode buffer; unreal mode copies it
+# to 1 MiB in chunks. The only remaining limit is the space reserved for it in
+# the disk image, which is a sanity check rather than an architectural wall.
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
-	@size=$$(stat -f%z $@); limit=$$(( $(KERNEL_SECTORS) * 512 )); \
-	 echo "kernel: $$size / $$limit bytes"; \
+	@size=$$(stat -f%z $@); limit=$$(( $(KERNEL_MAX_SECTORS) * 512 )); \
+	 echo "kernel: $$size bytes ($$(( ($$size + 511) / 512 )) sectors, limit $$limit)"; \
 	 if [ $$size -gt $$limit ]; then \
-	   echo "error: kernel exceeds the staging buffer - raise KERNEL_SECTORS"; \
+	   echo "error: kernel exceeds its slot in the image - raise KERNEL_MAX_SECTORS"; \
 	   exit 1; fi
 
 # --- disk image -------------------------------------------------------------

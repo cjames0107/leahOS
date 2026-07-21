@@ -57,11 +57,11 @@ BIOS  ──►  stage1        boot/stage1.asm    512 B @ 0x7C00, 16-bit real
              ▼
            stage2        boot/stage2.asm    16 KiB @ 0x8000, 16-bit real
              │  port 0x92        open the A20 gate
+             │  unreal mode      FS gets a 4 GiB limit, real mode kept
              │  int 15h E820     capture the memory map ──► 0x20000
-             │  int 13h AH=42h   read the kernel ──► 0x10000
+             │  int 13h AH=42h   read kernel in chunks ──► FS:0x100000
              │  lgdt, CR0.PE=1   ──► 32-bit protected mode
              │
-             │  rep movsd        relocate kernel 0x10000 ──► 0x100000
              │  PML4/PDPT/PD     identity map 1 GiB with 2 MiB pages
              │  CR4.PAE, EFER.LME, CR0.PG
              ▼                   ──► 64-bit long mode
@@ -80,11 +80,25 @@ stage 2, which has 16 KiB to work with.
 **LBA only.** `int 13h` extensions have been universal since the late 90s.
 A BIOS old enough to require CHS addressing cannot run a 64-bit kernel.
 
-**The kernel is staged at 0x10000, not loaded directly to 1 MiB.** `int 13h`
-writes through a real-mode `segment:offset` pair, so it cannot name an address
-above 1 MiB. The kernel lands in low memory and gets relocated by `rep movsd`
-once 32-bit addressing is available. This caps the kernel at 64 KiB; unreal
-mode will lift that when we outgrow it.
+**Unreal mode carries the kernel above 1 MiB.** `int 13h` writes through a
+real-mode `segment:offset`, so the BIOS can never place data above 1 MiB. Stage
+2 enters protected mode briefly, loads **FS** from a descriptor with a 4 GiB
+limit, and returns to real mode without touching FS again. A segment's base and
+limit live in a hidden cache that is only reloaded when the selector is
+written — so the 4 GiB limit survives, and real-mode code can address all of
+memory through FS while the BIOS still works normally.
+
+FS specifically, not DS or ES: those get reloaded constantly for BIOS calls,
+and any write to them would drop the big limit on the floor.
+
+Each chunk is read into a low bounce buffer and copied up through FS. This is
+what lifted the old 64 KiB kernel ceiling; the limit is now 8 MiB, and that is
+just the space reserved in the disk image.
+
+**Stage 2 is told the kernel's exact size at build time.** The Makefile
+computes the sector count from the linked kernel and passes it as
+`-DKERNEL_SECTORS`, so boot reads exactly as much disk as there is kernel
+rather than a generous constant.
 
 **Identity-mapped, not higher-half.** Every physical address the bootloader
 handed out stays valid across the `CR0.PG` write, which makes the long-mode
@@ -106,7 +120,7 @@ Physical addresses during boot. Nothing here may overlap; see
 | `0x00000`–`0x004FF` | BIOS IVT + data area (untouchable) |
 | `0x07C00`–`0x07DFF` | stage 1 |
 | `0x08000`–`0x0BFFF` | stage 2 |
-| `0x10000`–`0x1FFFF` | kernel staging buffer (64 KiB) |
+| `0x10000`–`0x17FFF` | disk bounce buffer (32 KiB) |
 | `0x20000`–`0x20FFF` | E820 memory map |
 | `0x70000`–`0x72FFF` | PML4 / PDPT / PD |
 | `0xA0000`–`0xFFFFF` | video memory + BIOS ROM (untouchable) |
@@ -128,9 +142,9 @@ tools/          run-headless.sh
 ## Status
 
 Boots to long mode, owns its descriptor tables, handles interrupts, manages
-physical and virtual memory, and enumerates the PCI bus. Faults produce a
-register dump instead of a silent reset. No storage or filesystem yet, so there
-is still nothing to load.
+physical and virtual memory, enumerates PCI, and reads and writes ATA disks.
+Faults produce a register dump instead of a silent reset. No filesystem yet, so
+the disk is still just sectors.
 
 ## Memory management
 
@@ -181,6 +195,23 @@ silently breaks ring 3 much later.
 Exceptions panic with a full register dump plus `CR0`–`CR4`; page faults also
 decode `CR2` and the error code into a readable cause.
 
+## Storage
+
+`ata.cpp` drives IDE disks over programmed I/O — every byte moves through the
+CPU. AHCI with DMA will replace it, but PIO needs no memory mapping, no
+interrupt plumbing and no controller-specific setup, which makes it the right
+thing to read a first filesystem with.
+
+Interrupts are disabled at the drive (`nIEN`) and transfers are polled;
+delivering IRQ 14/15 to a vector with no handler would be worse than spinning.
+LBA48 is used automatically when an access reaches past the 28-bit limit.
+
+The boot-time check reads the kernel back from LBA 64 and compares it against
+the image already in memory. Since the bootloader put it there by a completely
+different route, the two agreeing validates the driver and the unreal-mode
+loader against each other. Writes are then checked separately against a scratch
+sector, because writing is the operation that can quietly corrupt a disk.
+
 ## Roadmap
 
 - [x] stage 1/2 bootloader, real → protected → long mode
@@ -192,11 +223,12 @@ decode `CR2` and the error code into a readable cause.
 - [x] kernel heap, `kmalloc`/`operator new`
 - [x] PCI enumeration
 - [x] PS/2 mouse
-- [ ] unreal mode in stage 2 — the 64 KiB kernel ceiling blocks everything below
+- [x] unreal mode in stage 2 — kernel ceiling raised from 64 KiB to 8 MiB
+- [x] ATA/IDE block driver, PIO, LBA28 and LBA48
 - [ ] VBE mode set in stage 2, linear framebuffer, bitmap font console
 - [ ] APIC + HPET, retiring the PIC and PIT
-- [ ] AHCI and ATA block drivers
 - [ ] VFS layer, then FAT32; exFAT and ext2/3/4 after
+- [ ] AHCI with DMA, replacing PIO
 - [ ] relocate the kernel to the higher half
 - [ ] ELF loading, ring 3, `syscall`/`sysret`
 - [ ] scheduler and processes; `fork`/`execve`/`wait`

@@ -41,6 +41,7 @@ stage2_start:
     call print
 
     call enable_a20
+    call enter_unreal
     call detect_memory
     call load_kernel
 
@@ -197,35 +198,121 @@ detect_memory:
     jmp fail
 
 ; ----------------------------------------------------------------------------
-; load_kernel - pull the kernel image into the staging buffer
+; enter_unreal - keep real mode's BIOS, borrow protected mode's reach
 ;
-; int 13h writes through a real-mode segment:offset, so the highest address we
-; can name is just under 1 MiB. The kernel lands at 0x10000 for now and gets
-; relocated to its real home once we have 32-bit addressing.
+; A segment register's base and limit are cached in a hidden register that is
+; only reloaded when the selector is written. So: enter protected mode, load FS
+; from a descriptor with a 4 GiB limit, and leave again without touching FS.
+; The cached limit survives, and real-mode code can now address all of memory
+; through FS while INT 13h and the rest of the BIOS still work normally.
+;
+; FS rather than DS or ES on purpose - those get reloaded constantly for BIOS
+; calls, and any write to them would drop the big limit on the floor.
+; ----------------------------------------------------------------------------
+enter_unreal:
+    cli
+    push eax
+    push bx
+
+    lgdt [gdtr]
+
+    mov eax, cr0
+    or  al, 1                           ; CR0.PE - protected mode
+    mov cr0, eax
+    jmp $+2                             ; flush the prefetch queue
+
+    mov bx, SEL_DATA32
+    mov fs, bx                          ; FS cache: base 0, limit 4 GiB
+
+    and al, 0xFE                        ; back to real mode
+    mov cr0, eax
+    jmp $+2
+
+    pop bx
+    pop eax
+    sti
+    ret
+
+; ----------------------------------------------------------------------------
+; load_kernel - read the kernel to 1 MiB, one bounce-buffer chunk at a time
+;
+; The BIOS can only write below 1 MiB, so each chunk is read into the bounce
+; buffer and then copied up through FS. The kernel's size in sectors comes from
+; the build, so this reads exactly as much of the disk as there is kernel.
 ; ----------------------------------------------------------------------------
 load_kernel:
     mov dword [dap_lba_lo], KERNEL_LBA
     mov dword [dap_lba_hi], 0
-    mov word  [dap_off], 0
-    mov word  [dap_seg], KERNEL_BUFFER_SEG
+    mov dword [dest_linear], KERNEL_PHYS_BASE
+    mov word  [sectors_left], KERNEL_SECTORS
 
-    mov cx, KERNEL_SECTORS / DISK_CHUNK_SECTORS
-.chunk:
-    mov word [dap_count], DISK_CHUNK_SECTORS
+.next_chunk:
+    mov ax, [sectors_left]
+    test ax, ax
+    jz  .done
+
+    cmp ax, DISK_CHUNK_SECTORS          ; last chunk is usually short
+    jbe .have_count
+    mov ax, DISK_CHUNK_SECTORS
+.have_count:
+    mov [chunk_sectors], ax
+
+    mov [dap_count], ax
+    mov word [dap_off], 0
+    mov word [dap_seg], BOUNCE_SEG
+
     mov si, dap
     mov ah, 0x42
     mov dl, [drive_number]
     int 0x13
     jc  .error
 
-    add dword [dap_lba_lo], DISK_CHUNK_SECTORS
-    add word  [dap_seg], (DISK_CHUNK_SECTORS * 512) / 16
-    loop .chunk
+    call copy_chunk_to_high
+
+    movzx eax, word [chunk_sectors]
+    add [dap_lba_lo], eax
+    sub [sectors_left], ax
+    jmp .next_chunk
+
+.done:
     ret
 
 .error:
     mov si, msg_disk_err
     jmp fail
+
+; copy_chunk_to_high - bounce buffer -> [dest_linear], chunk_sectors * 512 bytes
+;
+; Moves dwords through FS, whose 4 GiB limit is what makes a destination above
+; 1 MiB legal from real mode at all.
+copy_chunk_to_high:
+    push ds
+    push si
+    push ecx
+    push eax
+
+    mov ax, BOUNCE_SEG
+    mov ds, ax
+    xor si, si
+
+    movzx ecx, word [cs:chunk_sectors]
+    shl ecx, 7                          ; sectors * 512 / 4 = dwords
+
+    mov edi, [cs:dest_linear]
+.loop:
+    lodsd                               ; eax = [ds:si], si += 4
+    mov [fs:edi], eax
+    add edi, 4
+    dec ecx
+    jnz .loop
+
+    mov [cs:dest_linear], edi
+
+    pop eax
+    pop ecx
+    pop si
+    pop ds
+    ret
 
 ; ----------------------------------------------------------------------------
 ; print / fail - 16-bit only
@@ -268,13 +355,8 @@ pm_entry:
 
     MARK 0, 'P'
 
-    ; --- relocate the kernel to 1 MiB ---------------------------------------
-    mov esi, KERNEL_BUFFER
-    mov edi, KERNEL_PHYS_BASE
-    mov ecx, (KERNEL_SECTORS * 512) / 4
-    rep movsd
-
-    MARK 1, 'M'
+    ; The kernel is already at 1 MiB - unreal mode put it there directly, so
+    ; there is nothing left to relocate.
 
     ; --- build the initial page tables --------------------------------------
     ; Identity map the first 1 GiB with 2 MiB pages. Crude, but it keeps every
@@ -371,7 +453,12 @@ dap_seg:    dw 0
 dap_lba_lo: dd 0
 dap_lba_hi: dd 0
 
-drive_number: db 0
+drive_number:  db 0
+
+ALIGN 4
+dest_linear:   dd 0                     ; next 32-bit destination address
+sectors_left:  dw 0
+chunk_sectors: dw 0
 
 msg_stage2:   db "leahOS: stage2", 13, 10, 0
 msg_pmode:    db "leahOS: entering long mode", 13, 10, 0
