@@ -369,6 +369,13 @@ pm_entry:
     mov dword [PML4_BASE], PDPT_BASE | PAGE_PRESENT | PAGE_WRITE
     mov dword [PDPT_BASE], PD_BASE   | PAGE_PRESENT | PAGE_WRITE
 
+    ; The same page directory is mapped a second time high up, so the kernel
+    ; is reachable at both its physical and its linked address. The identity
+    ; window is what keeps the jump into long mode - and every address the
+    ; bootloader already handed out - valid across the switch.
+    mov dword [PML4_BASE + PML4_HIGH_INDEX * 8], PDPT_HIGH_BASE | PAGE_PRESENT | PAGE_WRITE
+    mov dword [PDPT_HIGH_BASE + PDPT_HIGH_INDEX * 8], PD_BASE | PAGE_PRESENT | PAGE_WRITE
+
     mov edi, PD_BASE
     mov eax, PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
     mov ecx, 512
@@ -417,8 +424,10 @@ lm_entry:
     MARK 3, 'L'
 
     ; System V AMD64: first argument in RDI. Hand the kernel its memory map.
+    ; The jump goes to the linked higher-half address, not the physical one,
+    ; so every symbol the kernel resolves from here on is already correct.
     mov rdi, E820_COUNT
-    mov rax, KERNEL_PHYS_BASE
+    mov rax, KERNEL_VIRT_BASE
     jmp rax
 
 ; ============================================================================

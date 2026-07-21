@@ -58,9 +58,17 @@ E820_ENTRY_SIZE     equ 24
 
 ; --- page tables -----------------------------------------------------------
 PML4_BASE           equ 0x70000
-PDPT_BASE           equ 0x71000
-PD_BASE             equ 0x72000
-PAGE_TABLES_END     equ 0x73000
+PDPT_BASE           equ 0x71000             ; identity, PML4[0]
+PD_BASE             equ 0x72000             ; shared by both windows
+PDPT_HIGH_BASE      equ 0x73000             ; higher half, PML4[511]
+PAGE_TABLES_END     equ 0x74000
+
+; The kernel is linked for the top 2 GiB. Virtual 0xFFFFFFFF80000000 is
+; physical 0, so the image loaded at 1 MiB appears here.
+;   PML4 index 511, PDPT index 510, PD index 0
+KERNEL_VIRT_BASE    equ 0xFFFFFFFF80100000
+PML4_HIGH_INDEX     equ 511
+PDPT_HIGH_INDEX     equ 510
 
 PAGE_PRESENT        equ 1 << 0
 PAGE_WRITE          equ 1 << 1

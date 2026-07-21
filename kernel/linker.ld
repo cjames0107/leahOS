@@ -10,24 +10,33 @@
 
 ENTRY(_start)
 
+/* The kernel runs at KERNEL_VMA but is loaded at KERNEL_LMA. Every section
+ * carries an AT() so its load address is physical while its symbols resolve
+ * to the higher half - objcopy -O binary lays the image out by load address,
+ * which is exactly what the bootloader copies to 1 MiB.
+ *
+ * Must agree with boot/layout.inc and kernel/include/leah/memory.hpp. */
+KERNEL_VMA = 0xFFFFFFFF80100000;
+KERNEL_LMA = 0x100000;
+
 SECTIONS
 {
-    . = 0x100000;
+    . = KERNEL_VMA;
 
     __kernel_start = .;
 
-    .text : ALIGN(4K)
+    .text : AT(ADDR(.text) - KERNEL_VMA + KERNEL_LMA) ALIGN(4K)
     {
         *(.text.entry)
         *(.text .text.*)
     }
 
-    .rodata : ALIGN(4K)
+    .rodata : AT(ADDR(.rodata) - KERNEL_VMA + KERNEL_LMA) ALIGN(4K)
     {
         *(.rodata .rodata.*)
     }
 
-    .data : ALIGN(4K)
+    .data : AT(ADDR(.data) - KERNEL_VMA + KERNEL_LMA) ALIGN(4K)
     {
         *(.data .data.*)
     }
@@ -36,7 +45,7 @@ SECTIONS
      * --gc-sections from discarding them: nothing references these pointers,
      * they are found by walking the section. Without this the constructors are
      * emitted and then silently never run. */
-    .init_array : ALIGN(8)
+    .init_array : AT(ADDR(.init_array) - KERNEL_VMA + KERNEL_LMA) ALIGN(8)
     {
         __init_array_start = .;
         KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
@@ -47,7 +56,7 @@ SECTIONS
 
     /* NOBITS, so objcopy leaves it out of the flat image entirely - the entry
      * stub is responsible for zeroing it before any C++ runs. */
-    .bss : ALIGN(4K)
+    .bss : AT(ADDR(.bss) - KERNEL_VMA + KERNEL_LMA) ALIGN(4K)
     {
         __bss_start = .;
         *(COMMON)

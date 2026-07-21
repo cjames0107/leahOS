@@ -1,3 +1,4 @@
+#include <leah/memory.hpp>
 #include <leah/panic.hpp>
 #include <leah/pmm.hpp>
 #include <leah/string.hpp>
@@ -100,8 +101,15 @@ void init(const boot::MemoryMap& map)
     // inside the big usable region below 4 GiB on every machine we care about,
     // and it needs no allocator to place - which is the point, since this is
     // the allocator.
+    // The linker symbols are higher-half addresses now, so everything the
+    // allocator reasons about has to be converted back to physical first.
+    const u64 kernel_phys_start =
+        memory::kernel_virt_to_phys(reinterpret_cast<u64>(__kernel_start));
+    const u64 kernel_phys_end =
+        memory::kernel_virt_to_phys(reinterpret_cast<u64>(__kernel_end));
+
     const u64 bitmap_bytes = g_bitmap_words * sizeof(u64);
-    const u64 bitmap_base  = page_align_up(reinterpret_cast<u64>(__kernel_end));
+    const u64 bitmap_base  = page_align_up(kernel_phys_end);
 
     bool bitmap_fits = false;
     for (u32 i = 0; i < map.count; ++i) {
@@ -132,8 +140,7 @@ void init(const boot::MemoryMap& map)
     // the IVT, the BIOS data area, both bootloader stages, the E820 map and
     // stage 2's page tables in one stroke - none of it is worth reclaiming.
     reserve(0, 0x100000);
-    reserve(reinterpret_cast<u64>(__kernel_start),
-            reinterpret_cast<u64>(__kernel_end) - reinterpret_cast<u64>(__kernel_start));
+    reserve(kernel_phys_start, kernel_phys_end - kernel_phys_start);
     reserve(bitmap_base, bitmap_bytes);
 
     g_search_hint = 0;

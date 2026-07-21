@@ -1,4 +1,5 @@
 #include <leah/cpu.hpp>
+#include <leah/memory.hpp>
 #include <leah/panic.hpp>
 #include <leah/pmm.hpp>
 #include <leah/string.hpp>
@@ -123,6 +124,21 @@ void init()
         if (pd == nullptr)
             break;      // out of memory for tables; the low 4 GiB still works
         pd[index_of(addr, 2)] = addr | Present | Write | Huge;
+    }
+
+    // The kernel is executing from the higher half right now, so the new
+    // tables must describe it before CR3 is loaded - otherwise the very next
+    // instruction fetch faults with no handler mapped to catch it.
+    for (u64 offset = 0; offset < memory::kKernelWindowSize; offset += kHugePageSize) {
+        const vaddr_t virt = memory::kKernelBase + offset;
+        u64* pdpt = next_level(pml4, index_of(virt, 4), true);
+        if (pdpt == nullptr)
+            panic("vmm: out of memory mapping the kernel window");
+        u64* pd = next_level(pdpt, index_of(virt, 3), true);
+        if (pd == nullptr)
+            panic("vmm: out of memory mapping the kernel window");
+
+        pd[index_of(virt, 2)] = offset | Present | Write | Huge;
     }
 
     asm volatile("mov %0, %%cr3" : : "r"(g_pml4_phys) : "memory");

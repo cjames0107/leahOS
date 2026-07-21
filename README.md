@@ -100,10 +100,20 @@ computes the sector count from the linked kernel and passes it as
 `-DKERNEL_SECTORS`, so boot reads exactly as much disk as there is kernel
 rather than a generous constant.
 
-**Identity-mapped, not higher-half.** Every physical address the bootloader
-handed out stays valid across the `CR0.PG` write, which makes the long-mode
-transition boring. Moving the kernel to `0xFFFFFFFF80000000` is a job for
-after the VMM exists.
+**Higher half, with the identity map kept.** The kernel is linked for
+`0xFFFFFFFF80100000` and loaded at 1 MiB; virtual `0xFFFFFFFF80000000` is
+physical 0, so translation is a subtraction rather than a page-table walk.
+
+Stage 2 maps the *same* page directory twice — once at `PML4[0]` and once at
+`PML4[511]/PDPT[510]` — so the kernel is reachable at both addresses. Keeping
+the identity window is what makes the transition safe: every address the
+bootloader already handed out stays valid across the `CR3` load, and the VMM
+can still reach page tables by their physical address without a separate
+direct-map offset.
+
+The linker script gives every section an `AT()` so its load address is
+physical while its symbols resolve high. `objcopy -O binary` lays the image
+out by load address, which is exactly what the bootloader copies to 1 MiB.
 
 **Flat binary, not ELF.** The kernel is `objcopy -O binary` with `.text.entry`
 forced first by the linker script, so "load it and jump to offset 0" is the
@@ -122,7 +132,7 @@ Physical addresses during boot. Nothing here may overlap; see
 | `0x08000`–`0x0BFFF` | stage 2 |
 | `0x10000`–`0x17FFF` | disk bounce buffer (32 KiB) |
 | `0x20000`–`0x20FFF` | E820 memory map |
-| `0x70000`–`0x72FFF` | PML4 / PDPT / PD |
+| `0x70000`–`0x73FFF` | PML4 / PDPT / PD / high PDPT |
 | `0xA0000`–`0xFFFFF` | video memory + BIOS ROM (untouchable) |
 | `0x100000`+ | kernel |
 
@@ -286,7 +296,7 @@ The partition table is written by `mkfs_fat32.py` rather than declared in
 - [x] VFS layer and FAT32, read and write, including long filenames
 - [ ] exFAT and ext2/3/4
 - [ ] AHCI with DMA, replacing PIO
-- [ ] relocate the kernel to the higher half
+- [x] relocate the kernel to the higher half
 - [ ] ELF loading, ring 3, `syscall`/`sysret`
 - [ ] scheduler and processes; `fork`/`execve`/`wait`
 - [ ] USB: xHCI, then the HID and mass-storage class drivers

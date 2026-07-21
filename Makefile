@@ -52,6 +52,7 @@ endif
 # -mno-red-zone       interrupts would silently clobber the 128-byte red zone
 # -mno-mmx/sse/sse2   we have not enabled the FPU or SSE state in CR0/CR4 yet
 # -fno-pic            flat binary at a fixed load address
+# -mcmodel=kernel     code lives in the top 2 GiB, so displacements fit in 32 bits
 # -fno-exceptions     unwinding needs a runtime we do not have
 # -fno-rtti           typeinfo needs the same
 #
@@ -60,6 +61,7 @@ CXXFLAGS := \
 	-ffreestanding -fno-builtin -nostdlib -nostdinc++ \
 	-fno-exceptions -fno-rtti -fno-stack-protector -fno-pic -fno-pie \
 	-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-80387 \
+	-mcmodel=kernel \
 	-Wall -Wextra -Wno-unused-parameter \
 	-O2 -g \
 	-Ikernel/include

@@ -8,6 +8,7 @@
 #include <leah/heap.hpp>
 #include <leah/interrupts.hpp>
 #include <leah/keyboard.hpp>
+#include <leah/memory.hpp>
 #include <leah/mouse.hpp>
 #include <leah/panic.hpp>
 #include <leah/pci.hpp>
@@ -36,6 +37,7 @@ const char* region_type_name(RegionType type)
 } // namespace boot
 
 extern "C" u8 __kernel_start[];
+extern "C" u8 __kernel_end[];
 
 namespace {
 
@@ -67,6 +69,12 @@ void print_memory(const boot::MemoryMap& map)
     console::set_color(console::Color::LightGray);
     console::printf("    %llu MiB free, %llu MiB reserved, across %u E820 regions\n",
                     pmm::free_bytes() / kMiB, pmm::used_bytes() / kMiB, map.count);
+    console::printf("    kernel at %p virtual, %p physical, %llu KiB\n",
+                    static_cast<void*>(__kernel_start),
+                    reinterpret_cast<void*>(memory::kernel_virt_to_phys(
+                        reinterpret_cast<u64>(__kernel_start))),
+                    (reinterpret_cast<u64>(__kernel_end) -
+                     reinterpret_cast<u64>(__kernel_start)) / 1024);
     console::printf("    page tables at %p, heap %llu KiB\n",
                     reinterpret_cast<void*>(vmm::kernel_page_table()),
                     static_cast<u64>(heap::heap_size()) / 1024);
