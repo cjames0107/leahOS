@@ -18,25 +18,25 @@ FAT32_LBA=20480
 
 # Start from a pristine image so the write tests do not trip over their own
 # leftovers from a previous run.
-rm -f build/leahos.img
+rm -f build/dist/leahos.img
 make --no-print-directory >/dev/null
 
 qemu-system-x86_64 \
-    -drive format=raw,file=build/leahos.img,if=ide \
-    -m 512M -display none -serial file:build/serial.log \
+    -drive format=raw,file=build/dist/leahos.img,if=ide \
+    -m 512M -display none -serial file:build/dist/serial.log \
     -no-reboot -no-shutdown &
 QEMU_PID=$!
 perl -e "select(undef, undef, undef, $SECONDS_TO_RUN)"
 kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 
-if grep -q "PANIC" build/serial.log; then
+if grep -q "PANIC" build/dist/serial.log; then
     echo "FAIL: kernel panicked"
-    grep -A1 "PANIC" build/serial.log | head -2
+    grep -A1 "PANIC" build/dist/serial.log | head -2
     exit 1
 fi
 
-dd if=build/leahos.img of=build/fat-check.img bs=512 skip="$FAT32_LBA" status=none
+dd if=build/dist/leahos.img of=build/dist/fat-check.img bs=512 skip="$FAT32_LBA" status=none
 
 if ! command -v fsck_msdos >/dev/null 2>&1; then
     echo "fsck_msdos not found; skipping external check"
@@ -44,12 +44,12 @@ if ! command -v fsck_msdos >/dev/null 2>&1; then
 fi
 
 echo "----- fsck_msdos on the volume after kernel writes -----"
-fsck_msdos -n build/fat-check.img | tee build/fsck.log || true
+fsck_msdos -n build/dist/fat-check.img | tee build/dist/fsck.log || true
 
 # Match only real problem markers. "Checking for Orphan Clusters" is a phase
 # header, not a finding, so a bare "orphan" match would be a false positive;
 # an actual problem shows a "Fix?" prompt or a specific complaint.
-if grep -qiE "Fix\?|not correct|truncat|invalid|orphaned|mark.*free|difference" build/fsck.log; then
+if grep -qiE "Fix\?|not correct|truncat|invalid|orphaned|mark.*free|difference" build/dist/fsck.log; then
     echo "FAIL: filesystem is not clean after kernel writes"
     exit 1
 fi

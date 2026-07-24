@@ -10,8 +10,15 @@ GDB     := x86_64-elf-gdb
 QEMU    := qemu-system-x86_64
 
 BUILD   := build
-IMG     := $(BUILD)/leahos.img
-SERIAL  := $(BUILD)/serial.log
+# Everything a run needs, collected in one folder: the bootable disk image, the
+# kernel with symbols for gdb, and the logs a run produces. Intermediate object
+# files stay under build/ proper; dist/ is only the things you would hand to
+# QEMU or a debugger.
+DIST    := $(BUILD)/dist
+IMG     := $(DIST)/leahos.img
+DIST_ELF := $(DIST)/leahos.elf
+SERIAL  := $(DIST)/serial.log
+QEMU_LOG := $(DIST)/qemu.log
 
 # Must agree with boot/layout.inc.
 STAGE2_LBA      := 1
@@ -142,16 +149,21 @@ $(USER_TEST): user/test.asm user/test.ld | $(BUILD)
 	$(LD) -nostdlib -T user/test.ld -o $@ $(BUILD)/test.o
 
 # --- disk image -------------------------------------------------------------
-$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(USER_TEST) | $(BUILD)
+$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_TEST) | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=$(IMAGE_MIB) status=none
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 seek=0               conv=notrunc status=none
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=$(STAGE2_LBA)   conv=notrunc status=none
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_LBA)   conv=notrunc status=none
 	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA) --add BIN/TEST.ELF=$(USER_TEST)
+	@cp $(KERNEL_ELF) $(DIST_ELF)
 	@echo "image:  $@"
+	@echo "symbols: $(DIST_ELF)"
 
 $(BUILD):
 	@mkdir -p $(BUILD)
+
+$(DIST):
+	@mkdir -p $(DIST)
 
 # --- running ----------------------------------------------------------------
 #
@@ -172,12 +184,12 @@ headless: $(IMG)
 # Halts before the first instruction and waits for `make gdb` on :1234.
 # int,cpu_reset logging is how you find out which vector triple-faulted.
 debug: $(IMG)
-	$(QEMU) $(QEMUFLAGS) -serial stdio -S -s -d int,cpu_reset -D $(BUILD)/qemu.log
+	$(QEMU) $(QEMUFLAGS) -serial stdio -S -s -d int,cpu_reset -D $(QEMU_LOG)
 
 gdb:
 	@$(GDB) -ex 'set architecture i386:x86-64' \
 	        -ex 'target remote :1234' \
-	        -ex 'symbol-file $(KERNEL_ELF)'
+	        -ex 'symbol-file $(DIST_ELF)'
 
 toolchain:
 	@for t in $(BUILD_TOOLS) $(GDB) $(QEMU); do \
@@ -200,9 +212,14 @@ help:
 	@echo '  make toolchain    report which tools are installed'
 	@echo '  make clean'
 	@echo
+	@echo 'Final artifacts land in $(DIST)/:'
+	@echo '  leahos.img   bootable disk (MBR + kernel + FAT32 partition)'
+	@echo '  leahos.elf   kernel with symbols, for make gdb'
+	@echo '  serial.log   COM1 capture from the last run'
+	@echo
 	@echo 'Knobs:  MEM=$(MEM)  CPUS=$(CPUS)  TIMEOUT=$(TIMEOUT)  QEMU_EXTRA='
 	@echo '  e.g.  make run MEM=2G'
 	@echo '        make headless TIMEOUT=15'
-	@echo '        make run QEMU_EXTRA="-d int -D build/qemu.log"'
+	@echo '        make run QEMU_EXTRA="-d int -D $(QEMU_LOG)"'
 
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
