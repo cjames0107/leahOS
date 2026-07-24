@@ -146,6 +146,7 @@ kernel/
   drivers/      ata.cpp, blockdev.cpp
   fs/           vfs.cpp, fat32.cpp
   mm/           pmm.cpp, vmm.cpp, heap.cpp
+  sched/        scheduler.cpp
   include/leah/ public headers
   lib/          string.cpp, cxx.cpp           freestanding runtime
   main.cpp      kernel_main
@@ -157,8 +158,10 @@ tools/          run-headless.sh, mkfs_fat32.py
 
 Boots to long mode, owns its descriptor tables, handles interrupts, manages
 physical and virtual memory, enumerates PCI, reads and writes ATA disks, and
-mounts a FAT32 filesystem it reads and writes. Faults produce a register dump
-instead of a silent reset. No userland, so nothing runs but the kernel.
+mounts a FAT32 filesystem it reads and writes. It loads ELF programs and runs
+them in ring 3 over a `SYSCALL` ABI, and time-slices kernel threads with a
+preemptive scheduler. Faults produce a register dump instead of a silent reset.
+Processes with their own address spaces — and `fork`/`execve` — are next.
 
 ## Memory management
 
@@ -334,6 +337,34 @@ all is the rest of the proof. That it is genuinely unprivileged was confirmed
 by temporarily giving it a `cli`, which faults with `#GP` at CPL 3 where it
 would silently succeed at CPL 0.
 
+## Scheduling
+
+A round-robin preemptive scheduler over kernel threads, all sharing the kernel
+address space for now. `context_switch` (context.asm) saves the SysV
+callee-saved registers on the outgoing thread's stack, swaps `RSP`, and pops the
+incoming thread's - so a thread's entire suspended state lives on its own stack.
+A brand-new thread gets a hand-fabricated stack whose `RET` lands in a
+trampoline.
+
+Preemption is a timer tick charging the running thread's quantum. The switch
+itself is deferred out of the timer handler to a point *after* the PIC has been
+acknowledged - switching before the EOI would leave the PIC holding the line and
+starve every other thread. Cooperative `yield()` uses the same machinery from
+normal context.
+
+The bug that cost the most to find here was not in the scheduler at all. The
+ring-3 `exit` syscall returns to the kernel through a longjmp, and `SYSCALL`
+masks `IF` via `FMASK`; nothing on that return path put it back. So every test
+after the userspace one ran with interrupts disabled, the timer never fired, and
+preemption looked broken when the real fault was three files away. `enter_user_mode`
+now saves the caller's `RFLAGS` and the exit path restores it.
+
+The verification does not trust wall-clock timing (TCG advances guest time
+slowly under a full load of spinning threads). Instead, workers spin in tight
+loops that never yield, and the test watches the interleave trace: a clean
+`012012...` with every worker advancing is only possible if the timer is moving
+the CPU between them.
+
 ## Display
 
 Stage 2 walks the VBE mode list and picks the largest mode that is no bigger
@@ -386,6 +417,7 @@ a symptom.
 - [x] relocate the kernel to the higher half
 - [x] ELF64 loading from the filesystem
 - [x] ring 3, `syscall`/`sysret`, a first system-call ABI
-- [ ] scheduler and processes; `fork`/`execve`/`wait`
+- [x] preemptive scheduler, kernel threads, round-robin time-slicing
+- [ ] processes with separate address spaces; `fork`/`execve`/`wait`
 - [ ] USB: xHCI, then the HID and mass-storage class drivers
 - [ ] libc and a userland shell

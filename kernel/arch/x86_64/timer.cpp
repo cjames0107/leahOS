@@ -1,6 +1,7 @@
 #include <leah/interrupts.hpp>
 #include <leah/io.hpp>
 #include <leah/pic.hpp>
+#include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
 
 namespace timer {
@@ -24,6 +25,10 @@ void on_tick(interrupts::Frame&)
     // Spelled out rather than ++: a compound operation on a volatile is
     // deprecated because it hides that this is a separate load and store.
     g_ticks = g_ticks + 1;
+
+    // Charge the running thread's time slice. The switch itself is deferred to
+    // on_irq_return, after the PIC is acknowledged.
+    scheduler::on_tick();
 }
 
 } // namespace

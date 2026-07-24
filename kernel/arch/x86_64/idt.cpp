@@ -4,6 +4,7 @@
 #include <leah/panic.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
+#include <leah/scheduler.hpp>
 #include <leah/string.hpp>
 
 // Provided by isr.asm: 256 entry points, one per vector.
@@ -137,6 +138,11 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
             g_irq_handlers[irq](*frame);
 
         pic::end_of_interrupt(irq);
+
+        // Only now, with the interrupt acknowledged, is it safe to let the
+        // scheduler switch threads: switching before the EOI would leave the
+        // PIC holding this line and starve every other thread of timer ticks.
+        scheduler::on_irq_return();
         return;
     }
 

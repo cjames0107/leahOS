@@ -45,6 +45,14 @@ enter_user_mode:
     mov [return_r14], r14
     mov [return_r15], r15
 
+    ; Save the caller's RFLAGS - crucially IF. The program exits through the
+    ; SYSCALL path, and SYSCALL masks IF via FMASK; exit_to_kernel returns from
+    ; here without ever passing back through an IRETQ or SYSRET that would put
+    ; it back. Restoring it here is what keeps interrupts enabled for whatever
+    ; the kernel does after running the program.
+    pushfq
+    pop qword [return_rflags]
+
     ; Ring 3 runs with the user data selector in every segment register. The
     ; CPU reloads SS from the IRETQ frame but leaves DS/ES/FS/GS alone.
     mov ax, SEL_USER_DATA
@@ -94,6 +102,10 @@ exit_to_kernel:
     mov r13, [return_r13]
     mov r14, [return_r14]
     mov r15, [return_r15]
+
+    ; Restore the caller's flags, re-enabling interrupts that SYSCALL masked.
+    push qword [return_rflags]
+    popfq
 
     ret                         ; returns out of enter_user_mode
 
@@ -171,6 +183,7 @@ return_r12: RESQ 1
 return_r13: RESQ 1
 return_r14: RESQ 1
 return_r15: RESQ 1
+return_rflags: RESQ 1
 
 SECTION .text
 ; Let C++ hand us the kernel stack SYSCALL should switch to.

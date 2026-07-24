@@ -17,6 +17,7 @@
 #include <leah/pci.hpp>
 #include <leah/pic.hpp>
 #include <leah/pmm.hpp>
+#include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
 #include <leah/types.hpp>
 #include <leah/string.hpp>
@@ -465,6 +466,98 @@ void self_test_userspace()
     console::set_color(console::Color::LightGray);
 }
 
+// --- preemptive scheduler self-test ----------------------------------------
+//
+// Several workers spin in tight loops that never yield. The only thing that can
+// move the CPU between them is the timer preempting one mid-loop, so if every
+// worker makes progress - and the interleave trace shows the CPU bouncing
+// between them - preemption is real. main spins too, without yielding, so its
+// own survival to the end is proof the scheduler switches back as well.
+
+constexpr usize kWorkers = 3;
+volatile u64  g_work_counter[kWorkers];
+volatile bool g_work_stop = false;
+
+volatile u8  g_interleave[256];
+volatile u32 g_interleave_len = 0;
+
+void worker_thread(void* arg)
+{
+    const u64 id = reinterpret_cast<u64>(arg);
+    while (!g_work_stop) {
+        g_work_counter[id] = g_work_counter[id] + 1;
+
+        // Record only when execution has moved to a different worker since the
+        // last entry, so the log is a trace of preemption switches rather than
+        // of loop iterations. Single core, so no two workers race here.
+        const u32 len = g_interleave_len;
+        if ((len == 0 || g_interleave[len - 1] != id) && len < 255) {
+            g_interleave[len] = static_cast<u8>(id);
+            g_interleave_len = len + 1;
+        }
+    }
+    scheduler::exit_current();
+}
+
+void self_test_scheduler()
+{
+    scheduler::init();
+
+    for (usize i = 0; i < kWorkers; ++i)
+        g_work_counter[i] = 0;
+    g_work_stop = false;
+    g_interleave_len = 0;
+
+    for (u64 i = 0; i < kWorkers; ++i) {
+        if (scheduler::spawn("worker", worker_thread, reinterpret_cast<void*>(i)) == 0)
+            panic("scheduler: could not spawn a worker");
+    }
+
+    scheduler::start_preemption();
+
+    // Spin without yielding until the interleave trace shows several switches
+    // among the workers. If preemption were broken this would spin forever, so
+    // it is bounded; the bound is generous because TCG advances guest time
+    // slowly under a full load of spinning threads.
+    bool ok = false;
+    for (u64 i = 0; i < 20'000'000'000ull; ++i) {
+        if (g_interleave_len >= 12) {
+            ok = true;
+            break;
+        }
+        asm volatile("pause");
+    }
+
+    g_work_stop = true;
+    while (scheduler::alive_count() > 1)
+        scheduler::yield();
+
+    if (!ok)
+        panic("scheduler: workers did not interleave - preemption is not working");
+
+    u32 transitions = 0;
+    for (u32 i = 1; i < g_interleave_len; ++i) {
+        if (g_interleave[i] != g_interleave[i - 1])
+            ++transitions;
+    }
+    for (usize i = 0; i < kWorkers; ++i) {
+        if (g_work_counter[i] == 0)
+            panic("scheduler: a worker thread never got the CPU");
+    }
+
+    console::set_color(console::Color::DarkGray);
+    console::printf("\n  scheduler: %llu threads time-sliced, %u preemptive switches\n",
+                    static_cast<u64>(kWorkers) + 1, transitions);
+    console::printf("    interleave ");
+    for (u32 i = 0; i < g_interleave_len && i < 28; ++i)
+        console::printf("%u", g_interleave[i]);
+    console::write("...\n");
+    for (usize i = 0; i < kWorkers; ++i)
+        console::printf("    worker %llu ran %llu iterations\n",
+                        static_cast<u64>(i), g_work_counter[i]);
+    console::set_color(console::Color::LightGray);
+}
+
 void echo_loop()
 {
     console::set_color(console::Color::White);
@@ -556,6 +649,9 @@ extern "C" void kernel_main(const boot::Info* info)
 
     self_test_userspace();
     step("ELF64 loaded and run in ring 3 via SYSCALL");
+
+    self_test_scheduler();
+    step("preemptive scheduler: kernel threads time-sliced by the PIT");
 
     print_memory(*info);
     print_pci();
