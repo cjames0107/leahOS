@@ -3,6 +3,7 @@
 # ============================================================================
 
 AS      := nasm
+CC      := x86_64-elf-gcc
 CXX     := x86_64-elf-g++
 LD      := x86_64-elf-ld
 OBJCOPY := x86_64-elf-objcopy
@@ -87,7 +88,7 @@ KERNEL_OBJS := $(KERNEL_ASM_SRCS:%.asm=$(BUILD)/%.asm.o) \
 
 KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
-USER_TEST  := $(BUILD)/test.elf
+USER_HELLO := $(BUILD)/hello.elf
 STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
 
@@ -141,20 +142,42 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 	   exit 1; fi
 
 # --- userland ---------------------------------------------------------------
-# A real ELF for the kernel's loader to chew on, rather than a synthetic one
-# built by the test itself.
-$(USER_TEST): user/test.asm user/test.ld | $(BUILD)
+# User programs are freestanding C linked against leahOS's own libc. They run
+# in ring 3 and reach the kernel only through the SYSCALL ABI, so they get the
+# gcc freestanding headers but none of the host libc.
+# -mcmodel=large: programs link at 96 TiB (see user.ld), far outside the 32-bit
+# displacement the default model assumes. It goes away once per-process address
+# spaces let programs link at the conventional low address.
+#
+# -mno-sse and friends: the kernel has not enabled the FPU or SSE state for
+# ring 3 (no OSFXSR in CR4, no XMM save on context switch), so an SSE
+# instruction faults with #UD. GCC emits them freely otherwise - even a struct
+# copy becomes movaps. Disabling them keeps user code to the general registers,
+# exactly as the kernel does for itself.
+USER_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+               -mcmodel=large -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+               -O2 -g -Wall -Wextra -Iuser/libc/include
+
+LIBC_CSRCS := $(shell find user/libc -name '*.c' | sort)
+LIBC_OBJS  := $(LIBC_CSRCS:%.c=$(BUILD)/%.o)
+CRT0_OBJ   := $(BUILD)/user/libc/crt0.asm.o
+
+# User C sources compile with the user toolchain flags, kept separate from the
+# kernel's C++ rule.
+$(BUILD)/user/%.o: user/%.c
 	@mkdir -p $(dir $@)
-	$(AS) -f elf64 user/test.asm -o $(BUILD)/test.o
-	$(LD) -nostdlib -T user/test.ld -o $@ $(BUILD)/test.o
+	$(CC) $(USER_CFLAGS) -MMD -MP -c $< -o $@
+
+$(USER_HELLO): $(CRT0_OBJ) $(BUILD)/user/hello.o $(LIBC_OBJS) user/user.ld
+	$(LD) -nostdlib -T user/user.ld -o $@ $(CRT0_OBJ) $(BUILD)/user/hello.o $(LIBC_OBJS)
 
 # --- disk image -------------------------------------------------------------
-$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_TEST) | $(DIST)
+$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_HELLO) | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=$(IMAGE_MIB) status=none
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 seek=0               conv=notrunc status=none
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=$(STAGE2_LBA)   conv=notrunc status=none
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_LBA)   conv=notrunc status=none
-	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA) --add BIN/TEST.ELF=$(USER_TEST)
+	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA) --add BIN/HELLO.ELF=$(USER_HELLO)
 	@cp $(KERNEL_ELF) $(DIST_ELF)
 	@echo "image:  $@"
 	@echo "symbols: $(DIST_ELF)"

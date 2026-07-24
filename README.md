@@ -151,6 +151,7 @@ kernel/
   lib/          string.cpp, cxx.cpp           freestanding runtime
   main.cpp      kernel_main
   linker.ld
+user/           libc/ (crt0, syscalls, string, stdio, stdlib), hello.c
 tools/          run-headless.sh, mkfs_fat32.py
 ```
 
@@ -365,6 +366,22 @@ loops that never yield, and the test watches the interleave trace: a clean
 `012012...` with every worker advancing is only possible if the timer is moving
 the CPU between them.
 
+## libc
+
+User programs are freestanding C linked against leahOS's own libc, not the
+host's. `crt0` gives `main` a C environment and turns its return into `exit`;
+the syscall wrappers issue `SYSCALL` with the SysV register convention (`R10`
+standing in for the `RCX` that `SYSCALL` destroys); `printf` formats into a
+buffer and hands it to one `write`; `malloc` is a bump allocator over a `.bss`
+arena until there is a `brk`/`mmap` syscall to grow a real heap.
+
+Two flags matter for the same reason they do in the kernel. `-mno-sse` keeps
+GCC from emitting SSE — ring 3 has no FPU/SSE state enabled, so `movaps` would
+`#UD`. `-mcmodel=large` is needed because programs link at 96 TiB for now, far
+outside a 32-bit displacement; that moves to the conventional low address once
+each process has its own page tables. Both were found the direct way: a `#UD`
+and a wall of "relocation truncated to fit".
+
 ## Display
 
 Stage 2 walks the VBE mode list and picks the largest mode that is no bigger
@@ -418,6 +435,7 @@ a symptom.
 - [x] ELF64 loading from the filesystem
 - [x] ring 3, `syscall`/`sysret`, a first system-call ABI
 - [x] preemptive scheduler, kernel threads, round-robin time-slicing
+- [x] a freestanding libc: crt0, syscall wrappers, string/stdio/malloc
 - [ ] processes with separate address spaces; `fork`/`execve`/`wait`
 - [ ] USB: xHCI, then the HID and mass-storage class drivers
-- [ ] libc and a userland shell
+- [ ] a userland shell

@@ -421,28 +421,27 @@ void print_filesystem()
 
 // Loads a real ELF off the filesystem and calls it. Still ring 0 and still the
 // kernel's address space - what this proves is the parsing, the mapping and
-// the zero-fill, which is the part execve() will reuse unchanged.
-// Loads the ELF, maps a user stack, and runs it in ring 3. What it proves is
-// the whole privilege round trip: IRETQ into CPL 3, the program's own SYSCALL
-// coming back in, and the exit syscall unwinding out. The result carries the
-// same .rodata + .bss arithmetic as before, so a wrong value still tells .bss
-// apart from the segment never loading.
+// Loads a C program built against leahOS's libc and runs it in ring 3. It
+// proves the whole privilege round trip - IRETQ into CPL 3, the program's
+// syscalls (write, getpid) coming back in, exit unwinding out - and, because
+// the program is C rather than hand-written assembly, that crt0, the syscall
+// wrappers, printf and malloc all work. The printed lines are the human check;
+// the exit code is the machine check.
 void self_test_userspace()
 {
     elf::Image image{};
-    const elf::Error error = elf::load("/BIN/TEST.ELF", image);
+    const elf::Error error = elf::load("/BIN/HELLO.ELF", image);
     if (error != elf::Error::None) {
         console::set_color(console::Color::LightRed);
         console::printf("\n  elf: %s\n", elf::error_name(error));
-        panic("elf: could not load /BIN/TEST.ELF");
+        panic("elf: could not load /BIN/HELLO.ELF");
     }
 
     // A ring-3 stack. NoExecute because it is a stack, User so CPL 3 can reach
-    // it. The program itself barely uses it, but interrupts taken in ring 3
-    // land on the kernel stack via the TSS, not here - this only has to be
-    // valid.
+    // it. Unlike the old assembly program, a C program really uses this - crt0
+    // pushes a frame and printf spills a 512-byte buffer onto it.
     constexpr vaddr_t kUserStackTop   = 0x0000700000000000ull;
-    constexpr usize   kUserStackPages = 4;
+    constexpr usize   kUserStackPages = 16;
     for (usize i = 0; i < kUserStackPages; ++i) {
         const vaddr_t page = kUserStackTop - (i + 1) * vmm::kPageSize;
         const paddr_t frame = pmm::alloc();
@@ -452,16 +451,18 @@ void self_test_userspace()
             panic("elf: could not map the user stack");
     }
 
+    console::set_color(console::Color::LightCyan);
+    console::write("\n");
+    console::set_color(console::Color::LightGray);
+
     const u64 result = syscall::run(image.entry, kUserStackTop);
 
-    constexpr u64 kExpected = 0x1EA405C0DEull + 0x11;
-    if (result == 0)
-        panic("elf: .bss was not zeroed before the program ran");
-    if (result != kExpected)
-        panic("elf: ring-3 program produced the wrong exit code");
+    // main returns 0x42; crt0 hands that to exit as the status.
+    if (result != 0x42)
+        panic("elf: C program produced the wrong exit code");
 
     console::set_color(console::Color::DarkGray);
-    console::printf("\n  elf  /BIN/TEST.ELF  %u segments, entry %p, ring 3 exit 0x%llx\n",
+    console::printf("\n  elf  /BIN/HELLO.ELF  %u segments, entry %p, ring 3 exit 0x%llx\n",
                     image.segments, reinterpret_cast<void*>(image.entry), result);
     console::set_color(console::Color::LightGray);
 }
