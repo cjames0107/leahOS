@@ -4,6 +4,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/elf.hpp>
+#include <leah/syscall.hpp>
 #include <leah/framebuffer.hpp>
 #include <leah/fat32.hpp>
 #include <leah/gdt.hpp>
@@ -420,7 +421,12 @@ void print_filesystem()
 // Loads a real ELF off the filesystem and calls it. Still ring 0 and still the
 // kernel's address space - what this proves is the parsing, the mapping and
 // the zero-fill, which is the part execve() will reuse unchanged.
-void self_test_elf()
+// Loads the ELF, maps a user stack, and runs it in ring 3. What it proves is
+// the whole privilege round trip: IRETQ into CPL 3, the program's own SYSCALL
+// coming back in, and the exit syscall unwinding out. The result carries the
+// same .rodata + .bss arithmetic as before, so a wrong value still tells .bss
+// apart from the segment never loading.
+void self_test_userspace()
 {
     elf::Image image{};
     const elf::Error error = elf::load("/BIN/TEST.ELF", image);
@@ -430,24 +436,32 @@ void self_test_elf()
         panic("elf: could not load /BIN/TEST.ELF");
     }
 
-    using Program = u64 (*)();
-    const auto program = reinterpret_cast<Program>(image.entry);
-    const u64 result = program();
+    // A ring-3 stack. NoExecute because it is a stack, User so CPL 3 can reach
+    // it. The program itself barely uses it, but interrupts taken in ring 3
+    // land on the kernel stack via the TSS, not here - this only has to be
+    // valid.
+    constexpr vaddr_t kUserStackTop   = 0x0000700000000000ull;
+    constexpr usize   kUserStackPages = 4;
+    for (usize i = 0; i < kUserStackPages; ++i) {
+        const vaddr_t page = kUserStackTop - (i + 1) * vmm::kPageSize;
+        const paddr_t frame = pmm::alloc();
+        if (frame == 0)
+            panic("elf: out of memory for the user stack");
+        if (!vmm::map(page, frame, vmm::Write | vmm::User | vmm::NoExecute))
+            panic("elf: could not map the user stack");
+    }
 
-    // The program adds a value it stored in .bss to one in .rodata. A zero
-    // return is its way of saying .bss arrived non-zero.
+    const u64 result = syscall::run(image.entry, kUserStackTop);
+
     constexpr u64 kExpected = 0x1EA405C0DEull + 0x11;
     if (result == 0)
         panic("elf: .bss was not zeroed before the program ran");
     if (result != kExpected)
-        panic("elf: loaded program produced the wrong result");
+        panic("elf: ring-3 program produced the wrong exit code");
 
     console::set_color(console::Color::DarkGray);
-    console::printf("\n  elf  /BIN/TEST.ELF  %u segments, %p..%p, entry %p -> 0x%llx\n",
-                    image.segments,
-                    reinterpret_cast<void*>(image.lowest),
-                    reinterpret_cast<void*>(image.highest),
-                    reinterpret_cast<void*>(image.entry), result);
+    console::printf("\n  elf  /BIN/TEST.ELF  %u segments, entry %p, ring 3 exit 0x%llx\n",
+                    image.segments, reinterpret_cast<void*>(image.entry), result);
     console::set_color(console::Color::LightGray);
 }
 
@@ -537,8 +551,11 @@ extern "C" void kernel_main(const boot::Info* info)
     self_test_fs_write();
     step("FAT32 write path verified");
 
-    self_test_elf();
-    step("ELF64 loaded from disk and executed");
+    syscall::init();
+    step("SYSCALL/SYSRET enabled, ring 3 ready");
+
+    self_test_userspace();
+    step("ELF64 loaded and run in ring 3 via SYSCALL");
 
     print_memory(*info);
     print_pci();

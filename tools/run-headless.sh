@@ -16,9 +16,15 @@ LOG=build/serial.log
 make --no-print-directory
 rm -f "$LOG"
 
+# -snapshot: disk writes go to a throwaway overlay, not back to the image. The
+# kernel's own filesystem self-tests create files and directories, so without
+# this a second boot would start from a dirty image and the "already exists"
+# paths would fire. It also keeps the committed image from being mutated by a
+# test run. Verifying writes against an external checker is a separate, opt-in
+# step - see tools/fsck-image.sh - precisely because it needs real persistence.
 # shellcheck disable=SC2086  # QEMU_EXTRA is deliberately word-split
 qemu-system-x86_64 \
-    -drive format=raw,file=build/leahos.img,if=ide \
+    -drive format=raw,file=build/leahos.img,if=ide -snapshot \
     -m "$MEM" -smp "$CPUS" -display none -serial "file:$LOG" \
     -no-reboot -no-shutdown $QEMU_EXTRA &
 QEMU_PID=$!

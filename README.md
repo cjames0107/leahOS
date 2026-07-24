@@ -299,6 +299,41 @@ there is only one address space today, and mapping over `0x400000` would
 replace the identity mapping of physical memory the PMM is still handing out.
 Once processes have their own address spaces, the conventional address is fine.
 
+## Userspace
+
+A loaded ELF runs at CPL 3. `syscall::run()` enters ring 3 through `IRETQ` —
+the one instruction that sets `SS:RSP`, `RFLAGS` and `CS:RIP` atomically across
+a privilege drop — and does not return until the program calls exit. The exit
+syscall is a longjmp: it restores the kernel context `enter_user_mode` saved and
+returns out of it with the program's exit code. That is exactly the primitive a
+scheduler will later generalise into a context switch.
+
+Calls come in through `SYSCALL`: number in `RAX`, arguments in
+`RDI/RSI/RDX/R10/R8/R9` — the SysV order, with `R10` standing in for `RCX`,
+which `SYSCALL` destroys. The instruction does *not* switch stacks, so the entry
+stub saves the user `RSP` and loads a kernel stack itself.
+
+Two things here are a slot away from a silent triple fault:
+
+**The STAR selector base.** `SYSRET` computes `CS = (STAR[63:48]+16)|3` and
+`SS = (STAR[63:48]+8)|3`. The base is therefore *eight below user data*, not the
+user selector itself — chosen so `+8` lands on user data and `+16` on user code.
+Programming it as the user-data selector instead points `SYSRET`'s `CS` at the
+TSS. This only works because the GDT is ordered kernel-code, kernel-data,
+user-data, user-code with no gaps, which is why that order was fixed in the very
+first descriptor-table commit.
+
+**`FMASK` clears `IF`.** Syscalls run with interrupts off, which is what lets a
+single kernel stack be shared between the syscall path and interrupts taken in
+ring 3 (those arrive via the TSS `rsp0`): the two never overlap in time.
+
+The test program is a real ring-3 ELF. It `write`s a line, then exits with
+`.rodata + .bss` as its code, so a wrong value still separates "`.bss` not
+zeroed" from "segment never mapped" — and reaching ring 3 to make the calls at
+all is the rest of the proof. That it is genuinely unprivileged was confirmed
+by temporarily giving it a `cli`, which faults with `#GP` at CPL 3 where it
+would silently succeed at CPL 0.
+
 ## Display
 
 Stage 2 walks the VBE mode list and picks the largest mode that is no bigger
@@ -350,7 +385,7 @@ a symptom.
 - [ ] AHCI with DMA, replacing PIO
 - [x] relocate the kernel to the higher half
 - [x] ELF64 loading from the filesystem
-- [ ] ring 3, `syscall`/`sysret`
+- [x] ring 3, `syscall`/`sysret`, a first system-call ABI
 - [ ] scheduler and processes; `fork`/`execve`/`wait`
 - [ ] USB: xHCI, then the HID and mass-storage class drivers
 - [ ] libc and a userland shell

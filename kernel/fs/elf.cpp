@@ -128,8 +128,9 @@ Error load(const char* path, Image& out)
 
         // Everything is mapped writable during load because the loader has to
         // write into it. A read-only segment gets its permissions tightened
-        // once its contents are in place.
-        u64 flags = vmm::Write;
+        // once its contents are in place. User so ring 3 can reach it - the
+        // whole point of loading it as a process rather than a kernel blob.
+        u64 flags = vmm::Write | vmm::User;
         if ((segment.flags & kFlagExecute) == 0)
             flags |= vmm::NoExecute;
 
@@ -157,7 +158,7 @@ Error load(const char* path, Image& out)
         // distinction is why memory_size and file_size are separate fields.
 
         if ((segment.flags & kFlagWrite) == 0) {
-            u64 readonly = 0;
+            u64 readonly = vmm::User;
             if ((segment.flags & kFlagExecute) == 0)
                 readonly |= vmm::NoExecute;
             for (vaddr_t page = start; page < end; page += vmm::kPageSize)
