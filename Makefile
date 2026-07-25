@@ -148,17 +148,14 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 # User programs are freestanding C linked against leahOS's own libc. They run
 # in ring 3 and reach the kernel only through the SYSCALL ABI, so they get the
 # gcc freestanding headers but none of the host libc.
-# -mcmodel=large: programs link at 96 TiB (see user.ld), far outside the 32-bit
-# displacement the default model assumes. It goes away once per-process address
-# spaces let programs link at the conventional low address.
-#
 # -mno-sse and friends: the kernel has not enabled the FPU or SSE state for
 # ring 3 (no OSFXSR in CR4, no XMM save on context switch), so an SSE
 # instruction faults with #UD. GCC emits them freely otherwise - even a struct
 # copy becomes movaps. Disabling them keeps user code to the general registers,
-# exactly as the kernel does for itself.
+# exactly as the kernel does for itself. Programs link low (user.ld), so the
+# default small code model is all they need.
 USER_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
-               -mcmodel=large -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+               -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
                -O2 -g -Wall -Wextra -Iuser/libc/include
 
 LIBC_CSRCS := $(shell find user/libc -name '*.c' | sort)

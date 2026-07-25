@@ -1,4 +1,5 @@
 #include <leah/framebuffer.hpp>
+#include <leah/memory.hpp>
 #include <leah/string.hpp>
 #include <leah/vmm.hpp>
 
@@ -7,6 +8,8 @@ namespace {
 
 u8* g_pixels = nullptr;
 const u8* g_font = nullptr;
+paddr_t g_pixels_phys = 0;
+paddr_t g_font_phys = 0;
 
 u32 g_width = 0;
 u32 g_height = 0;
@@ -45,11 +48,12 @@ bool init(const boot::Info& info)
     g_pitch  = info.pitch;
     g_bytes_per_pixel = info.bits_per_pixel / 8;
 
-    // No mapping happens here. The console is brought up before the VMM
-    // exists - so that early failures can still be seen - and the framebuffer
-    // is reachable through the 4 GiB identity map stage 2 built for exactly
-    // this reason. remap_as_device() tightens the attributes once the VMM is
-    // running.
+    // The console comes up before the VMM, reaching the framebuffer and font
+    // through the stage-2 low identity map (physical == virtual). Once the VMM
+    // has replaced that with a higher-half direct map, use_direct_map() swings
+    // these pointers over to it. Both are remembered by physical address.
+    g_pixels_phys = info.framebuffer;
+    g_font_phys   = info.font;
     g_pixels = reinterpret_cast<u8*>(info.framebuffer);
     g_font   = reinterpret_cast<const u8*>(static_cast<u64>(info.font));
 
@@ -65,12 +69,14 @@ bool remap_as_device()
     if (g_pixels == nullptr)
         return false;
 
-    // The identity map covers this as ordinary cached RAM. It is device
-    // memory: writes should not sit in a cache line waiting for an eviction
-    // that only happens when something else needs the way.
-    const u64 base = reinterpret_cast<u64>(g_pixels);
-    const u64 bytes = static_cast<u64>(g_pitch) * g_height;
-    return vmm::map_mmio(base, base, bytes);
+    // The low identity map is gone; the framebuffer and font are now reached
+    // through the direct map. The direct map is built to cover the low-4-GiB
+    // MMIO window, so no separate mapping is needed. It is cached rather than
+    // write-combining, which is fine under emulation; a dedicated uncached
+    // mapping is a later refinement for real hardware.
+    g_pixels = reinterpret_cast<u8*>(memory::phys_to_direct(g_pixels_phys));
+    g_font   = reinterpret_cast<const u8*>(memory::phys_to_direct(g_font_phys));
+    return true;
 }
 
 u32 columns() { return g_columns; }

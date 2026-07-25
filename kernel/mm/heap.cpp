@@ -1,4 +1,5 @@
 #include <leah/heap.hpp>
+#include <leah/memory.hpp>
 #include <leah/panic.hpp>
 #include <leah/pmm.hpp>
 #include <leah/string.hpp>
@@ -10,7 +11,7 @@ namespace {
 // Well clear of both the identity map and anything the firmware described, so
 // a stray heap pointer lands somewhere obviously wrong rather than quietly on
 // top of physical memory.
-constexpr vaddr_t kHeapBase = 0x0000010000000000ull;   // 1 TiB
+constexpr vaddr_t kHeapBase = memory::kHeapBase;       // high half, its own slot
 constexpr usize kGrowthPages = 16;                     // 64 KiB at a time
 constexpr u32 kMagic = 0x1EA4B10C;
 

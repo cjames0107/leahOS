@@ -568,8 +568,16 @@ void echo_loop()
 
 void run_global_constructors();
 
-extern "C" void kernel_main(const boot::Info* info)
+extern "C" void kernel_main(const boot::Info* boot_info)
 {
+    // The boot info and E820 map live in low physical memory the bootloader
+    // left behind. vmm::init() will unmap the low half, so copy what is needed
+    // later into the kernel image now, while the stage-2 identity map still
+    // makes it reachable.
+    static boot::Info info_copy;
+    info_copy = *boot_info;
+    const boot::Info* info = &info_copy;
+
     console::init(*info);
 
     // Before anything else that could depend on a global: constructors here
@@ -591,8 +599,9 @@ extern "C" void kernel_main(const boot::Info* info)
     step("physical frame allocator online");
 
     vmm::init();
-    framebuffer::remap_as_device();
-    step("page tables rebuilt, 4 GiB identity mapped, NX enabled");
+    pmm::use_direct_map();          // rebase the frame bitmap onto the direct map
+    framebuffer::remap_as_device(); // and the console onto it, before we print
+    step("page tables rebuilt, kernel in the higher half, low half is user's");
 
     heap::init();
     self_test_heap();

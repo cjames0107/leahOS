@@ -1,18 +1,17 @@
 /* Link map for leahOS user programs.
  *
  * .text.startup is forced first so _start (from crt0) is at the program's
- * entry address regardless of link order. Programs link high, at 96 TiB, for
- * the same reason the old assembly test did: there is still only one address
- * space, and the low canonical half up to 4 GiB is taken by the kernel's
- * identity map. Per-process address spaces will let this move to the
- * conventional 0x400000.
+ * entry address regardless of link order. Programs link at the conventional
+ * 0x400000: the kernel keeps all of its own mappings in the higher half now, so
+ * the entire low canonical half belongs to user space and the small code model
+ * reaches everything.
  */
 
 ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x0000600000000000;
+    . = 0x400000;
 
     .text : ALIGN(4K) {
         *(.text.startup)

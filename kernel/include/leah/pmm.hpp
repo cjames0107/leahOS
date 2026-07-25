@@ -23,6 +23,10 @@ constexpr u64 page_align_up(u64 address)
 
 void init(const boot::Info& info);
 
+// Rebase the frame bitmap onto the direct map, once the VMM has installed it
+// and unmapped the low half. Call right after vmm::init().
+void use_direct_map();
+
 // Returns a physical address, or 0 on exhaustion. Frames are not zeroed.
 paddr_t alloc();
 paddr_t alloc_contiguous(usize frames);

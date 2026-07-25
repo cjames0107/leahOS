@@ -14,26 +14,28 @@ namespace {
 constexpr u64 kEntriesPerTable = 512;
 constexpr u64 kAddressMask = 0x000FFFFFFFFFF000ull;   // bits 51:12 of an entry
 
-u64 g_pml4_phys = 0;         // the kernel's own top-level table
-u64 g_current_pml4 = 0;      // the table CR3 currently points at
+u64 g_pml4_phys = 0;         // the kernel's own top-level table (physical)
+u64 g_current_pml4 = 0;      // the table CR3 currently points at (physical)
 
-// A user space is "the kernel's PML4 entries, plus this process's own". The
-// kernel still keeps its identity map and heap in low-half slots ([0] and the
-// heap's), so there is no clean high/low split yet - instead a slot is
-// kernel-owned exactly when the kernel's PML4 has an entry for it. User memory
-// therefore has to live in slots the kernel does not use; see user.ld, which
-// links programs at 96 TiB for precisely that reason. Retiring this - moving
-// the kernel's identity map to a higher-half direct map so the whole low half
-// is user's - is the cleanup that will also let programs link low.
-u64* kernel_pml4() { return reinterpret_cast<u64*>(g_pml4_phys); }
-u64* current_pml4() { return reinterpret_cast<u64*>(g_current_pml4); }
+// Page-table entries always hold physical addresses. To read or write a table
+// the kernel needs a virtual pointer to it, which comes from the direct map -
+// phys + kDirectMapBase. During early boot, before the direct map exists, the
+// stage-2 identity map still makes phys usable as a virtual address, so this
+// starts as a plain identity and flips to the offset once init() has loaded the
+// new tables.
+bool g_direct_map = false;
 
-// Everything here dereferences physical addresses directly. That is only legal
-// because the kernel identity maps all of RAM; the day this moves to the higher
-// half, every one of these needs to go through the direct map offset instead.
+u64* phys_ptr(paddr_t phys)
+{
+    return reinterpret_cast<u64*>(g_direct_map ? memory::phys_to_direct(phys) : phys);
+}
+
+u64* kernel_pml4()  { return phys_ptr(g_pml4_phys); }
+u64* current_pml4() { return phys_ptr(g_current_pml4); }
+
 u64* table_of(u64 entry)
 {
-    return reinterpret_cast<u64*>(entry & kAddressMask);
+    return phys_ptr(entry & kAddressMask);
 }
 
 u64 index_of(vaddr_t virt, int level)   // level 4 = PML4 ... 1 = PT
@@ -46,14 +48,16 @@ void invalidate(vaddr_t virt)
     asm volatile("invlpg (%0)" : : "r"(virt) : "memory");
 }
 
-u64* alloc_table()
+// Allocate a zeroed page table and return its physical address (0 on failure).
+// The entry that will point at it stores this physical address; walking to it
+// goes through phys_ptr.
+paddr_t alloc_table()
 {
     const paddr_t frame = pmm::alloc();
     if (frame == 0)
-        return nullptr;
-    auto* table = reinterpret_cast<u64*>(frame);
-    memset(table, 0, pmm::kPageSize);
-    return table;
+        return 0;
+    memset(phys_ptr(frame), 0, pmm::kPageSize);
+    return frame;
 }
 
 // Walk to the next level, creating it when asked. Intermediate entries are
@@ -65,11 +69,11 @@ u64* next_level(u64* table, u64 index, bool create)
     if ((table[index] & Present) == 0) {
         if (!create)
             return nullptr;
-        u64* fresh = alloc_table();
-        if (fresh == nullptr)
+        const paddr_t fresh = alloc_table();
+        if (fresh == 0)
             return nullptr;
-        table[index] = reinterpret_cast<u64>(fresh) | Present | Write | User;
-        return fresh;
+        table[index] = fresh | Present | Write | User;      // entry holds phys
+        return phys_ptr(fresh);
     }
     return table_of(table[index]);
 }
@@ -82,14 +86,15 @@ bool split_huge_page(u64* pd, u64 index)
     const u64 base  = entry & kAddressMask;
     const u64 flags = entry & ~kAddressMask & ~static_cast<u64>(Huge);
 
-    u64* pt = alloc_table();
-    if (pt == nullptr)
+    const paddr_t pt_phys = alloc_table();
+    if (pt_phys == 0)
         return false;
 
+    u64* pt = phys_ptr(pt_phys);
     for (u64 i = 0; i < kEntriesPerTable; ++i)
         pt[i] = (base + i * kPageSize) | flags;
 
-    pd[index] = reinterpret_cast<u64>(pt) | Present | Write | User;
+    pd[index] = pt_phys | Present | Write | User;
     return true;
 }
 
@@ -102,59 +107,48 @@ void init()
     constexpr u32 kIa32Efer = 0xC0000080;
     cpu::write_msr(kIa32Efer, cpu::read_msr(kIa32Efer) | (1ull << 11));
 
-    u64* pml4 = alloc_table();
-    if (pml4 == nullptr)
+    // Built with the direct map not yet active: phys_ptr is still identity, and
+    // the stage-2 low identity map that is live right now makes that valid.
+    const paddr_t pml4_phys = alloc_table();
+    if (pml4_phys == 0)
         panic("vmm: cannot allocate PML4");
-    g_pml4_phys = reinterpret_cast<u64>(pml4);
+    g_pml4_phys = pml4_phys;
+    u64* pml4 = phys_ptr(pml4_phys);
 
-    // Identity map the low 4 GiB with 2 MiB pages. Covers all of RAM on the
-    // machines we target plus the MMIO window below 4 GiB where the LAPIC, PCI
-    // BARs and any framebuffer live - so device mappings work before the
-    // drivers that need them exist.
-    const u64 identity_limit = 4ull * 1024 * 1024 * 1024;
-    for (u64 addr = 0; addr < identity_limit; addr += kHugePageSize) {
-        u64* pdpt = next_level(pml4, index_of(addr, 4), true);
-        if (pdpt == nullptr)
-            panic("vmm: out of memory building the identity map");
-        u64* pd = next_level(pdpt, index_of(addr, 3), true);
+    // The direct map: all physical memory at kDirectMapBase, 2 MiB pages, in the
+    // high half. Bounded to cover at least the low 4 GiB - so the MMIO window
+    // with the LAPIC, PCI BARs and framebuffer is reachable - and up to the top
+    // of usable RAM. Nothing is mapped in the low half, which leaves it entirely
+    // to user space. These leaves are kernel-only (no User bit).
+    const u64 four_gib = 4ull * 1024 * 1024 * 1024;
+    const u64 top = pmm::highest_usable() > four_gib ? pmm::highest_usable() : four_gib;
+    for (u64 phys = 0; phys < top; phys += kHugePageSize) {
+        const vaddr_t virt = memory::kDirectMapBase + phys;
+        u64* pdpt = next_level(pml4, index_of(virt, 4), true);
+        u64* pd = pdpt != nullptr ? next_level(pdpt, index_of(virt, 3), true) : nullptr;
         if (pd == nullptr)
-            panic("vmm: out of memory building the identity map");
-
-        pd[index_of(addr, 2)] = addr | Present | Write | Huge;
+            panic("vmm: out of memory building the direct map");
+        pd[index_of(virt, 2)] = phys | Present | Write | Huge;
     }
 
-    // Anything above 4 GiB that E820 called usable still needs to be reachable,
-    // since the frame allocator will happily hand it out. Deliberately bounded
-    // by the highest *usable* address, not the highest address described: E820
-    // routinely reports reserved regions near the top of the 64-bit space, and
-    // spanning the hole to reach them would burn megabytes of page tables
-    // describing memory that does not exist.
-    const u64 top = pmm::highest_usable();
-    for (u64 addr = identity_limit; addr < top; addr += kHugePageSize) {
-        u64* pdpt = next_level(pml4, index_of(addr, 4), true);
-        u64* pd = pdpt != nullptr ? next_level(pdpt, index_of(addr, 3), true) : nullptr;
-        if (pd == nullptr)
-            break;      // out of memory for tables; the low 4 GiB still works
-        pd[index_of(addr, 2)] = addr | Present | Write | Huge;
-    }
-
-    // The kernel is executing from the higher half right now, so the new
-    // tables must describe it before CR3 is loaded - otherwise the very next
+    // The kernel is executing from the higher half right now, so the new tables
+    // must describe its window before CR3 is loaded - otherwise the very next
     // instruction fetch faults with no handler mapped to catch it.
     for (u64 offset = 0; offset < memory::kKernelWindowSize; offset += kHugePageSize) {
         const vaddr_t virt = memory::kKernelBase + offset;
         u64* pdpt = next_level(pml4, index_of(virt, 4), true);
-        if (pdpt == nullptr)
-            panic("vmm: out of memory mapping the kernel window");
-        u64* pd = next_level(pdpt, index_of(virt, 3), true);
+        u64* pd = pdpt != nullptr ? next_level(pdpt, index_of(virt, 3), true) : nullptr;
         if (pd == nullptr)
             panic("vmm: out of memory mapping the kernel window");
-
         pd[index_of(virt, 2)] = offset | Present | Write | Huge;
     }
 
     g_current_pml4 = g_pml4_phys;
     asm volatile("mov %0, %%cr3" : : "r"(g_pml4_phys) : "memory");
+
+    // The low identity map is gone now; every physical dereference from here on
+    // goes through the direct map we just installed.
+    g_direct_map = true;
 }
 
 namespace {
@@ -237,7 +231,7 @@ paddr_t translate_into(u64* pml4, vaddr_t virt)
 // PDPT ... 1=PT); a Huge entry is a leaf one level up.
 void free_table_tree(u64 table_phys, int level)
 {
-    u64* table = reinterpret_cast<u64*>(table_phys);
+    u64* table = phys_ptr(table_phys);
     for (u64 i = 0; i < kEntriesPerTable; ++i) {
         const u64 entry = table[i];
         if ((entry & Present) == 0)
@@ -289,20 +283,20 @@ AddressSpace current_space() { return g_current_pml4; }
 
 AddressSpace create_address_space()
 {
-    u64* space = alloc_table();
-    if (space == nullptr)
+    const paddr_t space_phys = alloc_table();
+    if (space_phys == 0)
         return 0;
 
     // Copy every one of the kernel's top-level entries. They point at the
-    // kernel's own sub-tables, so the kernel's code, heap, identity map and any
-    // later mapping into an existing slot are shared into this space by
-    // reference - no copy needed below the top level. The process's own
-    // mappings go into the slots the kernel left empty.
+    // kernel's own sub-tables (the direct map, the heap, the kernel image, all
+    // in the high half), so those are shared into this space by reference. The
+    // low half is empty in the kernel PML4, so it stays entirely the process's.
+    u64* space  = phys_ptr(space_phys);
     u64* kernel = kernel_pml4();
     for (u64 i = 0; i < kEntriesPerTable; ++i)
         space[i] = kernel[i];
 
-    return reinterpret_cast<u64>(space);
+    return space_phys;
 }
 
 AddressSpace fork_address_space(AddressSpace parent)
@@ -311,8 +305,8 @@ AddressSpace fork_address_space(AddressSpace parent)
     if (child == 0)
         return 0;
 
-    u64* child_pml4  = reinterpret_cast<u64*>(child);
-    u64* parent_pml4 = reinterpret_cast<u64*>(parent);
+    u64* child_pml4  = phys_ptr(child);
+    u64* parent_pml4 = phys_ptr(parent);
     u64* kernel      = kernel_pml4();
 
     // Only the slots the parent added over the kernel are the process's own
@@ -343,9 +337,7 @@ AddressSpace fork_address_space(AddressSpace parent)
                         destroy_address_space(child);
                         return 0;
                     }
-                    memcpy(reinterpret_cast<void*>(frame),
-                           reinterpret_cast<void*>(entry & kAddressMask),
-                           kPageSize);
+                    memcpy(phys_ptr(frame), phys_ptr(entry & kAddressMask), kPageSize);
 
                     if (!map_into(child_pml4, virt, frame, flags)) {
                         pmm::free(frame);
@@ -369,7 +361,7 @@ void destroy_address_space(AddressSpace space)
     if (space == g_current_pml4)
         switch_address_space(g_pml4_phys);
 
-    u64* pml4 = reinterpret_cast<u64*>(space);
+    u64* pml4 = phys_ptr(space);
     u64* kernel = kernel_pml4();
 
     // Only the slots this space added - the ones the kernel does not share -

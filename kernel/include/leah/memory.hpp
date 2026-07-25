@@ -32,4 +32,18 @@ constexpr vaddr_t kernel_phys_to_virt(paddr_t phys)
 // worth of 2 MiB pages, which is plenty for a kernel image plus its stacks.
 constexpr u64 kKernelWindowSize = 1024ull * 1024 * 1024;
 
+// The direct map: every byte of physical memory mapped at a fixed high-half
+// offset, so the kernel can reach any frame as phys + kDirectMapBase. This is
+// what frees the entire low half for user space - the kernel no longer keeps an
+// identity map down there. PML4 slot 256, the first of the higher half.
+constexpr vaddr_t kDirectMapBase = 0xFFFF800000000000ull;
+
+// The kernel heap lives in its own higher-half slot, well clear of the direct
+// map and the kernel image, so a heap pointer that strays lands somewhere
+// obviously wrong rather than on top of RAM.
+constexpr vaddr_t kHeapBase = 0xFFFFC00000000000ull;
+
+constexpr vaddr_t phys_to_direct(paddr_t phys) { return phys + kDirectMapBase; }
+constexpr paddr_t direct_to_phys(vaddr_t virt) { return virt - kDirectMapBase; }
+
 } // namespace memory

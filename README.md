@@ -402,13 +402,20 @@ slots a space added are private, and only those are freed when it is destroyed;
 freeing a shared kernel sub-tree would unmap the kernel out from under every
 other process.
 
-There is not yet a clean high/low split: the kernel still keeps its identity
-map and heap in low-half slots, so "kernel-owned" means "the kernel's PML4 has
-an entry for this slot" rather than "it is in the high half". User memory
-therefore lives in slots the kernel does not use, which is why programs link at
-96 TiB. Moving the kernel's identity map to a higher-half direct map - freeing
-the whole low half for user space and letting programs link low - is the
-cleanup that retires both that and `-mcmodel=large`.
+The kernel lives entirely in the higher half. Its physical mappings are a
+**direct map** - every byte of RAM at `phys + 0xFFFF800000000000` - which is how
+page-table code reaches any frame: entries store physical addresses, and a
+walk goes through the direct map to read them. The heap and the kernel image
+sit in their own high-half slots. That leaves the whole low canonical half to
+user space, so programs link at the conventional `0x400000` and need only the
+small code model.
+
+Bringing the direct map up is a small bootstrap dance: the tables are built
+while the stage-2 identity map is still live (so a physical address is still a
+usable pointer), then `CR3` is loaded and a flag flips so every later physical
+dereference goes through the direct-map offset. The frame bitmap and the
+framebuffer, both reached by physical address during early boot, are re-pointed
+onto the direct map at the same moment.
 
 Isolation is checked directly: a program runs, exits, and the kernel confirms
 the addresses it used are no longer mapped in the kernel's space. Running it a
@@ -452,12 +459,11 @@ standing in for the `RCX` that `SYSCALL` destroys); `printf` formats into a
 buffer and hands it to one `write`; `malloc` is a bump allocator over a `.bss`
 arena until there is a `brk`/`mmap` syscall to grow a real heap.
 
-Two flags matter for the same reason they do in the kernel. `-mno-sse` keeps
-GCC from emitting SSE — ring 3 has no FPU/SSE state enabled, so `movaps` would
-`#UD`. `-mcmodel=large` is needed because programs link at 96 TiB for now, far
-outside a 32-bit displacement; that moves to the conventional low address once
-each process has its own page tables. Both were found the direct way: a `#UD`
-and a wall of "relocation truncated to fit".
+One flag matters for the same reason it does in the kernel: `-mno-sse` keeps
+GCC from emitting SSE, because ring 3 has no FPU/SSE state enabled and `movaps`
+would `#UD` - found the direct way, by hitting exactly that on the first run.
+Programs link low, at `0x400000`, so the default small code model is all they
+need.
 
 ## Display
 
@@ -518,4 +524,6 @@ a symptom.
 - [ ] USB: xHCI, then the HID and mass-storage class drivers
 - [x] filesystem syscalls (open/read/write/stat/getdents/chdir…), a per-process fd table
 - [x] a shell and coreutils: ls, cat, echo, pwd
-- [ ] more coreutils (cp, mv, rm, mkdir), pipes and redirection
+- [x] more coreutils (cp, mv, rm, mkdir, touch, clear), pipes and redirection
+- [x] a wait queue: tasks block on I/O instead of spinning
+- [x] higher-half direct map: the low half is user's, programs link at 0x400000

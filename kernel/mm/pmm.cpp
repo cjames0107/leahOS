@@ -14,6 +14,7 @@ namespace {
 // clearing only what E820 called usable means holes in the map stay reserved
 // by default, which is the safe direction to be wrong in.
 u64* g_bitmap       = nullptr;
+u64  g_bitmap_phys  = 0;        // physical base, so the pointer can be rebased
 u64  g_bitmap_words = 0;
 u64  g_frame_count  = 0;
 
@@ -127,7 +128,8 @@ void init(const boot::Info& info)
     if (!bitmap_fits)
         panic("pmm: no usable region can hold the frame bitmap");
 
-    g_bitmap = reinterpret_cast<u64*>(bitmap_base);
+    g_bitmap_phys = bitmap_base;
+    g_bitmap = reinterpret_cast<u64*>(bitmap_base);   // identity, valid pre-VMM
 
     memset(g_bitmap, 0xFF, bitmap_bytes);
     g_used_frames = g_frame_count;
@@ -216,6 +218,12 @@ void free_contiguous(paddr_t base, usize frames)
 {
     for (usize i = 0; i < frames; ++i)
         free(base + i * kPageSize);
+}
+
+void use_direct_map()
+{
+    // The low identity map is gone; reach the bitmap through the direct map.
+    g_bitmap = reinterpret_cast<u64*>(memory::phys_to_direct(g_bitmap_phys));
 }
 
 u64 total_bytes()    { return g_total_bytes; }
