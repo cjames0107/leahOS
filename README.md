@@ -163,9 +163,10 @@ Boots to long mode, owns its descriptor tables, handles interrupts, manages
 physical and virtual memory, enumerates PCI, reads and writes ATA disks, and
 mounts a FAT32 filesystem it reads and writes. It loads ELF programs and runs
 them in ring 3 over a `SYSCALL` ABI — as processes in their own private address
-spaces — and time-slices kernel threads with a preemptive scheduler. User
-programs are C linked against leahOS's own libc. Faults produce a register dump
-instead of a silent reset. `fork`, `execve` and `wait` are next.
+spaces — and time-slices them with a preemptive scheduler. Processes `fork`,
+`execve` and `wait`; an init process demonstrates the cycle. User programs are C
+linked against leahOS's own libc. Faults produce a register dump instead of a
+silent reset. Filesystem syscalls and a shell are next — then real commands.
 
 ## Memory management
 
