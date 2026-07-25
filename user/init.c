@@ -42,6 +42,28 @@ int main(void)
     printf("$ cat /HELLO.TXT\n");
     run("/BIN/CAT.ELF", cat_args);
 
+    // The write commands: make a directory, copy a file into it, list it, then
+    // remove what we made - proving mkdir, cp, ls and rm end to end.
+    char* mkdir_args[] = { "mkdir", "/PLAY", 0 };
+    printf("$ mkdir /PLAY\n");
+    run("/BIN/MKDIR.ELF", mkdir_args);
+
+    char* cp_args[] = { "cp", "/HELLO.TXT", "/PLAY/COPY.TXT", 0 };
+    printf("$ cp /HELLO.TXT /PLAY/COPY.TXT\n");
+    run("/BIN/CP.ELF", cp_args);
+
+    char* ls_play[] = { "ls", "/PLAY", 0 };
+    printf("$ ls /PLAY\n");
+    run("/BIN/LS.ELF", ls_play);
+
+    char* cat_copy[] = { "cat", "/PLAY/COPY.TXT", 0 };
+    printf("$ cat /PLAY/COPY.TXT\n");
+    run("/BIN/CAT.ELF", cat_copy);
+
+    char* rm_args[] = { "rm", "/PLAY/COPY.TXT", 0 };
+    printf("$ rm /PLAY/COPY.TXT\n");
+    run("/BIN/RM.ELF", rm_args);
+
     printf("\ninit: demo complete, launching shell\n");
 
     char* sh_args[] = { "sh", 0 };

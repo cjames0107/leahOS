@@ -90,7 +90,7 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
 # Userland programs. Each user/<name>.c links into $(BUILD)/<name>.elf and is
 # placed on the image at /BIN/<NAME>.ELF (upper-cased for FAT's 8.3 names).
-USER_PROGRAMS := init hello sh echo cat ls pwd
+USER_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
 STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin

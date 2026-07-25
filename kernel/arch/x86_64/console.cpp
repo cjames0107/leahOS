@@ -84,7 +84,7 @@ void scroll()
     g_row = g_rows - 1;
 }
 
-void display_put(char c)
+void display_raw(char c)
 {
     switch (c) {
     case '\n':
@@ -113,6 +113,59 @@ void display_put(char c)
     }
     while (g_row >= g_rows)
         scroll();
+}
+
+// A minimal ANSI CSI reader. It acts on the two sequences a screen-clear needs
+// - ESC[2J (erase display) and ESC[H (cursor home) - and silently swallows any
+// other CSI sequence so an unhandled escape does not spray its bytes across the
+// screen. Enough for `clear`; a fuller terminal can grow from here.
+enum class Esc { Normal, Escape, Csi };
+Esc  g_esc = Esc::Normal;
+u32  g_csi_param = 0;
+
+void clear_screen()
+{
+    if (g_graphical)
+        framebuffer::clear(background_rgb());
+    else {
+        for (u16 i = 0; i < kVgaWidth * kVgaHeight; ++i)
+            g_vga[i] = vga_cell(' ', g_attr);
+    }
+    g_row = 0;
+    g_column = 0;
+}
+
+void display_put(char c)
+{
+    switch (g_esc) {
+    case Esc::Normal:
+        if (c == 0x1B) {              // ESC
+            g_esc = Esc::Escape;
+            return;
+        }
+        display_raw(c);
+        return;
+
+    case Esc::Escape:
+        g_esc = (c == '[') ? Esc::Csi : Esc::Normal;
+        g_csi_param = 0;
+        return;
+
+    case Esc::Csi:
+        if (c >= '0' && c <= '9') {
+            g_csi_param = g_csi_param * 10 + static_cast<u32>(c - '0');
+            return;
+        }
+        // A letter ends the sequence.
+        if (c == 'J' && g_csi_param == 2) {
+            clear_screen();
+        } else if (c == 'H') {
+            g_row = 0;
+            g_column = 0;
+        }
+        g_esc = Esc::Normal;
+        return;
+    }
 }
 
 // --- COM1 ------------------------------------------------------------------
