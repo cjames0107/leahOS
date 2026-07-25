@@ -144,10 +144,10 @@ kernel/
   arch/x86_64/  entry.asm, isr.asm, gdt, idt, pic, timer, keyboard,
                 mouse, pci, console, panic
   drivers/      ata.cpp, blockdev.cpp
-  fs/           vfs.cpp, fat32.cpp
+  fs/           vfs.cpp, fat32.cpp, files.cpp
   mm/           pmm.cpp, vmm.cpp, heap.cpp
   sched/        scheduler.cpp
-  proc/         process.cpp
+  proc/         process.cpp                   fork/exec/wait
   include/leah/ public headers
   lib/          string.cpp, cxx.cpp           freestanding runtime
   main.cpp      kernel_main
@@ -164,9 +164,10 @@ physical and virtual memory, enumerates PCI, reads and writes ATA disks, and
 mounts a FAT32 filesystem it reads and writes. It loads ELF programs and runs
 them in ring 3 over a `SYSCALL` ABI — as processes in their own private address
 spaces — and time-slices them with a preemptive scheduler. Processes `fork`,
-`execve` and `wait`; an init process demonstrates the cycle. User programs are C
-linked against leahOS's own libc. Faults produce a register dump instead of a
-silent reset. Filesystem syscalls and a shell are next — then real commands.
+`execve` and `wait`, open files through a per-process descriptor table, and run
+an interactive **shell** with real commands (`ls`, `cat`, `echo`, `pwd`). User
+programs are C linked against leahOS's own libc. Faults produce a register dump
+instead of a silent reset. More coreutils, pipes and redirection come next.
 
 ## Memory management
 
