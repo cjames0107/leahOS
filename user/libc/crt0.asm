@@ -21,11 +21,15 @@ _start:
     ; Terminate the call-frame chain so a debugger stops unwinding here.
     xor rbp, rbp
 
-    ; No argc/argv/envp yet. Pass an empty argument vector so main can be
-    ; written as int main(int, char**) without reading garbage.
-    xor edi, edi                ; argc = 0
-    xor esi, esi                ; argv = NULL
-    xor edx, edx                ; envp = NULL
+    ; The kernel left the stack as: [argc][argv[0]]...[NULL][strings]. Load the
+    ; arguments before touching RSP.
+    mov rdi, [rsp]              ; argc
+    lea rsi, [rsp + 8]          ; argv
+    lea rdx, [rsi + rdi*8 + 8]  ; envp = argv + (argc + 1) * 8
+
+    ; Align the stack to 16 bytes; the following CALL pushes the return address,
+    ; leaving main entered at the ABI-required 16-aligned-plus-8.
+    and rsp, -16
 
     call main
 

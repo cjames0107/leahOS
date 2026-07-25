@@ -2,6 +2,7 @@
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
 #include <leah/panic.hpp>
+#include <leah/file.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/string.hpp>
 
@@ -39,6 +40,7 @@ struct Task {
     const char* name;
     Entry entry;             // kernel threads only
     void* arg;
+    files::Table files;      // open files + cwd; inherited across fork
 };
 
 Task g_tasks[kMaxTasks];
@@ -160,6 +162,7 @@ void init()
     main_task.state  = State::Running;
     main_task.name   = "main";
     main_task.space  = vmm::kernel_space();
+    files::init_table(main_task.files);
     g_task_count = 1;
     g_current = 0;
 }
@@ -216,6 +219,7 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
     task->is_user    = true;
     task->space      = space;
     task->name       = name;
+    files::init_table(task->files);
 
     // The first switch to this task returns into user_return, which restores
     // the TrapFrame and drops to ring 3.
@@ -251,6 +255,11 @@ u32 fork_current(const TrapFrame& parent_user)
         vmm::destroy_address_space(child_space);
         return 0;
     }
+
+    // A child inherits the parent's open files and working directory.
+    Task* child_task = find(child);
+    if (child_task != nullptr)
+        child_task->files = parent->files;
     return child;
 }
 
@@ -317,6 +326,8 @@ u32 current_pid() { return current()->pid; }
 vmm::AddressSpace current_task_space() { return current()->space; }
 
 void current_task_set_space(vmm::AddressSpace space) { current()->space = space; }
+
+files::Table& current_files() { return current()->files; }
 
 u32 alive_count()
 {

@@ -1,5 +1,6 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
+#include <leah/file.hpp>
 #include <leah/gdt.hpp>
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
@@ -29,21 +30,6 @@ bool user_range_ok(vaddr_t base, u64 length)
     if (length > kUserCeiling - base)
         return false;
     return true;
-}
-
-u64 sys_write(u64 fd, vaddr_t buffer, u64 length)
-{
-    if (fd != 1 && fd != 2)
-        return static_cast<u64>(-1);
-    if (length == 0)
-        return 0;
-    if (!user_range_ok(buffer, length))
-        return static_cast<u64>(-1);
-
-    const char* text = reinterpret_cast<const char*>(buffer);
-    for (u64 i = 0; i < length; ++i)
-        console::put(text[i]);
-    return length;
 }
 
 // Turn the saved syscall registers into the full ring-3 frame a forked child
@@ -93,15 +79,67 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         scheduler::exit_current(static_cast<i32>(frame->rdi));   // never returns
 
     case Write:
-        frame->rax = sys_write(frame->rdi, frame->rsi, frame->rdx);
+        frame->rax = static_cast<u64>(
+            files::write(static_cast<int>(frame->rdi),
+                         reinterpret_cast<const void*>(frame->rsi), frame->rdx));
         break;
 
     case Read:
-        frame->rax = static_cast<u64>(-1);      // no readable fds yet
+        frame->rax = static_cast<u64>(
+            files::read(static_cast<int>(frame->rdi),
+                        reinterpret_cast<void*>(frame->rsi), frame->rdx));
         break;
 
     case GetPid:
         frame->rax = scheduler::current_pid();
+        break;
+
+    case Open:
+        frame->rax = static_cast<u64>(
+            files::open(reinterpret_cast<const char*>(frame->rdi),
+                        static_cast<u32>(frame->rsi)));
+        break;
+
+    case Close:
+        frame->rax = static_cast<u64>(files::close(static_cast<int>(frame->rdi)));
+        break;
+
+    case Lseek:
+        frame->rax = static_cast<u64>(
+            files::lseek(static_cast<int>(frame->rdi),
+                         static_cast<i64>(frame->rsi), static_cast<int>(frame->rdx)));
+        break;
+
+    case Stat:
+        frame->rax = static_cast<u64>(
+            files::stat(reinterpret_cast<const char*>(frame->rdi),
+                        reinterpret_cast<void*>(frame->rsi)));
+        break;
+
+    case Getdents:
+        frame->rax = static_cast<u64>(
+            files::getdents(reinterpret_cast<const char*>(frame->rdi),
+                            reinterpret_cast<void*>(frame->rsi), frame->rdx));
+        break;
+
+    case Chdir:
+        frame->rax = static_cast<u64>(
+            files::chdir(reinterpret_cast<const char*>(frame->rdi)));
+        break;
+
+    case Getcwd:
+        frame->rax = static_cast<u64>(
+            files::getcwd(reinterpret_cast<char*>(frame->rdi), frame->rsi));
+        break;
+
+    case Mkdir:
+        frame->rax = static_cast<u64>(
+            files::mkdir(reinterpret_cast<const char*>(frame->rdi)));
+        break;
+
+    case Unlink:
+        frame->rax = static_cast<u64>(
+            files::unlink(reinterpret_cast<const char*>(frame->rdi)));
         break;
 
     case Fork:
@@ -111,7 +149,8 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
     case Execve:
         // On success this rewrites frame to enter the new image and never
         // "returns" to the caller; on failure it leaves frame->rax = -1.
-        process::exec(*frame, reinterpret_cast<const char*>(frame->rdi));
+        process::exec(*frame, reinterpret_cast<const char*>(frame->rdi),
+                      reinterpret_cast<char**>(frame->rsi));
         break;
 
     case Wait: {

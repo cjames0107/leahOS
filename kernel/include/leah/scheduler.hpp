@@ -1,5 +1,6 @@
 #pragma once
 
+#include <leah/file.hpp>
 #include <leah/types.hpp>
 #include <leah/vmm.hpp>
 
@@ -63,6 +64,9 @@ u32 alive_count();
 // freshly loaded image's space (the caller frees the old one).
 vmm::AddressSpace current_task_space();
 void current_task_set_space(vmm::AddressSpace space);
+
+// The running task's open-file table.
+files::Table& current_files();
 
 // --- called from interrupt context -----------------------------------------
 

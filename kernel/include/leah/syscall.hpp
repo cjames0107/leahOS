@@ -12,14 +12,23 @@ namespace syscall {
 
 // leahOS's own numbers, not Linux's; there is no compatibility to preserve yet.
 enum Number : u64 {
-    Exit   = 0,
-    Write  = 1,
-    Read   = 2,
-    GetPid = 3,
-    Fork   = 4,
-    Execve = 5,
-    Wait   = 6,
-    Yield  = 7,
+    Exit    = 0,
+    Write   = 1,
+    Read    = 2,
+    GetPid  = 3,
+    Fork    = 4,
+    Execve  = 5,
+    Wait    = 6,
+    Yield   = 7,
+    Open    = 8,
+    Close   = 9,
+    Lseek   = 10,
+    Stat    = 11,
+    Getdents = 12,
+    Chdir   = 13,
+    Getcwd  = 14,
+    Mkdir   = 15,
+    Unlink  = 16,
 };
 
 // The register state a syscall handler sees. Field order is a contract with

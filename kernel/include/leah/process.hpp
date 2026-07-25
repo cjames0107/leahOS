@@ -19,9 +19,10 @@ constexpr usize   kUserStackPages = 16;
 // pid, or 0 on failure. The process is runnable but not run until scheduled.
 u32 create(const char* name, const char* path, u32 parent_pid);
 
-// Replace the calling process's image with `path`. On success it rewrites
-// `frame` so the syscall returns into the new program and frees the old address
-// space; on failure it sets frame.rax to -1 and leaves the caller running.
-void exec(syscall::Frame& frame, const char* path);
+// Replace the calling process's image with `path`, passing `argv`. On success it
+// rewrites `frame` so the syscall returns into the new program on a fresh argv
+// stack and frees the old address space; on failure it sets frame.rax to -1 and
+// leaves the caller running.
+void exec(syscall::Frame& frame, const char* path, char** argv);
 
 } // namespace process

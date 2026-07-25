@@ -152,8 +152,8 @@ kernel/
   lib/          string.cpp, cxx.cpp           freestanding runtime
   main.cpp      kernel_main
   linker.ld
-user/           libc/ (crt0, syscalls, string, stdio, stdlib)
-                init.c, hello.c
+user/           libc/ (crt0, syscalls, string, stdio, stdlib, fs)
+                init.c, sh.c, echo.c, cat.c, ls.c, pwd.c, hello.c
 tools/          run-headless.sh, mkfs_fat32.py
 ```
 
@@ -342,6 +342,26 @@ all is the rest of the proof. That it is genuinely unprivileged was confirmed
 by temporarily giving it a `cli`, which faults with `#GP` at CPL 3 where it
 would silently succeed at CPL 0.
 
+## Userland
+
+Programs reach the filesystem through a small set of syscalls - open, close,
+read, write, lseek, stat, getdents, chdir, getcwd, mkdir, unlink - over a
+per-process file-descriptor table carried in the task and inherited across
+fork. The VFS is path-based, so a descriptor is just a remembered path and a
+cursor. fd 0/1/2 are the console; open() returns higher numbers.
+
+execve passes argv: the strings are copied into the kernel before CR3 is
+switched (they live in the old space), then laid out on the new program's stack
+the way _start expects - argc, the pointers, a NULL, then the strings - and
+crt0 reads them back and calls main(argc, argv).
+
+That is enough for a shell and real commands. `sh` reads a line (the console
+echoes as you type), splits it, runs cd/exit/help itself, and forks+execs
+/BIN/<NAME>.ELF for anything else. `ls`, `cat`, `echo` and `pwd` are ordinary C
+programs against the libc. The init process scripts a few of them as a demo -
+so a headless boot verifies the whole path without a keyboard - then execs the
+shell.
+
 ## Processes
 
 `fork`, `execve`, `wait` and `exit` are real. A task is a schedulable entity
@@ -495,5 +515,6 @@ a symptom.
 - [x] per-process address spaces (private page tables, CR3 switch)
 - [x] `fork`, `execve`, `wait`, a process table, an init process
 - [ ] USB: xHCI, then the HID and mass-storage class drivers
-- [ ] filesystem syscalls (open/read/readdir/stat) and a shell
-- [ ] coreutils: ls, cp, cat, echo …
+- [x] filesystem syscalls (open/read/write/stat/getdents/chdir…), a per-process fd table
+- [x] a shell and coreutils: ls, cat, echo, pwd
+- [ ] more coreutils (cp, mv, rm, mkdir), pipes and redirection
