@@ -161,9 +161,10 @@ tools/          run-headless.sh, mkfs_fat32.py
 Boots to long mode, owns its descriptor tables, handles interrupts, manages
 physical and virtual memory, enumerates PCI, reads and writes ATA disks, and
 mounts a FAT32 filesystem it reads and writes. It loads ELF programs and runs
-them in ring 3 over a `SYSCALL` ABI, and time-slices kernel threads with a
-preemptive scheduler. Faults produce a register dump instead of a silent reset.
-Processes with their own address spaces — and `fork`/`execve` — are next.
+them in ring 3 over a `SYSCALL` ABI — as processes in their own private address
+spaces — and time-slices kernel threads with a preemptive scheduler. User
+programs are C linked against leahOS's own libc. Faults produce a register dump
+instead of a silent reset. `fork`, `execve` and `wait` are next.
 
 ## Memory management
 
