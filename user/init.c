@@ -5,6 +5,7 @@
  * needing keyboard input - and then hands off to the interactive shell.
  */
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -63,6 +64,46 @@ int main(void)
     char* rm_args[] = { "rm", "/PLAY/COPY.TXT", 0 };
     printf("$ rm /PLAY/COPY.TXT\n");
     run("/BIN/RM.ELF", rm_args);
+
+    // Redirection: send echo's output to a file, then read it back.
+    printf("$ echo redirected to a file > /REDIR.TXT\n");
+    if (fork() == 0) {
+        const int fd = open("/REDIR.TXT", O_WRONLY | O_CREAT | O_TRUNC);
+        dup2(fd, 1);
+        close(fd);
+        char* a[] = { "echo", "redirected", "to", "a", "file", 0 };
+        execve("/BIN/ECHO.ELF", a, 0);
+        exit(127);
+    }
+    wait(0);
+    char* cat_redir[] = { "cat", "/REDIR.TXT", 0 };
+    printf("$ cat /REDIR.TXT\n");
+    run("/BIN/CAT.ELF", cat_redir);
+
+    // A pipe: echo's stdout feeds cat's stdin.
+    printf("$ echo piped through a pipe | cat\n");
+    int pfd[2];
+    pipe(pfd);
+    if (fork() == 0) {
+        dup2(pfd[1], 1);
+        close(pfd[0]);
+        close(pfd[1]);
+        char* a[] = { "echo", "piped", "through", "a", "pipe", 0 };
+        execve("/BIN/ECHO.ELF", a, 0);
+        exit(127);
+    }
+    if (fork() == 0) {
+        dup2(pfd[0], 0);
+        close(pfd[0]);
+        close(pfd[1]);
+        char* a[] = { "cat", 0 };
+        execve("/BIN/CAT.ELF", a, 0);
+        exit(127);
+    }
+    close(pfd[0]);
+    close(pfd[1]);
+    wait(0);
+    wait(0);
 
     printf("\ninit: demo complete, launching shell\n");
 

@@ -142,6 +142,16 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             files::unlink(reinterpret_cast<const char*>(frame->rdi)));
         break;
 
+    case Pipe:
+        frame->rax = static_cast<u64>(
+            files::pipe(reinterpret_cast<int*>(frame->rdi)));
+        break;
+
+    case Dup2:
+        frame->rax = static_cast<u64>(
+            files::dup2(static_cast<int>(frame->rdi), static_cast<int>(frame->rsi)));
+        break;
+
     case Fork:
         frame->rax = scheduler::fork_current(to_trap_frame(*frame));
         break;

@@ -2,11 +2,20 @@
 #include <stdio.h>
 #include <unistd.h>
 
+static void copy_fd(int fd)
+{
+    char buffer[512];
+    long n;
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0)
+        write(1, buffer, (unsigned long)n);
+}
+
 int main(int argc, char** argv)
 {
+    /* No files: copy stdin to stdout, which is what makes `... | cat` work. */
     if (argc < 2) {
-        printf("usage: cat FILE...\n");
-        return 1;
+        copy_fd(0);
+        return 0;
     }
 
     int status = 0;
@@ -18,10 +27,7 @@ int main(int argc, char** argv)
             continue;
         }
 
-        char buffer[512];
-        long n;
-        while ((n = read(fd, buffer, sizeof(buffer))) > 0)
-            write(1, buffer, (unsigned long)n);
+        copy_fd(fd);
         close(fd);
     }
     return status;

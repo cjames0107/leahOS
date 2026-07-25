@@ -21,6 +21,8 @@
 #define SYS_getcwd   14
 #define SYS_mkdir    15
 #define SYS_unlink   16
+#define SYS_pipe     17
+#define SYS_dup2     18
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused

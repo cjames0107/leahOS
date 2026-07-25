@@ -47,3 +47,13 @@ int unlink(const char* path)
 {
     return (int)__syscall(SYS_unlink, (long)path, 0, 0, 0, 0);
 }
+
+int pipe(int fds[2])
+{
+    return (int)__syscall(SYS_pipe, (long)fds, 0, 0, 0, 0);
+}
+
+int dup2(int oldfd, int newfd)
+{
+    return (int)__syscall(SYS_dup2, oldfd, newfd, 0, 0, 0);
+}

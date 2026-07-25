@@ -16,12 +16,14 @@ enum class Kind : u8 {
     ConsoleIn,      // fd 0: the keyboard
     ConsoleOut,     // fd 1, 2: the console
     File,
+    Pipe,
 };
 
 struct Descriptor {
     Kind  kind;
     u64   offset;
     u32   flags;
+    void* pipe;     // the shared pipe object, for Kind::Pipe
     char  path[kPathMax];
 };
 
@@ -64,5 +66,20 @@ i64 chdir(const char* path);
 i64 getcwd(char* buffer, usize size);
 i64 mkdir(const char* path);
 i64 unlink(const char* path);
+
+// Create a pipe. Writes the read fd to out_fds[0] and the write fd to
+// out_fds[1]. Returns 0, or -1.
+i64 pipe(int* out_fds);
+
+// Point newfd at whatever oldfd refers to, closing newfd first if it is open.
+i64 dup2(int oldfd, int newfd);
+
+// Bump the pipe reference counts for a table just copied by fork - both the
+// parent and child now hold each inherited pipe end.
+void inherit(Table& child);
+
+// Close every descriptor in a table (called when a task exits), so pipe ends
+// are released and readers see EOF.
+void close_all(Table& table);
 
 } // namespace files

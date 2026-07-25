@@ -308,10 +308,13 @@ u32 fork_current(const TrapFrame& parent_user)
         return 0;
     }
 
-    // A child inherits the parent's open files and working directory.
+    // A child inherits the parent's open files and working directory. The pipe
+    // ends among them gain a reference: both processes now hold each one.
     Task* child_task = find(child);
-    if (child_task != nullptr)
+    if (child_task != nullptr) {
         child_task->files = parent->files;
+        files::inherit(child_task->files);
+    }
     return child;
 }
 
@@ -321,6 +324,9 @@ void exit_current(i32 code)
 
     Task* self = current();
     self->exit_code = code;
+
+    // Release open files - notably pipe ends, so the other side sees EOF.
+    files::close_all(self->files);
 
     // Drop the user address space now; the kernel stack (in the shared heap)
     // stays until a parent reaps it. Switch off the space before freeing it.

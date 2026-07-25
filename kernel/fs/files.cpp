@@ -1,6 +1,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
+#include <leah/heap.hpp>
 #include <leah/keyboard.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/string.hpp>
@@ -20,6 +21,85 @@ struct [[gnu::packed]] UserStat {
 Table& table() { return scheduler::current_files(); }
 
 bool valid_fd(int fd) { return fd >= 0 && fd < kMaxFds; }
+
+// --- pipes -----------------------------------------------------------------
+//
+// A bounded ring buffer with counts of how many descriptors hold each end.
+// Readers sleep on the read channel and writers wake them; writers sleep on the
+// write channel and readers wake them. When the last writer closes, a blocked
+// reader wakes to an end-of-file; when the last reader closes, a write fails.
+
+struct Pipe {
+    static constexpr usize kSize = 4096;
+    u8    buffer[kSize];
+    usize head;         // next read
+    usize tail;         // next write
+    usize count;
+    int   readers;
+    int   writers;
+};
+
+u64 read_channel(Pipe* p)  { return reinterpret_cast<u64>(p); }
+u64 write_channel(Pipe* p) { return reinterpret_cast<u64>(p) + 1; }
+
+i64 pipe_read(Pipe* p, void* buffer, usize count)
+{
+    auto* out = static_cast<u8*>(buffer);
+    for (;;) {
+        if (p->count > 0) {
+            usize n = 0;
+            while (n < count && p->count > 0) {
+                out[n++] = p->buffer[p->head];
+                p->head = (p->head + 1) % Pipe::kSize;
+                --p->count;
+            }
+            scheduler::wake(write_channel(p));      // freed space
+            return static_cast<i64>(n);
+        }
+        if (p->writers == 0)
+            return 0;                               // end of file
+        scheduler::block_on(read_channel(p));
+    }
+}
+
+i64 pipe_write(Pipe* p, const void* buffer, usize count)
+{
+    const auto* in = static_cast<const u8*>(buffer);
+    usize written = 0;
+    while (written < count) {
+        if (p->readers == 0)
+            return written > 0 ? static_cast<i64>(written) : -1;   // broken pipe
+        if (p->count == Pipe::kSize) {
+            scheduler::block_on(write_channel(p));
+            continue;
+        }
+        while (written < count && p->count < Pipe::kSize) {
+            p->buffer[p->tail] = in[written++];
+            p->tail = (p->tail + 1) % Pipe::kSize;
+            ++p->count;
+        }
+        scheduler::wake(read_channel(p));           // data available
+    }
+    return static_cast<i64>(written);
+}
+
+// Drop this descriptor's hold on its pipe end; free the pipe when both ends are
+// fully closed, and wake the other side so it notices.
+void release_pipe(Descriptor& d)
+{
+    auto* p = static_cast<Pipe*>(d.pipe);
+    if (p == nullptr)
+        return;
+    if ((d.flags & kRead) != 0) {
+        if (--p->readers == 0)
+            scheduler::wake(write_channel(p));
+    } else {
+        if (--p->writers == 0)
+            scheduler::wake(read_channel(p));
+    }
+    if (p->readers == 0 && p->writers == 0)
+        kfree(p);
+}
 
 void append(char* out, usize& len, char c)
 {
@@ -182,7 +262,11 @@ i64 close(int fd)
 {
     if (!valid_fd(fd) || table().fds[fd].kind == Kind::None)
         return -1;
-    table().fds[fd].kind = Kind::None;
+    Descriptor& d = table().fds[fd];
+    if (d.kind == Kind::Pipe)
+        release_pipe(d);
+    d.kind = Kind::None;
+    d.pipe = nullptr;
     return 0;
 }
 
@@ -195,6 +279,10 @@ i64 read(int fd, void* buffer, usize count)
     switch (d.kind) {
     case Kind::ConsoleIn:
         return read_console(buffer, count);
+    case Kind::Pipe:
+        if ((d.flags & kRead) == 0)
+            return -1;
+        return pipe_read(static_cast<Pipe*>(d.pipe), buffer, count);
     case Kind::File: {
         const isize got = vfs::read(d.path, d.offset, buffer, count);
         if (got < 0)
@@ -220,6 +308,10 @@ i64 write(int fd, const void* buffer, usize count)
             console::put(text[i]);
         return static_cast<i64>(count);
     }
+    case Kind::Pipe:
+        if ((d.flags & kWrite) == 0)
+            return -1;
+        return pipe_write(static_cast<Pipe*>(d.pipe), buffer, count);
     case Kind::File: {
         const isize wrote = vfs::write(d.path, d.offset, buffer, count);
         if (wrote < 0)
@@ -331,6 +423,87 @@ i64 unlink(const char* path)
     char resolved[kPathMax];
     resolve(path, resolved);
     return vfs::remove(resolved) ? 0 : -1;
+}
+
+i64 pipe(int* out_fds)
+{
+    const int read_fd = alloc_fd();
+    if (read_fd < 0)
+        return -1;
+    table().fds[read_fd].kind = Kind::File;      // reserve the slot temporarily
+    const int write_fd = alloc_fd();
+    if (write_fd < 0) {
+        table().fds[read_fd].kind = Kind::None;
+        return -1;
+    }
+
+    auto* p = static_cast<Pipe*>(kmalloc(sizeof(Pipe)));
+    if (p == nullptr) {
+        table().fds[read_fd].kind = Kind::None;
+        table().fds[write_fd].kind = Kind::None;
+        return -1;
+    }
+    memset(p, 0, sizeof(Pipe));
+    p->readers = 1;
+    p->writers = 1;
+
+    Descriptor& r = table().fds[read_fd];
+    r.kind = Kind::Pipe;
+    r.flags = kRead;
+    r.pipe = p;
+    Descriptor& w = table().fds[write_fd];
+    w.kind = Kind::Pipe;
+    w.flags = kWrite;
+    w.pipe = p;
+
+    out_fds[0] = read_fd;
+    out_fds[1] = write_fd;
+    return 0;
+}
+
+i64 dup2(int oldfd, int newfd)
+{
+    if (!valid_fd(oldfd) || !valid_fd(newfd) || table().fds[oldfd].kind == Kind::None)
+        return -1;
+    if (oldfd == newfd)
+        return newfd;
+
+    if (table().fds[newfd].kind != Kind::None)
+        close(newfd);
+
+    Descriptor& src = table().fds[oldfd];
+    table().fds[newfd] = src;
+    if (src.kind == Kind::Pipe) {
+        auto* p = static_cast<Pipe*>(src.pipe);
+        if ((src.flags & kRead) != 0)
+            ++p->readers;
+        else
+            ++p->writers;
+    }
+    return newfd;
+}
+
+void inherit(Table& child)
+{
+    for (int fd = 0; fd < kMaxFds; ++fd) {
+        Descriptor& d = child.fds[fd];
+        if (d.kind != Kind::Pipe)
+            continue;
+        auto* p = static_cast<Pipe*>(d.pipe);
+        if ((d.flags & kRead) != 0)
+            ++p->readers;
+        else
+            ++p->writers;
+    }
+}
+
+void close_all(Table& t)
+{
+    for (int fd = 0; fd < kMaxFds; ++fd) {
+        if (t.fds[fd].kind == Kind::Pipe)
+            release_pipe(t.fds[fd]);
+        t.fds[fd].kind = Kind::None;
+    }
 }
 
 } // namespace files

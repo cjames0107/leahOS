@@ -20,6 +20,8 @@ long   lseek(int fd, long offset, int whence);
 int    chdir(const char* path);
 int    getcwd(char* buffer, size_t size);
 int    unlink(const char* path);
+int    pipe(int fds[2]);
+int    dup2(int oldfd, int newfd);
 
 #define SEEK_SET 0
 #define SEEK_CUR 1

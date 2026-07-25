@@ -29,6 +29,8 @@ enum Number : u64 {
     Getcwd  = 14,
     Mkdir   = 15,
     Unlink  = 16,
+    Pipe    = 17,
+    Dup2    = 18,
 };
 
 // The register state a syscall handler sees. Field order is a contract with
