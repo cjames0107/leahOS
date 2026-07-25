@@ -17,6 +17,7 @@
 #include <leah/pci.hpp>
 #include <leah/pic.hpp>
 #include <leah/pmm.hpp>
+#include <leah/process.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
 #include <leah/types.hpp>
@@ -421,49 +422,38 @@ void print_filesystem()
 
 // Loads a real ELF off the filesystem and calls it. Still ring 0 and still the
 // kernel's address space - what this proves is the parsing, the mapping and
-// Loads a C program built against leahOS's libc and runs it in ring 3. It
-// proves the whole privilege round trip - IRETQ into CPL 3, the program's
-// syscalls (write, getpid) coming back in, exit unwinding out - and, because
-// the program is C rather than hand-written assembly, that crt0, the syscall
-// wrappers, printf and malloc all work. The printed lines are the human check;
-// the exit code is the machine check.
+// Runs a C program as a process in its own address space, and proves the
+// isolation: after it exits, the address it ran at is not mapped in the
+// kernel's space, because its page tables were private and have been freed.
+// The printed lines and exit code prove the program itself ran; the unmapped
+// check proves it did so somewhere the kernel could not see.
 void self_test_userspace()
 {
-    elf::Image image{};
-    const elf::Error error = elf::load("/BIN/HELLO.ELF", image);
-    if (error != elf::Error::None) {
-        console::set_color(console::Color::LightRed);
-        console::printf("\n  elf: %s\n", elf::error_name(error));
-        panic("elf: could not load /BIN/HELLO.ELF");
-    }
-
-    // A ring-3 stack. NoExecute because it is a stack, User so CPL 3 can reach
-    // it. Unlike the old assembly program, a C program really uses this - crt0
-    // pushes a frame and printf spills a 512-byte buffer onto it.
-    constexpr vaddr_t kUserStackTop   = 0x0000700000000000ull;
-    constexpr usize   kUserStackPages = 16;
-    for (usize i = 0; i < kUserStackPages; ++i) {
-        const vaddr_t page = kUserStackTop - (i + 1) * vmm::kPageSize;
-        const paddr_t frame = pmm::alloc();
-        if (frame == 0)
-            panic("elf: out of memory for the user stack");
-        if (!vmm::map(page, frame, vmm::Write | vmm::User | vmm::NoExecute))
-            panic("elf: could not map the user stack");
-    }
-
-    console::set_color(console::Color::LightCyan);
     console::write("\n");
-    console::set_color(console::Color::LightGray);
 
-    const u64 result = syscall::run(image.entry, kUserStackTop);
+    const process::Result first = process::run("/BIN/HELLO.ELF");
+    if (!first.loaded)
+        panic("process: could not run /BIN/HELLO.ELF");
+    if (first.exit_code != 0x42)
+        panic("process: C program produced the wrong exit code");
 
-    // main returns 0x42; crt0 hands that to exit as the status.
-    if (result != 0x42)
-        panic("elf: C program produced the wrong exit code");
+    // The program lived at the ELF's entry and its stack; neither may be
+    // visible in the kernel's own address space now.
+    vmm::switch_address_space(vmm::kernel_space());
+    if (vmm::translate(0x0000600000000000ull) != 0 ||
+        vmm::translate(process::kUserStackTop - vmm::kPageSize) != 0)
+        panic("process: user memory leaked into the kernel address space");
+
+    // Run it a second time. If the first run's teardown were wrong - a
+    // double-free or a leaked mapping - a fresh process reusing the same frames
+    // and addresses is where it would surface.
+    const process::Result second = process::run("/BIN/HELLO.ELF");
+    if (!second.loaded || second.exit_code != 0x42)
+        panic("process: second run in a fresh address space failed");
 
     console::set_color(console::Color::DarkGray);
-    console::printf("\n  elf  /BIN/HELLO.ELF  %u segments, entry %p, ring 3 exit 0x%llx\n",
-                    image.segments, reinterpret_cast<void*>(image.entry), result);
+    console::printf("\n  process: ran /BIN/HELLO.ELF twice in private address spaces, exit 0x%llx\n",
+                    second.exit_code);
     console::set_color(console::Color::LightGray);
 }
 

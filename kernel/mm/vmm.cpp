@@ -14,7 +14,19 @@ namespace {
 constexpr u64 kEntriesPerTable = 512;
 constexpr u64 kAddressMask = 0x000FFFFFFFFFF000ull;   // bits 51:12 of an entry
 
-u64 g_pml4_phys = 0;
+u64 g_pml4_phys = 0;         // the kernel's own top-level table
+u64 g_current_pml4 = 0;      // the table CR3 currently points at
+
+// A user space is "the kernel's PML4 entries, plus this process's own". The
+// kernel still keeps its identity map and heap in low-half slots ([0] and the
+// heap's), so there is no clean high/low split yet - instead a slot is
+// kernel-owned exactly when the kernel's PML4 has an entry for it. User memory
+// therefore has to live in slots the kernel does not use; see user.ld, which
+// links programs at 96 TiB for precisely that reason. Retiring this - moving
+// the kernel's identity map to a higher-half direct map so the whole low half
+// is user's - is the cleanup that will also let programs link low.
+u64* kernel_pml4() { return reinterpret_cast<u64*>(g_pml4_phys); }
+u64* current_pml4() { return reinterpret_cast<u64*>(g_current_pml4); }
 
 // Everything here dereferences physical addresses directly. That is only legal
 // because the kernel identity maps all of RAM; the day this moves to the higher
@@ -141,15 +153,16 @@ void init()
         pd[index_of(virt, 2)] = offset | Present | Write | Huge;
     }
 
+    g_current_pml4 = g_pml4_phys;
     asm volatile("mov %0, %%cr3" : : "r"(g_pml4_phys) : "memory");
 }
 
-bool map(vaddr_t virt, paddr_t phys, u64 flags)
-{
-    if (g_pml4_phys == 0)
-        return false;
+namespace {
 
-    auto* pml4 = reinterpret_cast<u64*>(g_pml4_phys);
+bool map_into(u64* pml4, vaddr_t virt, paddr_t phys, u64 flags)
+{
+    if (pml4 == nullptr)
+        return false;
 
     u64* pdpt = next_level(pml4, index_of(virt, 4), true);
     if (pdpt == nullptr)
@@ -173,25 +186,8 @@ bool map(vaddr_t virt, paddr_t phys, u64 flags)
     return true;
 }
 
-bool map_range(vaddr_t virt, paddr_t phys, usize bytes, u64 flags)
+bool unmap_into(u64* pml4, vaddr_t virt)
 {
-    const usize pages = (bytes + kPageSize - 1) / kPageSize;
-    for (usize i = 0; i < pages; ++i) {
-        if (!map(virt + i * kPageSize, phys + i * kPageSize, flags))
-            return false;
-    }
-    return true;
-}
-
-bool map_mmio(vaddr_t virt, paddr_t phys, usize bytes)
-{
-    return map_range(virt, phys, bytes, Write | NoCache | WriteThrough | NoExecute);
-}
-
-bool unmap(vaddr_t virt)
-{
-    auto* pml4 = reinterpret_cast<u64*>(g_pml4_phys);
-
     u64* pdpt = next_level(pml4, index_of(virt, 4), false);
     if (pdpt == nullptr)
         return false;
@@ -214,10 +210,8 @@ bool unmap(vaddr_t virt)
     return true;
 }
 
-paddr_t translate(vaddr_t virt)
+paddr_t translate_into(u64* pml4, vaddr_t virt)
 {
-    auto* pml4 = reinterpret_cast<u64*>(g_pml4_phys);
-
     u64* pdpt = next_level(pml4, index_of(virt, 4), false);
     if (pdpt == nullptr)
         return 0;
@@ -236,6 +230,113 @@ paddr_t translate(vaddr_t virt)
     if ((pt_entry & Present) == 0)
         return 0;
     return (pt_entry & kAddressMask) + (virt & (kPageSize - 1));
+}
+
+// Free a PDPT/PD/PT sub-tree and, at the leaf level, the frames it mapped. Used
+// to tear down a user space. `level` is the table's own level (4=PML4 slot's
+// PDPT ... 1=PT); a Huge entry is a leaf one level up.
+void free_table_tree(u64 table_phys, int level)
+{
+    u64* table = reinterpret_cast<u64*>(table_phys);
+    for (u64 i = 0; i < kEntriesPerTable; ++i) {
+        const u64 entry = table[i];
+        if ((entry & Present) == 0)
+            continue;
+        const u64 target = entry & kAddressMask;
+        if (level == 1 || (entry & Huge) != 0) {
+            pmm::free(target);              // a mapped data frame
+        } else {
+            free_table_tree(target, level - 1);
+        }
+    }
+    pmm::free(table_phys);
+}
+
+} // namespace
+
+bool map(vaddr_t virt, paddr_t phys, u64 flags)
+{
+    return map_into(current_pml4(), virt, phys, flags);
+}
+
+bool unmap(vaddr_t virt)
+{
+    return unmap_into(current_pml4(), virt);
+}
+
+paddr_t translate(vaddr_t virt)
+{
+    return translate_into(current_pml4(), virt);
+}
+
+bool map_range(vaddr_t virt, paddr_t phys, usize bytes, u64 flags)
+{
+    const usize pages = (bytes + kPageSize - 1) / kPageSize;
+    for (usize i = 0; i < pages; ++i) {
+        if (!map(virt + i * kPageSize, phys + i * kPageSize, flags))
+            return false;
+    }
+    return true;
+}
+
+bool map_mmio(vaddr_t virt, paddr_t phys, usize bytes)
+{
+    return map_range(virt, phys, bytes, Write | NoCache | WriteThrough | NoExecute);
+}
+
+AddressSpace kernel_space()  { return g_pml4_phys; }
+AddressSpace current_space() { return g_current_pml4; }
+
+AddressSpace create_address_space()
+{
+    u64* space = alloc_table();
+    if (space == nullptr)
+        return 0;
+
+    // Copy every one of the kernel's top-level entries. They point at the
+    // kernel's own sub-tables, so the kernel's code, heap, identity map and any
+    // later mapping into an existing slot are shared into this space by
+    // reference - no copy needed below the top level. The process's own
+    // mappings go into the slots the kernel left empty.
+    u64* kernel = kernel_pml4();
+    for (u64 i = 0; i < kEntriesPerTable; ++i)
+        space[i] = kernel[i];
+
+    return reinterpret_cast<u64>(space);
+}
+
+void destroy_address_space(AddressSpace space)
+{
+    if (space == 0 || space == g_pml4_phys)
+        return;
+
+    // Never free while it is the active table; the caller switches away first.
+    if (space == g_current_pml4)
+        switch_address_space(g_pml4_phys);
+
+    u64* pml4 = reinterpret_cast<u64*>(space);
+    u64* kernel = kernel_pml4();
+
+    // Only the slots this space added - the ones the kernel does not share -
+    // are ours to free. Freeing a shared kernel sub-tree would unmap the kernel
+    // out from under every other space.
+    for (u64 i = 0; i < kEntriesPerTable; ++i) {
+        if ((pml4[i] & Present) == 0)
+            continue;
+        if (pml4[i] == kernel[i])
+            continue;                       // shared with the kernel, leave it
+        free_table_tree(pml4[i] & kAddressMask, 3);
+    }
+
+    pmm::free(space);
+}
+
+void switch_address_space(AddressSpace space)
+{
+    if (space == 0 || space == g_current_pml4)
+        return;
+    g_current_pml4 = space;
+    asm volatile("mov %0, %%cr3" : : "r"(space) : "memory");
 }
 
 paddr_t kernel_page_table() { return g_pml4_phys; }

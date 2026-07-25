@@ -147,6 +147,7 @@ kernel/
   fs/           vfs.cpp, fat32.cpp
   mm/           pmm.cpp, vmm.cpp, heap.cpp
   sched/        scheduler.cpp
+  proc/         process.cpp
   include/leah/ public headers
   lib/          string.cpp, cxx.cpp           freestanding runtime
   main.cpp      kernel_main
@@ -338,6 +339,31 @@ all is the rest of the proof. That it is genuinely unprivileged was confirmed
 by temporarily giving it a `cli`, which faults with `#GP` at CPL 3 where it
 would silently succeed at CPL 0.
 
+## Address spaces
+
+Each process runs in its own top-level page table. A new space is the kernel's
+own PML4 copied entry-for-entry, then the process adds its own mappings in the
+slots the kernel left empty. Because the copied entries point at the kernel's
+sub-tables, the kernel's code, heap and identity map are shared into every
+space by reference - which is what lets a syscall or interrupt taken while a
+process runs still find the kernel without switching `CR3` back first. Only the
+slots a space added are private, and only those are freed when it is destroyed;
+freeing a shared kernel sub-tree would unmap the kernel out from under every
+other process.
+
+There is not yet a clean high/low split: the kernel still keeps its identity
+map and heap in low-half slots, so "kernel-owned" means "the kernel's PML4 has
+an entry for this slot" rather than "it is in the high half". User memory
+therefore lives in slots the kernel does not use, which is why programs link at
+96 TiB. Moving the kernel's identity map to a higher-half direct map - freeing
+the whole low half for user space and letting programs link low - is the
+cleanup that retires both that and `-mcmodel=large`.
+
+Isolation is checked directly: a program runs, exits, and the kernel confirms
+the addresses it used are no longer mapped in the kernel's space. Running it a
+second time - reusing the freed frames and the same addresses - is where a
+teardown bug would show up.
+
 ## Scheduling
 
 A round-robin preemptive scheduler over kernel threads, all sharing the kernel
@@ -436,6 +462,7 @@ a symptom.
 - [x] ring 3, `syscall`/`sysret`, a first system-call ABI
 - [x] preemptive scheduler, kernel threads, round-robin time-slicing
 - [x] a freestanding libc: crt0, syscall wrappers, string/stdio/malloc
-- [ ] processes with separate address spaces; `fork`/`execve`/`wait`
+- [x] per-process address spaces (private page tables, CR3 switch)
+- [ ] `fork`/`execve`/`wait` and a process table
 - [ ] USB: xHCI, then the HID and mass-storage class drivers
 - [ ] a userland shell

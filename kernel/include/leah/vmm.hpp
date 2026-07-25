@@ -25,22 +25,43 @@ enum Flags : u64 {
 constexpr u64 kPageSize     = 4096;
 constexpr u64 kHugePageSize = 2 * 1024 * 1024;
 
+// An address space is just its top-level page table, named by physical address.
+// The kernel's mappings (the identity map, the heap, the kernel image) are
+// copied into every user space so the kernel is reachable no matter which one
+// is active - which is what lets a syscall or interrupt run in a process's
+// address space without switching back first.
+using AddressSpace = paddr_t;
+
 void init();
 
-// 4 KiB granularity. Splits a containing 2 MiB page if it has to, so callers
-// never have to know how the region was originally mapped.
+// 4 KiB granularity, operating on whichever space is currently active. Splits a
+// containing 2 MiB page if it has to, so callers never have to know how the
+// region was originally mapped.
 bool map(vaddr_t virt, paddr_t phys, u64 flags);
 bool map_range(vaddr_t virt, paddr_t phys, usize bytes, u64 flags);
-
 bool unmap(vaddr_t virt);
-
-// Returns 0 if nothing is mapped there.
-paddr_t translate(vaddr_t virt);
-
-paddr_t kernel_page_table();
+paddr_t translate(vaddr_t virt);        // 0 if nothing is mapped there
 
 // Map physical device memory (PCI BARs, framebuffers) as uncacheable. Writing
 // through a cache to a device register is a classic way to lose writes.
 bool map_mmio(vaddr_t virt, paddr_t phys, usize bytes);
+
+// --- address spaces ---------------------------------------------------------
+
+AddressSpace kernel_space();
+AddressSpace current_space();
+
+// A fresh user space that shares the kernel's mappings. 0 on failure.
+AddressSpace create_address_space();
+
+// Frees the space's private (user) page tables, the frames they mapped, and the
+// top-level table itself. The shared kernel mappings are left untouched.
+void destroy_address_space(AddressSpace space);
+
+// Make a space active: load CR3 and record it as current. Cheap to call with
+// the already-active space (skips the reload).
+void switch_address_space(AddressSpace space);
+
+paddr_t kernel_page_table();
 
 } // namespace vmm
