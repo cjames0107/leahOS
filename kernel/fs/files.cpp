@@ -99,12 +99,22 @@ int alloc_fd()
 // A blocking, echoing read from the keyboard, one line's worth at most. Echoing
 // here is what makes the shell usable: the user sees what they type, and
 // backspace erases on screen.
+char read_key()
+{
+    // Sleep the task (letting others run) until a key is buffered, then take it.
+    // Interrupts are masked in the syscall, so the has_input check and the block
+    // cannot race the keyboard IRQ that would wake us.
+    while (!keyboard::has_input())
+        scheduler::block_on(scheduler::kKeyboardChannel);
+    return keyboard::read();
+}
+
 i64 read_console(void* buffer, usize count)
 {
     auto* out = static_cast<char*>(buffer);
     usize n = 0;
     while (n < count) {
-        const char c = keyboard::read_blocking();
+        const char c = read_key();
         if (c == '\b') {
             if (n > 0) {
                 --n;

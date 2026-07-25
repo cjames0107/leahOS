@@ -3,6 +3,7 @@
 #include <leah/io.hpp>
 #include <leah/keyboard.hpp>
 #include <leah/pic.hpp>
+#include <leah/scheduler.hpp>
 
 namespace keyboard {
 namespace {
@@ -173,6 +174,9 @@ void handle_scancode(u8 scancode)
         c = static_cast<char>(c - 'A' + 1);
 
     push(c);
+
+    // Wake any task blocked in read() on the console.
+    scheduler::wake(scheduler::kKeyboardChannel);
 }
 
 void on_key(interrupts::Frame&)

@@ -37,6 +37,7 @@ struct Task {
     bool  is_user;
     vmm::AddressSpace space; // 0 for kernel threads (they use the kernel space)
     i32   exit_code;
+    u64   wait_channel;      // when Blocked on block_on(); 0 otherwise
     const char* name;
     Entry entry;             // kernel threads only
     void* arg;
@@ -47,6 +48,9 @@ Task g_tasks[kMaxTasks];
 u32  g_task_count = 0;
 u32  g_current = 0;                  // index into g_tasks
 u32  g_next_pid = 1;
+
+constexpr u32 kNoIdle = 0xFFFFFFFF;
+u32  g_idle_index = kNoIdle;         // the halt-when-idle task, run only as a last resort
 
 bool g_preemption = false;
 u32  g_quantum = kQuantum;
@@ -85,14 +89,20 @@ Task* alloc_slot()
 
 u32 pick_next()
 {
+    // Any Ready task other than idle, round-robin from the current one.
     for (u32 step = 1; step <= g_task_count; ++step) {
         const u32 index = (g_current + step) % g_task_count;
-        if (g_tasks[index].state == State::Ready)
+        if (index != g_idle_index && g_tasks[index].state == State::Ready)
             return index;
     }
-    if (current()->state == State::Running || current()->state == State::Ready)
+    // Keep running the current task if it is still runnable.
+    if (g_current != g_idle_index &&
+        (current()->state == State::Running || current()->state == State::Ready))
         return g_current;
-    panic("scheduler: nothing runnable");
+    // Nothing else to do: fall back to the idle task.
+    if (g_idle_index != kNoIdle)
+        return g_idle_index;
+    panic("scheduler: nothing runnable and no idle task");
 }
 
 // Enter with interrupts disabled. Besides swapping kernel stacks, this loads
@@ -229,10 +239,52 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
 
 void start_preemption() { g_preemption = true; }
 
+namespace {
+
+[[noreturn]] void idle_entry(void*)
+{
+    for (;;)
+        cpu::wait_for_interrupt();       // sti; hlt until something happens
+}
+
+} // namespace
+
+void start_idle()
+{
+    const u32 pid = spawn("idle", idle_entry, nullptr);
+    // The idle task is the last task spawned so far; find its slot.
+    for (u32 i = 0; i < g_task_count; ++i) {
+        if (g_tasks[i].pid == pid) {
+            g_idle_index = i;
+            break;
+        }
+    }
+}
+
 void yield()
 {
     cpu::InterruptGuard guard;
     switch_to(pick_next());
+}
+
+void block_on(u64 channel)
+{
+    // Caller holds interrupts off, so no wake can slip in between the check that
+    // led here and this block.
+    current()->wait_channel = channel;
+    current()->state = State::Blocked;
+    switch_to(pick_next());
+    // Reached again once woken and rescheduled.
+}
+
+void wake(u64 channel)
+{
+    for (u32 i = 0; i < g_task_count; ++i) {
+        if (g_tasks[i].state == State::Blocked && g_tasks[i].wait_channel == channel) {
+            g_tasks[i].state = State::Ready;
+            g_tasks[i].wait_channel = 0;
+        }
+    }
 }
 
 u32 fork_current(const TrapFrame& parent_user)

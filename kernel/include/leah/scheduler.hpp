@@ -28,8 +28,26 @@ static_assert(sizeof(TrapFrame) == 20 * 8);
 
 void init();
 
+// Create the idle task - a kernel thread that halts when nothing else is
+// runnable. Call once, after the heap is up, before any task can block.
+void start_idle();
+
 // A kernel thread in the kernel's address space. Returns its pid, or 0.
 u32 spawn(const char* name, Entry entry, void* arg);
+
+// --- blocking ---------------------------------------------------------------
+//
+// A channel is an opaque tag a task sleeps on and is woken from. The keyboard
+// has a fixed one; a pipe uses its own address so each has a distinct channel.
+constexpr u64 kKeyboardChannel = 1;
+
+// Sleep the calling task until wake(channel) is called. Must be entered with
+// interrupts disabled (it is only called from syscalls, which mask them), so
+// the check-then-block that precedes it cannot race a wake from an interrupt.
+void block_on(u64 channel);
+
+// Make every task sleeping on `channel` runnable. Safe to call from an IRQ.
+void wake(u64 channel);
 
 // A user process: its own address space, entered in ring 3 with the given
 // register state the first time it is scheduled. Returns its pid, or 0.

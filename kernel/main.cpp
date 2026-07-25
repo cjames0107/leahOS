@@ -441,6 +441,10 @@ void run_userland()
     console::write("\n  starting /BIN/INIT.ELF\n\n");
     console::set_color(console::Color::LightGray);
 
+    // With real processes that block on I/O, the scheduler needs something to
+    // run when everyone is asleep.
+    scheduler::start_idle();
+
     const u32 pid = process::create("init", "/BIN/INIT.ELF", scheduler::current_pid());
     if (pid == 0)
         panic("could not create the init process");
