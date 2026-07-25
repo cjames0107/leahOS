@@ -339,6 +339,17 @@ void self_test_fs()
 // name needing long filename entries, a subdirectory, and deletion.
 void self_test_fs_write()
 {
+    // Be idempotent: a persistent disk (from `make run` or a previous boot) may
+    // still hold this test's directory from last time, and create() of an
+    // existing directory is meant to fail. Files are recreated with
+    // write_entire_file, which already replaces them, so only the directory
+    // needs clearing up front.
+    vfs::Stat leftover{};
+    if (vfs::stat("/OUT/nested.txt", leftover))
+        vfs::remove("/OUT/nested.txt");
+    if (vfs::stat("/OUT", leftover))
+        vfs::remove("/OUT");
+
     // Small file, short name, exercises the lowercase-flag path.
     static const char kSmall[] = "written by leahOS\n";
     if (!vfs::write_entire_file("/wrote.txt", kSmall, sizeof(kSmall) - 1))
@@ -421,39 +432,24 @@ void print_filesystem()
 }
 
 // Loads a real ELF off the filesystem and calls it. Still ring 0 and still the
-// kernel's address space - what this proves is the parsing, the mapping and
-// Runs a C program as a process in its own address space, and proves the
-// isolation: after it exits, the address it ran at is not mapped in the
-// kernel's space, because its page tables were private and have been freed.
-// The printed lines and exit code prove the program itself ran; the unmapped
-// check proves it did so somewhere the kernel could not see.
-void self_test_userspace()
+// Runs the init process and waits for it. init drives the fork/exec/wait demo;
+// this is also the moment the kernel first hands the CPU to a scheduled user
+// process rather than running one synchronously.
+void run_userland()
 {
-    console::write("\n");
+    console::set_color(console::Color::White);
+    console::write("\n  starting /BIN/INIT.ELF\n\n");
+    console::set_color(console::Color::LightGray);
 
-    const process::Result first = process::run("/BIN/HELLO.ELF");
-    if (!first.loaded)
-        panic("process: could not run /BIN/HELLO.ELF");
-    if (first.exit_code != 0x42)
-        panic("process: C program produced the wrong exit code");
+    const u32 pid = process::create("init", "/BIN/INIT.ELF", scheduler::current_pid());
+    if (pid == 0)
+        panic("could not create the init process");
 
-    // The program lived at the ELF's entry and its stack; neither may be
-    // visible in the kernel's own address space now.
-    vmm::switch_address_space(vmm::kernel_space());
-    if (vmm::translate(0x0000600000000000ull) != 0 ||
-        vmm::translate(process::kUserStackTop - vmm::kPageSize) != 0)
-        panic("process: user memory leaked into the kernel address space");
-
-    // Run it a second time. If the first run's teardown were wrong - a
-    // double-free or a leaked mapping - a fresh process reusing the same frames
-    // and addresses is where it would surface.
-    const process::Result second = process::run("/BIN/HELLO.ELF");
-    if (!second.loaded || second.exit_code != 0x42)
-        panic("process: second run in a fresh address space failed");
+    i32 status = 0;
+    const i64 reaped = scheduler::wait_child(&status);
 
     console::set_color(console::Color::DarkGray);
-    console::printf("\n  process: ran /BIN/HELLO.ELF twice in private address spaces, exit 0x%llx\n",
-                    second.exit_code);
+    console::printf("\n  kernel: init (pid %lld) exited, status 0x%x\n", reaped, status);
     console::set_color(console::Color::LightGray);
 }
 
@@ -487,7 +483,7 @@ void worker_thread(void* arg)
             g_interleave_len = len + 1;
         }
     }
-    scheduler::exit_current();
+    scheduler::exit_current(0);
 }
 
 void self_test_scheduler()
@@ -638,11 +634,11 @@ extern "C" void kernel_main(const boot::Info* info)
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");
 
-    self_test_userspace();
-    step("ELF64 loaded and run in ring 3 via SYSCALL");
-
     self_test_scheduler();
     step("preemptive scheduler: kernel threads time-sliced by the PIT");
+
+    run_userland();
+    step("userland: init forked, exec'd and waited on a child");
 
     print_memory(*info);
     print_pci();

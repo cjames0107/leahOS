@@ -305,6 +305,61 @@ AddressSpace create_address_space()
     return reinterpret_cast<u64>(space);
 }
 
+AddressSpace fork_address_space(AddressSpace parent)
+{
+    const AddressSpace child = create_address_space();
+    if (child == 0)
+        return 0;
+
+    u64* child_pml4  = reinterpret_cast<u64*>(child);
+    u64* parent_pml4 = reinterpret_cast<u64*>(parent);
+    u64* kernel      = kernel_pml4();
+
+    // Only the slots the parent added over the kernel are the process's own
+    // memory; the rest are shared kernel mappings already in the child.
+    for (u64 m = 0; m < kEntriesPerTable; ++m) {
+        if ((parent_pml4[m] & Present) == 0 || parent_pml4[m] == kernel[m])
+            continue;
+
+        u64* pdpt = table_of(parent_pml4[m]);
+        for (u64 p = 0; p < kEntriesPerTable; ++p) {
+            if ((pdpt[p] & Present) == 0)
+                continue;
+            u64* pd = table_of(pdpt[p]);
+            for (u64 d = 0; d < kEntriesPerTable; ++d) {
+                if ((pd[d] & Present) == 0 || (pd[d] & Huge) != 0)
+                    continue;                       // no user huge pages exist
+                u64* pt = table_of(pd[d]);
+                for (u64 t = 0; t < kEntriesPerTable; ++t) {
+                    const u64 entry = pt[t];
+                    if ((entry & Present) == 0)
+                        continue;
+
+                    const vaddr_t virt = m << 39 | p << 30 | d << 21 | t << 12;
+                    const u64 flags = entry & (Write | User | NoExecute);
+
+                    const paddr_t frame = pmm::alloc();
+                    if (frame == 0) {
+                        destroy_address_space(child);
+                        return 0;
+                    }
+                    memcpy(reinterpret_cast<void*>(frame),
+                           reinterpret_cast<void*>(entry & kAddressMask),
+                           kPageSize);
+
+                    if (!map_into(child_pml4, virt, frame, flags)) {
+                        pmm::free(frame);
+                        destroy_address_space(child);
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    return child;
+}
+
 void destroy_address_space(AddressSpace space)
 {
     if (space == 0 || space == g_pml4_phys)

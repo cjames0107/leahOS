@@ -54,6 +54,12 @@ AddressSpace current_space();
 // A fresh user space that shares the kernel's mappings. 0 on failure.
 AddressSpace create_address_space();
 
+// A new space that is a deep copy of `parent`: the kernel mappings are shared
+// as usual, and every user page is copied into a freshly allocated frame - so
+// the two processes read the same bytes but writes do not cross. This is the
+// address-space half of fork(). 0 on failure.
+AddressSpace fork_address_space(AddressSpace parent);
+
 // Frees the space's private (user) page tables, the frames they mapped, and the
 // top-level table itself. The shared kernel mappings are left untouched.
 void destroy_address_space(AddressSpace space);

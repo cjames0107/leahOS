@@ -10,13 +10,16 @@
 
 namespace syscall {
 
-// Kept deliberately small for now. These are leahOS's own numbers, not Linux's;
-// there is no compatibility to preserve yet.
+// leahOS's own numbers, not Linux's; there is no compatibility to preserve yet.
 enum Number : u64 {
-    Exit  = 0,
-    Write = 1,
-    Read  = 2,
+    Exit   = 0,
+    Write  = 1,
+    Read   = 2,
     GetPid = 3,
+    Fork   = 4,
+    Execve = 5,
+    Wait   = 6,
+    Yield  = 7,
 };
 
 // The register state a syscall handler sees. Field order is a contract with
@@ -31,11 +34,12 @@ struct [[gnu::packed]] Frame {
     u64 user_rsp;
 };
 
-void init();
+// Selectors a user process runs with, RPL 3. Used to build the register frame
+// a new or forked process resumes on.
+constexpr u64 kUserCode = 0x20 | 3;
+constexpr u64 kUserData = 0x18 | 3;
+constexpr u64 kUserFlags = 0x202;       // IF set
 
-// Runs a freshly loaded program in ring 3 and returns its exit code. Does not
-// return until the program calls exit - there is no scheduler yet, so this is
-// the whole of "running a process".
-u64 run(vaddr_t entry, vaddr_t user_stack_top);
+void init();
 
 } // namespace syscall

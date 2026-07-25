@@ -152,7 +152,8 @@ kernel/
   lib/          string.cpp, cxx.cpp           freestanding runtime
   main.cpp      kernel_main
   linker.ld
-user/           libc/ (crt0, syscalls, string, stdio, stdlib), hello.c
+user/           libc/ (crt0, syscalls, string, stdio, stdlib)
+                init.c, hello.c
 tools/          run-headless.sh, mkfs_fat32.py
 ```
 
@@ -340,6 +341,33 @@ all is the rest of the proof. That it is genuinely unprivileged was confirmed
 by temporarily giving it a `cli`, which faults with `#GP` at CPL 3 where it
 would silently succeed at CPL 0.
 
+## Processes
+
+`fork`, `execve`, `wait` and `exit` are real. A task is a schedulable entity
+with a kernel stack and an address space; a kernel thread runs a C function in
+the kernel's space, a user process runs in ring 3 in its own. On a context
+switch the scheduler loads the incoming task's page table (`CR3`) and its
+kernel stack into the TSS - so an interrupt or syscall taken while a process
+runs lands on that process's own kernel stack, which is what lets a syscall
+that blocks (`fork`, `wait`) keep its state without another task clobbering it.
+
+`fork` deep-copies the parent's user pages into a new address space and creates
+a child task whose first trip to ring 3 restores a copy of the parent's syscall
+register frame with `rax = 0` - so the child returns from `fork` exactly where
+the parent did, seeing zero. `execve` builds a fresh address space from an ELF,
+swaps it in under the current task, frees the old one, and rewrites the syscall
+frame so `SYSRET` lands in the new program. `exit` tears the address space down
+and leaves a zombie holding the exit code; `wait` reaps it.
+
+The init process demonstrates the lot: it forks, the child `execve`s the C
+hello program, and init `wait`s and reports the child's exit status - the whole
+cycle a shell runs on.
+
+One sharp edge, found the direct way: `execve`'s `path` argument points into the
+caller's address space, so it must be copied into the kernel before `CR3` is
+switched to the new space - otherwise the first dereference after the switch
+faults on an address the new space has never heard of.
+
 ## Address spaces
 
 Each process runs in its own top-level page table. A new space is the kernel's
@@ -464,6 +492,7 @@ a symptom.
 - [x] preemptive scheduler, kernel threads, round-robin time-slicing
 - [x] a freestanding libc: crt0, syscall wrappers, string/stdio/malloc
 - [x] per-process address spaces (private page tables, CR3 switch)
-- [ ] `fork`/`execve`/`wait` and a process table
+- [x] `fork`, `execve`, `wait`, a process table, an init process
 - [ ] USB: xHCI, then the HID and mass-storage class drivers
-- [ ] a userland shell
+- [ ] filesystem syscalls (open/read/readdir/stat) and a shell
+- [ ] coreutils: ls, cp, cat, echo …

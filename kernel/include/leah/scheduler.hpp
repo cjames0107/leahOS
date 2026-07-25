@@ -1,47 +1,72 @@
 #pragma once
 
 #include <leah/types.hpp>
+#include <leah/vmm.hpp>
 
-// A round-robin, preemptive scheduler for kernel threads.
-//
-// Every thread runs in the shared kernel address space for now; separate
-// per-process address spaces arrive with fork/exec. What this layer owns is the
-// context switch, the ready queue, and turning a timer tick into a preemption.
+// A round-robin, preemptive scheduler over tasks. A task is either a kernel
+// thread (runs a C function in the kernel's address space) or a user process
+// (runs in ring 3 in its own address space). The scheduler owns the context
+// switch, the ready queue, and turning a timer tick into a preemption; on a
+// switch it also loads the incoming task's page table and kernel stack.
 
 namespace scheduler {
 
 using Entry = void (*)(void* arg);
 
-// Registers the currently executing code as the first thread ("main"), so there
-// is always something to switch away from and back to.
+// The full user register state, laid out to be restored by user_return in
+// user_entry.asm and by an IRETQ. The 15 general registers come first (reverse
+// push order), then the frame IRETQ itself consumes. Do not reorder without
+// editing user_entry.asm in lockstep.
+struct [[gnu::packed]] TrapFrame {
+    u64 r15, r14, r13, r12, r11, r10, r9, r8;
+    u64 rbp, rdi, rsi, rdx, rcx, rbx, rax;
+    u64 rip, cs, rflags, rsp, ss;
+};
+
+static_assert(sizeof(TrapFrame) == 20 * 8);
+
 void init();
 
-// Creates a runnable kernel thread. Returns its id, or 0 on failure.
+// A kernel thread in the kernel's address space. Returns its pid, or 0.
 u32 spawn(const char* name, Entry entry, void* arg);
 
-// Arms timer-driven preemption. Until this is called, threads only switch at an
-// explicit yield().
-void start_preemption();
+// A user process: its own address space, entered in ring 3 with the given
+// register state the first time it is scheduled. Returns its pid, or 0.
+u32 spawn_user(const char* name, vmm::AddressSpace space,
+               const TrapFrame& frame, u32 parent_pid);
 
-// Give up the CPU voluntarily. Returns once this thread is scheduled again.
+void start_preemption();
 void yield();
 
-// Ends the calling thread. Does not return.
-[[noreturn]] void exit_current();
+// Ends the calling task with an exit code. Does not return. A user task's
+// address space is torn down here; its record lingers as a zombie until the
+// parent reaps it with wait().
+[[noreturn]] void exit_current(i32 code);
 
-u32 current_id();
+// Reap a finished child. Returns the child's pid and writes its exit code
+// through `status` (if non-null), or -1 when the caller has no children.
+// Blocks until a child exits if one is still running.
+i64 wait_child(i32* status);
+
+// --- fork/exec support ------------------------------------------------------
+
+// Duplicate the current task into a new process. The child gets a copy of the
+// address space and resumes in ring 3 exactly where the parent's syscall
+// returns, but with rax = 0. Returns the child pid to the parent, or 0 on
+// failure. `parent_user` is the parent's user register state at the syscall.
+u32 fork_current(const TrapFrame& parent_user);
+
+u32 current_pid();
 u32 alive_count();
+
+// The running task's address space, and a setter execve uses to swap in a
+// freshly loaded image's space (the caller frees the old one).
+vmm::AddressSpace current_task_space();
+void current_task_set_space(vmm::AddressSpace space);
 
 // --- called from interrupt context -----------------------------------------
 
-// From the timer IRQ: charges the running thread's quantum and, when it is
-// spent, flags that a reschedule is due. Does not switch here - that waits for
-// a safe point after the interrupt is acknowledged.
 void on_tick();
-
-// From the IRQ path, after the PIC has been acknowledged: performs the switch
-// if one is pending. Acknowledging first is what makes switching away safe -
-// otherwise the PIC would hold the line and starve every other thread.
 void on_irq_return();
 
 } // namespace scheduler

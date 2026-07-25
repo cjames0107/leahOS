@@ -89,6 +89,7 @@ KERNEL_OBJS := $(KERNEL_ASM_SRCS:%.asm=$(BUILD)/%.asm.o) \
 KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
 USER_HELLO := $(BUILD)/hello.elf
+USER_INIT  := $(BUILD)/init.elf
 STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
 
@@ -168,16 +169,18 @@ $(BUILD)/user/%.o: user/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -MMD -MP -c $< -o $@
 
-$(USER_HELLO): $(CRT0_OBJ) $(BUILD)/user/hello.o $(LIBC_OBJS) user/user.ld
-	$(LD) -nostdlib -T user/user.ld -o $@ $(CRT0_OBJ) $(BUILD)/user/hello.o $(LIBC_OBJS)
+# One rule builds any user program: crt0 first, the program object, then libc.
+$(BUILD)/%.elf: $(CRT0_OBJ) $(BUILD)/user/%.o $(LIBC_OBJS) user/user.ld
+	$(LD) -nostdlib -T user/user.ld -o $@ $(CRT0_OBJ) $(BUILD)/user/$*.o $(LIBC_OBJS)
 
 # --- disk image -------------------------------------------------------------
-$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_HELLO) | $(DIST)
+$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_HELLO) $(USER_INIT) | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=$(IMAGE_MIB) status=none
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 seek=0               conv=notrunc status=none
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=$(STAGE2_LBA)   conv=notrunc status=none
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_LBA)   conv=notrunc status=none
-	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA) --add BIN/HELLO.ELF=$(USER_HELLO)
+	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA) \
+	    --add BIN/INIT.ELF=$(USER_INIT) --add BIN/HELLO.ELF=$(USER_HELLO)
 	@cp $(KERNEL_ELF) $(DIST_ELF)
 	@echo "image:  $@"
 	@echo "symbols: $(DIST_ELF)"

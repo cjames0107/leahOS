@@ -8,6 +8,10 @@
 #define SYS_write   1
 #define SYS_read    2
 #define SYS_getpid  3
+#define SYS_fork    4
+#define SYS_execve  5
+#define SYS_wait    6
+#define SYS_yield   7
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused
