@@ -46,4 +46,9 @@ constexpr vaddr_t kHeapBase = 0xFFFFC00000000000ull;
 constexpr vaddr_t phys_to_direct(paddr_t phys) { return phys + kDirectMapBase; }
 constexpr paddr_t direct_to_phys(vaddr_t virt) { return virt - kDirectMapBase; }
 
+// Where a user process's sbrk heap begins - well above the program image (which
+// links at 0x400000) and far below the stack, so it can grow without colliding
+// with either.
+constexpr vaddr_t kUserBrkBase = 0x10000000ull;   // 256 MiB
+
 } // namespace memory

@@ -425,6 +425,15 @@ i64 unlink(const char* path)
     return vfs::remove(resolved) ? 0 : -1;
 }
 
+i64 rename(const char* old_path, const char* new_path)
+{
+    char old_resolved[kPathMax];
+    char new_resolved[kPathMax];
+    resolve(old_path, old_resolved);
+    resolve(new_path, new_resolved);
+    return vfs::rename(old_resolved, new_resolved) ? 0 : -1;
+}
+
 i64 pipe(int* out_fds)
 {
     const int read_fd = alloc_fd();

@@ -2,10 +2,14 @@
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
 #include <leah/gdt.hpp>
+#include <leah/memory.hpp>
+#include <leah/pmm.hpp>
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/string.hpp>
 #include <leah/syscall.hpp>
+#include <leah/vfs.hpp>
+#include <leah/vmm.hpp>
 
 extern "C" void syscall_entry();
 
@@ -30,6 +34,38 @@ bool user_range_ok(vaddr_t base, u64 length)
     if (length > kUserCeiling - base)
         return false;
     return true;
+}
+
+// Grow (or query) the process's heap. Returns the previous break, or -1. The
+// new pages are mapped into the process's own space, which is active during the
+// syscall, so zeroing them is a plain write.
+i64 sys_sbrk(i64 increment)
+{
+    const u64 old_brk = scheduler::current_brk();
+    if (increment == 0)
+        return static_cast<i64>(old_brk);
+    if (increment < 0) {
+        scheduler::set_current_brk(old_brk - static_cast<u64>(-increment));
+        return static_cast<i64>(old_brk);
+    }
+
+    const u64 new_brk = old_brk + static_cast<u64>(increment);
+    for (u64 page = old_brk & ~(vmm::kPageSize - 1); page < new_brk;
+         page += vmm::kPageSize) {
+        if (vmm::translate(page) != 0)
+            continue;                                   // already mapped
+        const paddr_t frame = pmm::alloc();
+        if (frame == 0)
+            return -1;
+        if (!vmm::map(page, frame, vmm::Write | vmm::User | vmm::NoExecute)) {
+            pmm::free(frame);
+            return -1;
+        }
+        memset(reinterpret_cast<void*>(page), 0, vmm::kPageSize);
+    }
+
+    scheduler::set_current_brk(new_brk);
+    return static_cast<i64>(old_brk);
 }
 
 // Turn the saved syscall registers into the full ring-3 frame a forked child
@@ -150,6 +186,16 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
     case Dup2:
         frame->rax = static_cast<u64>(
             files::dup2(static_cast<int>(frame->rdi), static_cast<int>(frame->rsi)));
+        break;
+
+    case Sbrk:
+        frame->rax = static_cast<u64>(sys_sbrk(static_cast<i64>(frame->rdi)));
+        break;
+
+    case Rename:
+        frame->rax = static_cast<u64>(
+            files::rename(reinterpret_cast<const char*>(frame->rdi),
+                          reinterpret_cast<const char*>(frame->rsi)));
         break;
 
     case Fork:

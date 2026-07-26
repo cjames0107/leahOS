@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <sys/syscall.h>
 
@@ -8,23 +9,31 @@ _Noreturn void exit(int status)
     __builtin_unreachable();
 }
 
-/* A fixed arena carved out of .bss. No brk/mmap syscall exists yet, so the heap
- * cannot grow; when one does, this becomes a real allocator. Until then a
- * program that stays under the arena size gets working malloc, and free is a
- * deliberate no-op. */
-#define ARENA_SIZE (256 * 1024)
-
-static unsigned char g_arena[ARENA_SIZE];
-static size_t g_offset = 0;
+/* A bump allocator over sbrk. The break grows a page at a time as demand
+ * exceeds it, contiguously, so no space is wasted between growths. free is a
+ * no-op - real reclamation is a job for a later allocator; this is enough for
+ * programs that allocate a bounded amount. */
+static char* g_top = 0;      /* next allocation */
+static char* g_end = 0;      /* current program break */
 
 void* malloc(size_t size)
 {
-    /* 16-byte alignment, matching the widest scalar the ABI can hand back. */
-    size = (size + 15) & ~(size_t)15;
-    if (g_offset + size > ARENA_SIZE)
-        return NULL;
-    void* block = &g_arena[g_offset];
-    g_offset += size;
+    if (g_top == 0)
+        g_top = g_end = (char*)sbrk(0);
+
+    size = (size + 15) & ~(size_t)15;   /* 16-byte alignment */
+
+    if (g_top + size > g_end) {
+        size_t need = (size + 4095) & ~(size_t)4095;
+        if (need < 65536)
+            need = 65536;
+        if (sbrk((long)need) == (void*)-1)
+            return NULL;
+        g_end += need;
+    }
+
+    void* block = g_top;
+    g_top += size;
     return block;
 }
 

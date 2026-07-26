@@ -66,6 +66,7 @@ i64 chdir(const char* path);
 i64 getcwd(char* buffer, usize size);
 i64 mkdir(const char* path);
 i64 unlink(const char* path);
+i64 rename(const char* old_path, const char* new_path);
 
 // Create a pipe. Writes the read fd to out_fds[0] and the write fd to
 // out_fds[1]. Returns 0, or -1.

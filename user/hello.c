@@ -29,6 +29,20 @@ int main(int argc, char** argv)
     printf("  malloc'd str = %s (len %d)\n", greeting, (int)strlen(greeting));
     printf("  hex/pointer  = 0x%x %p\n", 0x1EA4, (void*)greeting);
 
+    /* A large allocation forces the heap to grow past its first sbrk chunk, and
+     * writing every byte proves the new pages are really mapped. */
+    const int big = 300 * 1024;
+    unsigned char* buffer = malloc((unsigned long)big);
+    if (buffer == NULL)
+        return 1;
+    for (int i = 0; i < big; ++i)
+        buffer[i] = (unsigned char)(i * 7 + 1);
+    int ok = 1;
+    for (int i = 0; i < big; ++i)
+        ok &= buffer[i] == (unsigned char)(i * 7 + 1);
+    printf("  sbrk heap    = %d KiB allocated and verified: %s\n",
+           big / 1024, ok ? "yes" : "NO");
+
     /* A value the kernel's self-test recognises, built so a wrong result tells
      * printf/malloc apart from the raw exit path. */
     return 0x42;

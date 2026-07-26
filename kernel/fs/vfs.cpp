@@ -43,6 +43,11 @@ bool remove(const char* path)
     return g_root != nullptr && g_root->remove(path);
 }
 
+bool rename(const char* old_path, const char* new_path)
+{
+    return g_root != nullptr && g_root->rename(old_path, new_path);
+}
+
 bool write_entire_file(const char* path, const void* buffer, usize bytes)
 {
     // Removing first rather than truncating keeps this honest: a shorter

@@ -27,6 +27,7 @@ public:
     isize write(const char* path, u64 offset, const void* buffer, usize bytes) override;
     bool create(const char* path, vfs::Type type) override;
     bool remove(const char* path) override;
+    bool rename(const char* old_path, const char* new_path) override;
 
     u32 cluster_size() const { return m_cluster_bytes; }
     u32 cluster_count() const { return m_cluster_count; }
@@ -70,6 +71,7 @@ private:
     bool update_entry(const Located& located, u32 first_cluster, u32 size);
     bool find_free_slots(u32 directory_cluster, usize needed,
                          u32& out_cluster, u32& out_index);
+    bool free_entry(const Located& located);
     bool add_entry(u32 directory_cluster, const char* name,
                    bool directory, u32 first_cluster, u32 size);
     bool split_path(const char* path, char* parent, char* name) const;

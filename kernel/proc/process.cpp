@@ -1,6 +1,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/elf.hpp>
+#include <leah/memory.hpp>
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
@@ -201,6 +202,7 @@ void exec(syscall::Frame& frame, const char* path, char** argv)
     }
 
     scheduler::current_task_set_space(space);
+    scheduler::set_current_brk(memory::kUserBrkBase);   // fresh heap for the new image
     vmm::switch_address_space(space);
     vmm::destroy_address_space(old_space);
 

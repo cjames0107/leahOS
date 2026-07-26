@@ -1105,17 +1105,63 @@ bool Fat32::remove(const char* path)
     if (located.first_cluster >= 2)
         free_chain(located.first_cluster);
 
+    if (!free_entry(located))
+        return false;
+
+    flush_fsinfo();
+    return true;
+}
+
+// Mark a directory entry and its long-filename entries free, without touching
+// the cluster chain they point at - so it can be used both to delete a file
+// (after freeing the chain) and to move one (leaving the chain in place).
+bool Fat32::free_entry(const Located& located)
+{
     if (!read_cluster(located.entry_cluster, m_scratch))
         return false;
 
-    // Free the 8.3 entry and the long filename entries in front of it. A run
-    // that straddles a cluster boundary is not handled; the leftovers would be
-    // orphaned LFN entries, which readers ignore.
+    // A run that straddles a cluster boundary is not handled; the leftovers
+    // would be orphaned LFN entries, which readers ignore.
     for (u32 i = located.first_slot_index; i <= located.entry_index; ++i)
         m_scratch[i * kDirEntrySize] = kEntryFree;
 
-    if (!write_cluster(located.entry_cluster, m_scratch))
+    return write_cluster(located.entry_cluster, m_scratch);
+}
+
+bool Fat32::rename(const char* old_path, const char* new_path)
+{
+    const Located src = resolve(old_path);
+    if (!src.found)
         return false;
+
+    char parent[vfs::kMaxPath];
+    char name[vfs::kMaxName];
+    if (!split_path(new_path, parent, name))
+        return false;
+
+    const Located dir = resolve(parent);
+    if (!dir.found || !dir.directory)
+        return false;
+    if (find_in_directory(dir.first_cluster, name).found)
+        return false;                       // refuse to clobber an existing name
+
+    // Point a fresh entry in the destination directory at the same cluster
+    // chain - no data is copied - then free the old entry.
+    if (!add_entry(dir.first_cluster, name, src.directory, src.first_cluster, src.size))
+        return false;
+    if (!free_entry(src))
+        return false;
+
+    // A moved directory's ".." must follow it to its new parent.
+    if (src.directory && src.first_cluster >= 2 && read_cluster(src.first_cluster, m_scratch)) {
+        u8* dotdot = m_scratch + kDirEntrySize;         // second entry is ".."
+        const u32 new_parent = dir.first_cluster == m_root_cluster ? 0 : dir.first_cluster;
+        const u16 high = static_cast<u16>(new_parent >> 16);
+        const u16 low  = static_cast<u16>(new_parent & 0xFFFF);
+        memcpy(dotdot + 20, &high, 2);
+        memcpy(dotdot + 26, &low, 2);
+        write_cluster(src.first_cluster, m_scratch);
+    }
 
     flush_fsinfo();
     return true;

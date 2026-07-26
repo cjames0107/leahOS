@@ -86,6 +86,10 @@ void current_task_set_space(vmm::AddressSpace space);
 // The running task's open-file table.
 files::Table& current_files();
 
+// The running task's sbrk program break.
+u64  current_brk();
+void set_current_brk(u64 brk);
+
 // --- called from interrupt context -----------------------------------------
 
 void on_tick();

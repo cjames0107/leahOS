@@ -57,3 +57,13 @@ int dup2(int oldfd, int newfd)
 {
     return (int)__syscall(SYS_dup2, oldfd, newfd, 0, 0, 0);
 }
+
+void* sbrk(long increment)
+{
+    return (void*)__syscall(SYS_sbrk, increment, 0, 0, 0, 0);
+}
+
+int rename(const char* oldpath, const char* newpath)
+{
+    return (int)__syscall(SYS_rename, (long)oldpath, (long)newpath, 0, 0, 0);
+}

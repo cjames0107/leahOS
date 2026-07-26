@@ -49,6 +49,14 @@ public:
 
     virtual bool create(const char* path, Type type) = 0;
     virtual bool remove(const char* path) = 0;
+
+    // Move an entry to a new path, no data copy. Default: unsupported.
+    virtual bool rename(const char* old_path, const char* new_path)
+    {
+        (void)old_path;
+        (void)new_path;
+        return false;
+    }
 };
 
 // Single root mount. A real mount table arrives with the second filesystem.
@@ -61,6 +69,7 @@ bool  list(const char* path, Entry* out, usize max, usize& count);
 isize write(const char* path, u64 offset, const void* buffer, usize bytes);
 bool  create(const char* path, Type type);
 bool  remove(const char* path);
+bool  rename(const char* old_path, const char* new_path);
 
 // Create (or truncate) a file and write the whole buffer in one call.
 bool write_entire_file(const char* path, const void* buffer, usize bytes);

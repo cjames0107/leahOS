@@ -1,6 +1,7 @@
 #include <leah/cpu.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
+#include <leah/memory.hpp>
 #include <leah/panic.hpp>
 #include <leah/file.hpp>
 #include <leah/scheduler.hpp>
@@ -38,6 +39,7 @@ struct Task {
     vmm::AddressSpace space; // 0 for kernel threads (they use the kernel space)
     i32   exit_code;
     u64   wait_channel;      // when Blocked on block_on(); 0 otherwise
+    u64   brk;               // sbrk program break, for user tasks
     const char* name;
     Entry entry;             // kernel threads only
     void* arg;
@@ -229,6 +231,7 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
     task->is_user    = true;
     task->space      = space;
     task->name       = name;
+    task->brk        = memory::kUserBrkBase;
     files::init_table(task->files);
 
     // The first switch to this task returns into user_return, which restores
@@ -313,6 +316,7 @@ u32 fork_current(const TrapFrame& parent_user)
     Task* child_task = find(child);
     if (child_task != nullptr) {
         child_task->files = parent->files;
+        child_task->brk   = parent->brk;
         files::inherit(child_task->files);
     }
     return child;
@@ -386,6 +390,9 @@ vmm::AddressSpace current_task_space() { return current()->space; }
 void current_task_set_space(vmm::AddressSpace space) { current()->space = space; }
 
 files::Table& current_files() { return current()->files; }
+
+u64  current_brk()            { return current()->brk; }
+void set_current_brk(u64 brk) { current()->brk = brk; }
 
 u32 alive_count()
 {

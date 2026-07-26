@@ -80,6 +80,16 @@ int main(void)
     printf("$ cat /REDIR.TXT\n");
     run("/BIN/CAT.ELF", cat_redir);
 
+    // Rename (atomic, no data copy), then read the file back at its new name.
+    char* mv_args[] = { "mv", "/REDIR.TXT", "/MOVED.TXT", 0 };
+    printf("$ mv /REDIR.TXT /MOVED.TXT\n");
+    run("/BIN/MV.ELF", mv_args);
+    char* cat_moved[] = { "cat", "/MOVED.TXT", 0 };
+    printf("$ cat /MOVED.TXT\n");
+    run("/BIN/CAT.ELF", cat_moved);
+    char* rm_moved[] = { "rm", "/MOVED.TXT", 0 };
+    run("/BIN/RM.ELF", rm_moved);
+
     // A pipe: echo's stdout feeds cat's stdin.
     printf("$ echo piped through a pipe | cat\n");
     int pfd[2];
@@ -104,6 +114,11 @@ int main(void)
     close(pfd[1]);
     wait(0);
     wait(0);
+
+    // hello exercises the growing sbrk heap.
+    char* hello_args[] = { "hello", 0 };
+    printf("$ hello\n");
+    run("/BIN/HELLO.ELF", hello_args);
 
     printf("\ninit: demo complete, launching shell\n");
 

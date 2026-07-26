@@ -31,6 +31,8 @@ enum Number : u64 {
     Unlink  = 16,
     Pipe    = 17,
     Dup2    = 18,
+    Sbrk    = 19,
+    Rename  = 20,
 };
 
 // The register state a syscall handler sees. Field order is a contract with

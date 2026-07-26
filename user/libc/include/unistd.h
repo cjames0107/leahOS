@@ -22,6 +22,8 @@ int    getcwd(char* buffer, size_t size);
 int    unlink(const char* path);
 int    pipe(int fds[2]);
 int    dup2(int oldfd, int newfd);
+int    rename(const char* oldpath, const char* newpath);
+void*  sbrk(long increment);
 
 #define SEEK_SET 0
 #define SEEK_CUR 1
