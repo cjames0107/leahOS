@@ -3,6 +3,7 @@
 #include <leah/file.hpp>
 #include <leah/gdt.hpp>
 #include <leah/memory.hpp>
+#include <leah/net.hpp>
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
@@ -197,6 +198,41 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             files::rename(reinterpret_cast<const char*>(frame->rdi),
                           reinterpret_cast<const char*>(frame->rsi)));
         break;
+
+    case Netinfo: {
+        if (!net::available() || !user_range_ok(frame->rdi, sizeof(net::Info))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        net::info(*reinterpret_cast<net::Info*>(frame->rdi));
+        frame->rax = 0;
+        break;
+    }
+
+    case Ping: {
+        if (!net::available()) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        u8 ttl = 0;
+        const bool ok = net::ping(static_cast<u32>(frame->rdi),
+                                  static_cast<u16>(frame->rsi), &ttl);
+        if (ok && frame->rdx != 0 && user_range_ok(frame->rdx, sizeof(u8)))
+            *reinterpret_cast<u8*>(frame->rdx) = ttl;
+        frame->rax = ok ? 1 : 0;
+        break;
+    }
+
+    case Arp: {
+        if (!net::available() || !user_range_ok(frame->rsi, net::kMacLength)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const bool ok = net::arp_resolve(static_cast<u32>(frame->rdi),
+                                         reinterpret_cast<u8*>(frame->rsi));
+        frame->rax = ok ? 0 : static_cast<u64>(-1);
+        break;
+    }
 
     case Fork:
         frame->rax = scheduler::fork_current(to_trap_frame(*frame));

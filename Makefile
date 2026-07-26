@@ -90,7 +90,8 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
 # Userland programs. Each user/<name>.c links into $(BUILD)/<name>.elf and is
 # placed on the image at /BIN/<NAME>.ELF (upper-cased for FAT's 8.3 names).
-USER_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear
+USER_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear \
+                 ifconfig ping arp
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
 STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
@@ -196,8 +197,13 @@ $(DIST):
 #
 # -no-reboot / -no-shutdown are what turn a triple fault from a silent reboot
 # loop into a stopped machine you can actually inspect.
+# -netdev user / -device e1000: an Intel e1000 NIC behind QEMU's user-mode
+# (SLIRP) networking. The guest is 10.0.2.15, the gateway/DNS is 10.0.2.2/3.
+# Naming the netdev explicitly also suppresses the legacy default NIC, so there
+# is exactly one card to find.
 QEMUFLAGS := -drive format=raw,file=$(IMG),if=ide \
              -m $(MEM) -smp $(CPUS) \
+             -netdev user,id=net0 -device e1000,netdev=net0 \
              -no-reboot -no-shutdown \
              $(QEMU_EXTRA)
 

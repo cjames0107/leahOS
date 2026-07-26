@@ -120,6 +120,21 @@ int main(void)
     printf("$ hello\n");
     run("/BIN/HELLO.ELF", hello_args);
 
+    // Networking: show the interface, then ARP and ping the gateway over the
+    // e1000. These programs also live past the first cluster of /BIN, so a
+    // clean run doubles as proof the directory chain is followed.
+    char* ifconfig_args[] = { "ifconfig", 0 };
+    printf("$ ifconfig\n");
+    run("/BIN/IFCONFIG.ELF", ifconfig_args);
+
+    char* arp_args[] = { "arp", "10.0.2.2", 0 };
+    printf("$ arp 10.0.2.2\n");
+    run("/BIN/ARP.ELF", arp_args);
+
+    char* ping_args[] = { "ping", "10.0.2.2", 0 };
+    printf("$ ping 10.0.2.2\n");
+    run("/BIN/PING.ELF", ping_args);
+
     printf("\ninit: demo complete, launching shell\n");
 
     char* sh_args[] = { "sh", 0 };

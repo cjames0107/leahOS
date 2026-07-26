@@ -13,6 +13,8 @@
 #include <leah/keyboard.hpp>
 #include <leah/memory.hpp>
 #include <leah/mouse.hpp>
+#include <leah/e1000.hpp>
+#include <leah/net.hpp>
 #include <leah/panic.hpp>
 #include <leah/pci.hpp>
 #include <leah/pic.hpp>
@@ -432,6 +434,24 @@ void print_filesystem()
 }
 
 // Loads a real ELF off the filesystem and calls it. Still ring 0 and still the
+// Resolves the gateway's MAC over ARP - proving the NIC transmits (the request)
+// and receives (the reply), and that the ARP layer works, all against QEMU's
+// virtual network.
+void self_test_network()
+{
+    u8 gateway_mac[net::kMacLength];
+    if (net::arp_resolve(net::kGatewayIp, gateway_mac)) {
+        console::set_color(console::Color::DarkGray);
+        console::write("  network: ARP resolved the gateway\n");
+        net::arp_print_cache();
+        console::set_color(console::Color::LightGray);
+    } else {
+        console::set_color(console::Color::LightRed);
+        console::write("  network: gateway did not answer ARP\n");
+        console::set_color(console::Color::LightGray);
+    }
+}
+
 // Runs the init process and waits for it. init drives the fork/exec/wait demo;
 // this is also the moment the kernel first hands the CPU to a scheduled user
 // process rather than running one synchronously.
@@ -646,6 +666,15 @@ extern "C" void kernel_main(const boot::Info* boot_info)
 
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");
+
+    if (net::init()) {
+        const u8* m = net::mac();
+        console::printf("  [ ok ] e1000 up, MAC %02x:%02x:%02x:%02x:%02x:%02x, "
+                        "IP 10.0.2.15\n", m[0], m[1], m[2], m[3], m[4], m[5]);
+        self_test_network();
+    } else {
+        step("no e1000 NIC found - networking disabled");
+    }
 
     self_test_scheduler();
     step("preemptive scheduler: kernel threads time-sliced by the PIT");

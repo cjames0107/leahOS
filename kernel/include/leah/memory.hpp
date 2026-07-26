@@ -51,4 +51,9 @@ constexpr paddr_t direct_to_phys(vaddr_t virt) { return virt - kDirectMapBase; }
 // with either.
 constexpr vaddr_t kUserBrkBase = 0x10000000ull;   // 256 MiB
 
+// Where device MMIO windows (PCI BARs) are mapped, uncached, in the high half.
+// The direct map would reach them too, but cached - registers must not sit in a
+// cache line, so they get their own mapping here.
+constexpr vaddr_t kDeviceMmioBase = 0xFFFFE00000000000ull;
+
 } // namespace memory

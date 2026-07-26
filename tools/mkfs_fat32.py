@@ -176,38 +176,58 @@ class Fat32Volume:
         return clusters[0]
 
     def build_directory(self, tree: dict, cluster: int, parent_cluster: int, is_root: bool):
-        """Fill an already-allocated directory cluster chain from a dict."""
-        entries = b""
+        """Fill an already-allocated directory cluster chain from a dict.
+
+        Entries are gathered as whole records - an 8.3 entry with any long
+        filename entries that must immediately precede it - then packed into as
+        many clusters as they need, never splitting a record across a cluster
+        boundary so a reader following the chain always sees each LFN set intact.
+        """
+        records = []
         taken = set()
 
+        def record(name, short, attr, first, size):
+            body = b""
+            if name is not None and not is_valid_short(name):
+                body += lfn_entries(name, short)
+            body += dir_entry(short, attr, first, size)
+            records.append(body)
+
         if is_root and self.label:
-            entries += dir_entry(f"{self.label:<11.11}".encode("ascii"),
-                                 ATTR_VOLUME_ID, 0, 0)
+            records.append(dir_entry(f"{self.label:<11.11}".encode("ascii"),
+                                     ATTR_VOLUME_ID, 0, 0))
         if not is_root:
-            entries += dir_entry(b".          ", ATTR_DIRECTORY, cluster, 0)
+            records.append(dir_entry(b".          ", ATTR_DIRECTORY, cluster, 0))
             # A root parent is recorded as cluster 0, not as 2.
-            entries += dir_entry(b"..         ", ATTR_DIRECTORY,
-                                 0 if parent_cluster == 2 else parent_cluster, 0)
+            records.append(dir_entry(b"..         ", ATTR_DIRECTORY,
+                                      0 if parent_cluster == 2 else parent_cluster, 0))
 
         for name, content in tree.items():
             short = to_short(name, taken)
             if isinstance(content, dict):
                 child = self.allocate()
                 self.cluster_data[child] = b"\x00" * self.cluster_bytes
-                if not is_valid_short(name):
-                    entries += lfn_entries(name, short)
-                entries += dir_entry(short, ATTR_DIRECTORY, child, 0)
+                record(name, short, ATTR_DIRECTORY, child, 0)
                 self.build_directory(content, child, cluster, False)
             else:
                 first = self.write_chain(content)
-                if not is_valid_short(name):
-                    entries += lfn_entries(name, short)
-                entries += dir_entry(short, ATTR_ARCHIVE, first, len(content))
+                record(name, short, ATTR_ARCHIVE, first, len(content))
 
-        if len(entries) > self.cluster_bytes:
-            raise SystemExit("error: directory needs more than one cluster "
-                             "(not implemented in this tool)")
-        self.cluster_data[cluster] = entries.ljust(self.cluster_bytes, b"\x00")
+        # Pack records into the cluster chain, starting with the one the caller
+        # already allocated and extending it as needed. A single record never
+        # exceeds one cluster (its LFN set is bounded), so this always fits.
+        chain = [cluster]
+        chunks = [b""]
+        for body in records:
+            if len(chunks[-1]) + len(body) > self.cluster_bytes:
+                chain.append(self.allocate())
+                chunks.append(b"")
+            chunks[-1] += body
+
+        for index, (cluster_id, data) in enumerate(zip(chain, chunks)):
+            self.cluster_data[cluster_id] = data.ljust(self.cluster_bytes, b"\x00")
+            self.fat[cluster_id] = (chain[index + 1] if index + 1 < len(chain)
+                                    else FAT_EOC)
 
     def boot_sector(self) -> bytes:
         sector = bytearray(SECTOR)

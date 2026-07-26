@@ -165,9 +165,12 @@ mounts a FAT32 filesystem it reads and writes. It loads ELF programs and runs
 them in ring 3 over a `SYSCALL` ABI — as processes in their own private address
 spaces — and time-slices them with a preemptive scheduler. Processes `fork`,
 `execve` and `wait`, open files through a per-process descriptor table, and run
-an interactive **shell** with real commands (`ls`, `cat`, `echo`, `pwd`). User
-programs are C linked against leahOS's own libc. Faults produce a register dump
-instead of a silent reset. More coreutils, pipes and redirection come next.
+an interactive **shell** with real commands (`ls`, `cat`, `echo`, `pwd`, `cp`,
+`mv`, `rm`, and more), pipes and redirection. An **e1000 NIC driver** and a
+small **IPv4 stack** (Ethernet, ARP, ICMP) bring up networking, with `ifconfig`,
+`arp` and `ping` talking to QEMU's virtual network. User programs are C linked
+against leahOS's own libc. Faults produce a register dump instead of a silent
+reset.
 
 ## Memory management
 
@@ -496,6 +499,29 @@ A failed mapping falls back silently to the text buffer, which in graphics mode
 means a black screen with a perfectly healthy serial log. Worth remembering as
 a symptom.
 
+## Networking
+
+The NIC is QEMU's Intel 82540EM ("e1000"), found by PCI class. The driver maps
+its register window as uncached device memory, resets the card, reads its MAC
+out of the receive-address registers, and sets up DMA descriptor rings for
+receive and transmit — the buffers come from physically contiguous frames
+reached through the direct map, since the card DMAs to physical addresses.
+
+Receive is **polled, not interrupt-driven**: with no BIOS to program PCI
+interrupt routing, the card's reported IRQ line cannot be trusted, so `poll()`
+walks the receive ring straight from the descriptor-done bits. The poll loop
+executes `hlt` between reads. That matters more than it looks: a tight busy-poll
+starves QEMU's host-side network backend and nothing is ever delivered, and the
+guest's virtual timer fast-forwards across a `hlt`, so waits are counted in poll
+iterations rather than timer ticks.
+
+On top of the driver sits a small IPv4 stack in `kernel/net/`: Ethernet framing,
+an ARP cache with request/reply, IPv4 with the RFC 1071 checksum, and ICMP echo
+(it answers pings and can send them). Off-subnet destinations are routed via the
+gateway. Three syscalls expose it to userland — `netinfo`, `ping` and `arp` —
+behind the `ifconfig`, `ping` and `arp` commands. Everything is verified against
+QEMU's user-mode network (guest `10.0.2.15`, gateway `10.0.2.2`).
+
 ## Roadmap
 
 - [x] stage 1/2 bootloader, real → protected → long mode
@@ -527,3 +553,6 @@ a symptom.
 - [x] more coreutils (cp, mv, rm, mkdir, touch, clear), pipes and redirection
 - [x] a wait queue: tasks block on I/O instead of spinning
 - [x] higher-half direct map: the low half is user's, programs link at 0x400000
+- [x] `sbrk`-backed `malloc` that grows, and an atomic `rename`/`mv`
+- [x] an e1000 NIC driver and an IPv4 stack: Ethernet, ARP, ICMP
+- [x] network commands: `ifconfig`, `arp`, `ping`
