@@ -21,6 +21,11 @@ int resolve(const char* host, uint32_t* ip)
     return (int)__syscall(SYS_resolve, (long)host, (long)ip, 0, 0, 0);
 }
 
+int tcp_connect(uint32_t ip, uint16_t port)
+{
+    return (int)__syscall(SYS_connect, (long)ip, (long)port, 0, 0, 0);
+}
+
 int parse_ip(const char* text, uint32_t* out)
 {
     uint32_t address = 0;

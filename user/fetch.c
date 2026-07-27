@@ -1,0 +1,64 @@
+/* fetch - an HTTP GET over TCP.
+ *
+ * Small, but it exercises the entire stack in one go: DNS resolves the name,
+ * ARP finds the gateway, TCP opens a connection through it, and the reply comes
+ * back through the same file-descriptor machinery as a file or a pipe.
+ *
+ *   fetch <host> [path]
+ */
+
+#include <net.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(int argc, char** argv)
+{
+    if (argc < 2 || argc > 3) {
+        printf("usage: fetch <host> [path]\n");
+        return 1;
+    }
+    const char* host = argv[1];
+    const char* path = argc == 3 ? argv[2] : "/";
+
+    uint32_t ip;
+    if (parse_ip(host, &ip) < 0 && resolve(host, &ip) < 0) {
+        printf("fetch: cannot resolve '%s'\n", host);
+        return 1;
+    }
+    printf("connecting to %s (%u.%u.%u.%u) port 80\n", host,
+           (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+
+    const int fd = tcp_connect(ip, 80);
+    if (fd < 0) {
+        printf("fetch: connection refused or timed out\n");
+        return 1;
+    }
+
+    /* HTTP/1.0 so the server closes when it is done and we see a clean end of
+     * stream; 1.1 would keep the connection alive waiting for another request. */
+    char request[512];
+    snprintf(request, sizeof(request),
+             "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
+             path, host);
+    if (write(fd, request, strlen(request)) < 0) {
+        printf("fetch: could not send the request\n");
+        close(fd);
+        return 1;
+    }
+
+    long total = 0;
+    char buffer[1024];
+    for (;;) {
+        const long got = read(fd, buffer, sizeof(buffer) - 1);
+        if (got <= 0)
+            break;                  /* 0 is end of stream, -1 a dead connection */
+        buffer[got] = '\0';
+        write(1, buffer, got);
+        total += got;
+    }
+
+    close(fd);
+    printf("\n--- %ld bytes received ---\n", total);
+    return total > 0 ? 0 : 1;
+}

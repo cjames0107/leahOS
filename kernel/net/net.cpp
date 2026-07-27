@@ -4,6 +4,7 @@
 #include <leah/net.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/string.hpp>
+#include <leah/tcp.hpp>
 
 namespace net {
 namespace {
@@ -16,6 +17,7 @@ constexpr u16 kArpReply   = 2;
 
 constexpr u8 kProtoIcmp = 1;
 constexpr u8 kProtoUdp  = 17;
+constexpr u8 kProtoTcp  = 6;
 
 constexpr u8 kIcmpEchoReply   = 0;
 constexpr u8 kIcmpEchoRequest = 8;
@@ -166,7 +168,7 @@ bool on_subnet(u32 ip) { return (ip & kNetmask) == (kOurIp & kNetmask); }
 // The internet checksum (RFC 1071). Summing the buffer in memory order and
 // storing the result straight back into the (network-order) checksum field is
 // correct on any endianness; all our headers are an even number of bytes.
-u16 checksum16(const void* data, usize length)
+u16 checksum16_impl(const void* data, usize length)
 {
     const u16* word = static_cast<const u16*>(data);
     u32 sum = 0;
@@ -181,9 +183,10 @@ u16 checksum16(const void* data, usize length)
     return static_cast<u16>(~sum);
 }
 
+
 // Wrap `payload` in an IPv4 header and ship it, resolving the next hop (the
 // destination itself when on-subnet, otherwise the gateway) to a MAC first.
-bool send_ip(u32 dst_ip, u8 protocol, const void* payload, u16 payload_len)
+bool send_ip_impl(u32 dst_ip, u8 protocol, const void* payload, u16 payload_len)
 {
     const u32 next_hop = on_subnet(dst_ip) ? dst_ip : kGatewayIp;
     u8 dst_mac[kMacLength];
@@ -206,11 +209,12 @@ bool send_ip(u32 dst_ip, u8 protocol, const void* payload, u16 payload_len)
     ip->checksum   = 0;
     ip->src        = hton32(kOurIp);
     ip->dst        = hton32(dst_ip);
-    ip->checksum   = checksum16(ip, sizeof(IpHeader));
+    ip->checksum   = checksum16_impl(ip, sizeof(IpHeader));
 
     memcpy(frame + offset + sizeof(IpHeader), payload, payload_len);
     return e1000::send(frame, static_cast<u16>(offset + sizeof(IpHeader) + payload_len));
 }
+
 
 void handle_icmp(u32 src_ip, u8 ttl, const u8* data, u16 length)
 {
@@ -227,8 +231,8 @@ void handle_icmp(u32 src_ip, u8 ttl, const u8* data, u16 length)
         auto* out = reinterpret_cast<IcmpHeader*>(reply);
         out->type     = kIcmpEchoReply;
         out->checksum = 0;
-        out->checksum = checksum16(reply, length);
-        send_ip(src_ip, kProtoIcmp, reply, length);
+        out->checksum = checksum16_impl(reply, length);
+        send_ip_impl(src_ip, kProtoIcmp, reply, length);
     } else if (icmp->type == kIcmpEchoReply) {
         if (ntoh16(icmp->id) == g_ping_id && ntoh16(icmp->seq) == g_ping_seq) {
             g_ping_ttl  = ttl;
@@ -253,7 +257,7 @@ bool send_udp(u32 dst_ip, u16 src_port, u16 dst_port, const void* payload, u16 l
     udp->checksum = 0;
     memcpy(datagram + sizeof(UdpHeader), payload, len);
 
-    return send_ip(dst_ip, kProtoUdp, datagram, static_cast<u16>(sizeof(UdpHeader) + len));
+    return send_ip_impl(dst_ip, kProtoUdp, datagram, static_cast<u16>(sizeof(UdpHeader) + len));
 }
 
 // Encode "www.example.com" as DNS labels: 3www7example3com0. Returns the length
@@ -368,6 +372,8 @@ void handle_ip(const u8* frame, u16 length)
         handle_icmp(ntoh32(ip->src), ip->ttl, l4, l4_len);
     else if (ip->protocol == kProtoUdp)
         handle_udp(ntoh32(ip->src), l4, l4_len);
+    else if (ip->protocol == kProtoTcp)
+        tcp::receive(ntoh32(ip->src), l4, l4_len);
 }
 
 // Delivered by the NIC's poll loop for every received frame.
@@ -459,6 +465,18 @@ bool arp_resolve(u32 ip, u8* mac_out)
     return false;
 }
 
+bool send_ip(u32 dst_ip, u8 protocol, const void* payload, u16 payload_len)
+{
+    return send_ip_impl(dst_ip, protocol, payload, payload_len);
+}
+
+u16 checksum16(const void* data, usize length)
+{
+    return checksum16_impl(data, length);
+}
+
+void poll() { e1000::poll(); }
+
 void arp_print_cache()
 {
     for (usize i = 0; i < kArpEntries; ++i) {
@@ -483,13 +501,13 @@ bool ping(u32 dst, u16 seq, u8* ttl_out)
     icmp->seq      = hton16(seq);
     for (usize i = 0; i < 32; ++i)
         packet[sizeof(IcmpHeader) + i] = static_cast<u8>('a' + i % 26);
-    icmp->checksum = checksum16(packet, sizeof(packet));
+    icmp->checksum = checksum16_impl(packet, sizeof(packet));
 
     g_ping_id   = 0x4C4F;
     g_ping_seq  = seq;
     g_ping_seen = false;
 
-    if (!send_ip(dst, kProtoIcmp, packet, sizeof(packet)))
+    if (!send_ip_impl(dst, kProtoIcmp, packet, sizeof(packet)))
         return false;
 
     scheduler::NoPreemption no_preempt;

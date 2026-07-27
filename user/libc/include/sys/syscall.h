@@ -43,6 +43,7 @@
 #define SYS_chmod    36
 #define SYS_chown    37
 #define SYS_futex    38
+#define SYS_connect  39
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused

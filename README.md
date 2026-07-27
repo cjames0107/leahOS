@@ -608,6 +608,31 @@ only root may `chown`, and dropping root is one-way. `id`, `chmod`, `chown` and
 `su` expose it; there is no password file yet, so `su` enforces exactly what the
 kernel does and no more.
 
+## TCP
+
+Enough TCP to be a real client: the three-way handshake, sequence and
+acknowledgement tracking, a receive buffer, retransmission on timeout, and an
+orderly four-way close. Not present: congestion control, window scaling,
+selective acknowledgement, out-of-order reassembly, and passive open. A segment
+arriving out of order is **dropped rather than queued** — that costs a
+retransmission and keeps the state machine honest, where a half-built
+reassembler would not.
+
+Sending is stop-and-wait: one segment in flight, held until acknowledged. A real
+window would keep several going, but this keeps the sequence bookkeeping small
+enough to be obviously correct.
+
+A connection is a **file descriptor**, so `read`, `write` and `close` work on a
+socket exactly as they do on a file or a pipe — the fd carries the connection
+handle where a file would carry its offset. `fetch` is the demonstration and the
+end-to-end test in one: DNS resolves the name, ARP finds the gateway, TCP opens
+a connection through it, and the reply arrives through the same descriptor
+machinery as everything else.
+
+The checksum covers a pseudo-header of the source and destination addresses as
+well as the segment, which is what ties a segment to the addresses that carried
+it; one delivered to the wrong host fails the check rather than being accepted.
+
 ## AHCI
 
 The ATA driver moves every sector through the CPU a word at a time — that is
@@ -770,5 +795,6 @@ process still mapped them.
 - [x] the HPET as a monotonic clock, and a calibrated local APIC timer
 - [x] SMP: application processors brought out of reset into long mode
 - [ ] SMP: a locked scheduler, so those processors can run tasks
-- [ ] TCP and sockets, xHCI
+- [x] TCP and sockets, with `fetch` doing an HTTP GET
+- [ ] xHCI, and the HID and mass-storage class drivers
 - [ ] a password file, and `su` that actually authenticates

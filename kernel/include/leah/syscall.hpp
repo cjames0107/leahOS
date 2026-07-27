@@ -53,6 +53,9 @@ enum Number : u64 {
     Chmod     = 36,
     Chown     = 37,
     Futex     = 38,
+    Connect   = 39,   // TCP: open a connection, returns an fd
+    SockSend  = 40,
+    SockRecv  = 41,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

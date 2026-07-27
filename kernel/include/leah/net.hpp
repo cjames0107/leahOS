@@ -71,4 +71,19 @@ bool ping(u32 dst, u16 seq, u8* ttl_out);
 // on success.
 bool resolve(const char* host, u32* out_ip);
 
+// --- for the layers above ---------------------------------------------------
+
+// Wrap a payload in an IPv4 header and send it, resolving the next hop first.
+bool send_ip(u32 dst_ip, u8 protocol, const void* payload, u16 payload_len);
+
+// The internet checksum (RFC 1071), over an arbitrary buffer.
+u16 checksum16(const void* data, usize length);
+
+// Run the receive path once: drain the NIC and dispatch whatever arrived. The
+// blocking calls in the protocol layers drive this themselves, since nothing
+// else does.
+void poll();
+
+constexpr u8 kProtocolTcp = 6;
+
 } // namespace net

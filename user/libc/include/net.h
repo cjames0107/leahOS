@@ -32,4 +32,8 @@ int parse_ip(const char* text, uint32_t* out);
  * failure. */
 int resolve(const char* host, uint32_t* ip);
 
+/* Open a TCP connection to `ip`:`port` and return a file descriptor. read,
+ * write and close work on it exactly as on a file or a pipe. -1 on failure. */
+int tcp_connect(uint32_t ip, uint16_t port);
+
 #endif /* _NET_H */

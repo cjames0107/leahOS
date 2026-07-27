@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <net.h>
 #include <stdlib.h>
 #include <thread.h>
 #include <unistd.h>
@@ -408,6 +409,56 @@ static void test_permissions(void)
     unlink("/perm.txt");
 }
 
+static void test_tcp(void)
+{
+    printf("tcp:\n");
+
+    /* The failure path first, and without needing anything to be reachable:
+     * a port nothing listens on must be refused rather than hang or succeed. */
+    uint32_t gateway = 0x0A000202;      /* 10.0.2.2, QEMU's gateway */
+    check("connecting to a dead port fails", tcp_connect(gateway, 9) < 0);
+
+    /* The real thing, if the outside world is reachable. A machine with no
+     * network should skip rather than fail - the checks above still ran. */
+    uint32_t ip;
+    if (resolve("example.com", &ip) < 0) {
+        printf("  skip  no DNS, skipping the live connection\n");
+        return;
+    }
+    check("DNS resolved a hostname for TCP", ip != 0);
+
+    const int fd = tcp_connect(ip, 80);
+    check("TCP connected to a real server", fd >= 0);
+    if (fd < 0)
+        return;
+
+    static const char request[] =
+        "GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+    check("wrote a request to the socket",
+          write(fd, request, sizeof(request) - 1) == (long)(sizeof(request) - 1));
+
+    char buffer[512];
+    const long got = read(fd, buffer, sizeof(buffer) - 1);
+    check("read a response back", got > 0);
+    if (got > 0) {
+        buffer[got] = '\0';
+        check("the response is HTTP", memcmp(buffer, "HTTP/", 5) == 0);
+    }
+
+    /* Drain to end of stream, which is what proves the peer's FIN was seen
+     * rather than the connection simply going quiet. */
+    long total = got > 0 ? got : 0;
+    for (;;) {
+        const long more = read(fd, buffer, sizeof(buffer) - 1);
+        if (more <= 0)
+            break;
+        total += more;
+    }
+    check("the stream ended cleanly at the peer's FIN", total > (long)got);
+
+    close(fd);
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -417,6 +468,7 @@ int main(void)
     test_cow();
     test_signals();
     test_permissions();
+    test_tcp();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

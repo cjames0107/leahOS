@@ -516,6 +516,12 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             sys_futex(frame->rdi, frame->rsi, frame->rdx));
         break;
 
+    case Connect:
+        frame->rax = static_cast<u64>(
+            files::tcp_connect(static_cast<u32>(frame->rdi),
+                               static_cast<u16>(frame->rsi)));
+        break;
+
     case Getuid:
         frame->rax = scheduler::current_uid();
         break;
