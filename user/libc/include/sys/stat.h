@@ -9,8 +9,10 @@
 
 struct stat {
     uint32_t st_type;       /* S_IFREG or S_IFDIR */
-    uint32_t st_reserved;
+    uint32_t st_mode;       /* permission bits, 0777 */
     uint64_t st_size;
+    uint32_t st_uid;
+    uint32_t st_gid;
 };
 
 struct dirent {
@@ -27,5 +29,10 @@ int stat(const char* path, struct stat* out);
 int getdents(const char* path, struct dirent* buffer, int max);
 
 int mkdir(const char* path);
+
+/* Change a file's permission bits, or its owner. Only root, or the file's
+ * owner, may chmod; only root may chown. -1 leaves a chown field alone. */
+int chmod(const char* path, unsigned mode);
+int chown(const char* path, unsigned uid, unsigned gid);
 
 #endif /* _SYS_STAT_H */

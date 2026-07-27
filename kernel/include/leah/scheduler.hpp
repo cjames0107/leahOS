@@ -54,6 +54,53 @@ void wake(u64 channel);
 u32 spawn_user(const char* name, vmm::AddressSpace space,
                const TrapFrame& frame, u32 parent_pid);
 
+// A new thread inside the calling process: it shares the caller's address space
+// and open-file table rather than copying them, and enters ring 3 on `frame`.
+// The caller is its parent, so wait() joins it. Returns its tid, or 0.
+u32 spawn_thread(const TrapFrame& frame);
+
+// The running task's thread id (its pid) and thread-group id (the process id
+// every thread of the process shares).
+u32 current_tid();
+u32 current_tgid();
+
+// --- credentials ------------------------------------------------------------
+//
+// uid 0 is root and bypasses permission checks. Credentials are inherited
+// across fork and execve; only root may change them.
+u32  current_uid();
+u32  current_gid();
+bool set_current_uid(u32 uid);
+bool set_current_gid(u32 gid);
+
+// --- signals ----------------------------------------------------------------
+//
+// Delivery happens on the way out of a syscall, which is the one place the
+// kernel holds the full user register state and can rewrite it to enter a
+// handler. Sending a signal therefore wakes a blocked target so it reaches that
+// check; a purely compute-bound loop that never enters the kernel will not see
+// a signal until it does.
+
+// Mark `signo` pending on the task with this pid. False if there is no such
+// user task.
+bool signal_send(u32 pid, int signo);
+
+// Remove and return the lowest pending signal, or 0 if none are pending.
+int  signal_take_pending();
+bool signal_pending();
+
+// The process-wide disposition for `signo`: 0 default, 1 ignore, else a handler.
+u64  signal_handler(int signo);
+void signal_set_handler(int signo, u64 handler);
+
+// libc's trampoline, which the handler returns through to call sigreturn.
+u64  signal_restorer();
+void signal_set_restorer(u64 restorer);
+
+// Reset every disposition to default - what execve does, since the new image
+// knows nothing of the old one's handlers.
+void signal_reset_all();
+
 void start_preemption();
 void yield();
 
@@ -103,6 +150,10 @@ files::Table& current_files();
 // The running task's sbrk program break.
 u64  current_brk();
 void set_current_brk(u64 brk);
+
+// The running task's next free mmap address.
+u64  current_mmap_next();
+void set_current_mmap_next(u64 next);
 
 // --- called from interrupt context -----------------------------------------
 

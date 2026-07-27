@@ -557,6 +557,11 @@ bool Fat32::stat(const char* path, vfs::Stat& out)
 
     out.type = located.directory ? vfs::Type::Directory : vfs::Type::File;
     out.size = located.directory ? 0 : located.size;
+    // FAT32 stores no ownership or permission bits, so report a fixed,
+    // permissive default rather than inventing something that looks enforced.
+    out.mode = located.directory ? 0755 : 0644;
+    out.uid  = 0;
+    out.gid  = 0;
     return true;
 }
 

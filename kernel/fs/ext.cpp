@@ -1,5 +1,6 @@
 #include <leah/ext.hpp>
 #include <leah/heap.hpp>
+#include <leah/scheduler.hpp>
 #include <leah/string.hpp>
 
 namespace fs {
@@ -365,6 +366,11 @@ bool Ext::stat(const char* path, vfs::Stat& out)
     out.type = (inode.mode & kModeFmt) == kModeDir ? vfs::Type::Directory
                                                    : vfs::Type::File;
     out.size = inode.size;
+    // The permission bits and owner as they really are on disk - the reason ext
+    // is the root filesystem rather than FAT32.
+    out.mode = inode.mode & vfs::kModePermissionBits;
+    out.uid  = inode.uid;
+    out.gid  = inode.gid;
     return true;
 }
 
@@ -982,8 +988,9 @@ bool Ext::create(const char* path, vfs::Type type)
     Inode inode{};
     inode.number   = number;
     inode.mode     = is_dir ? 0x41EDu : 0x81A4u;    // drwxr-xr-x / -rw-r--r--
-    inode.uid      = 0;
-    inode.gid      = 0;
+    // A new file belongs to whoever made it.
+    inode.uid      = static_cast<u16>(scheduler::current_uid());
+    inode.gid      = static_cast<u16>(scheduler::current_gid());
     inode.links    = is_dir ? 2 : 1;
     inode.size     = 0;
     inode.i_blocks = 0;
@@ -1180,6 +1187,30 @@ bool Ext::rename(const char* old_path, const char* new_path)
         }
     }
     return true;
+}
+
+bool Ext::chmod(const char* path, u16 mode)
+{
+    Inode inode;
+    if (!resolve(path, inode))
+        return false;
+    // Keep the format bits (file vs directory) and replace only the permissions.
+    inode.mode = static_cast<u16>((inode.mode & ~vfs::kModePermissionBits) |
+                                  (mode & vfs::kModePermissionBits));
+    return write_inode(inode);
+}
+
+bool Ext::chown(const char* path, u32 uid, u32 gid)
+{
+    Inode inode;
+    if (!resolve(path, inode))
+        return false;
+    // -1 in either field means "leave this one alone", as chown(2) has it.
+    if (uid != 0xFFFFFFFFu)
+        inode.uid = static_cast<u16>(uid);
+    if (gid != 0xFFFFFFFFu)
+        inode.gid = static_cast<u16>(gid);
+    return write_inode(inode);
 }
 
 } // namespace fs

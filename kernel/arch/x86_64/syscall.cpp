@@ -7,6 +7,7 @@
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/signal.hpp>
 #include <leah/string.hpp>
 #include <leah/syscall.hpp>
 #include <leah/vfs.hpp>
@@ -69,6 +70,191 @@ i64 sys_sbrk(i64 increment)
     return static_cast<i64>(old_brk);
 }
 
+// Anonymous memory, page-granular. Only private anonymous mappings are
+// supported: file-backed mmap needs a page cache to be worth having, and the
+// programs that want memory here want it zeroed, not shared with a file.
+// Returns the base address, or -1.
+i64 sys_mmap(u64 addr, u64 length, u64 prot, u64 flags)
+{
+    if (length == 0)
+        return -1;
+    if ((flags & kMapAnonymous) == 0)
+        return -1;                                      // file-backed: unsupported
+
+    const u64 pages = (length + vmm::kPageSize - 1) / vmm::kPageSize;
+    const u64 bytes = pages * vmm::kPageSize;
+
+    u64 base;
+    if ((flags & kMapFixed) != 0 && addr != 0) {
+        base = addr & ~(vmm::kPageSize - 1);
+        if (!user_range_ok(base, bytes))
+            return -1;
+    } else {
+        base = scheduler::current_mmap_next();
+        if (base + bytes > memory::kUserMmapEnd)
+            return -1;                                  // mmap arena exhausted
+        scheduler::set_current_mmap_next(base + bytes);
+    }
+
+    u64 page_flags = vmm::User;
+    if ((prot & kProtWrite) != 0)
+        page_flags |= vmm::Write;
+    if ((prot & kProtExec) == 0)
+        page_flags |= vmm::NoExecute;
+
+    for (u64 offset = 0; offset < bytes; offset += vmm::kPageSize) {
+        const u64 page = base + offset;
+        if (vmm::translate(page) != 0)
+            continue;                                   // already mapped
+        const paddr_t frame = pmm::alloc();
+        if (frame == 0)
+            return -1;
+        // Map writable first so the zeroing below can happen, then tighten to
+        // the requested protection - a read-only mapping must still start zeroed.
+        if (!vmm::map(page, frame, page_flags | vmm::Write)) {
+            pmm::free(frame);
+            return -1;
+        }
+        memset(reinterpret_cast<void*>(page), 0, vmm::kPageSize);
+        if ((page_flags & vmm::Write) == 0) {
+            vmm::unmap(page);
+            vmm::map(page, frame, page_flags);
+        }
+    }
+    return static_cast<i64>(base);
+}
+
+// Unmap a range and return its frames. Addresses outside the user half, or
+// pages that were never mapped, are skipped rather than treated as an error -
+// munmap of a partly-unmapped range is legal.
+i64 sys_munmap(u64 addr, u64 length)
+{
+    if (length == 0)
+        return -1;
+    const u64 base = addr & ~(vmm::kPageSize - 1);
+    const u64 pages = (length + vmm::kPageSize - 1) / vmm::kPageSize;
+    const u64 bytes = pages * vmm::kPageSize;
+    if (!user_range_ok(base, bytes))
+        return -1;
+
+    for (u64 offset = 0; offset < bytes; offset += vmm::kPageSize) {
+        const u64 page = base + offset;
+        const paddr_t frame = vmm::translate(page);
+        if (frame == 0)
+            continue;
+        vmm::unmap(page);
+        pmm::free(frame);
+    }
+    return 0;
+}
+
+// What a signal handler's frame leaves on the user stack so sigreturn can put
+// everything back. Saving the whole syscall frame is both simplest and exact:
+// the interrupted context is precisely what the syscall was going to restore.
+struct [[gnu::packed]] SignalContext {
+    Frame frame;
+};
+
+// Rewrite the outgoing user context so it enters `handler` instead of resuming
+// where the syscall left off. The handler's frame is built on the user's own
+// stack: the saved context, then a return address pointing at libc's restorer,
+// which calls sigreturn to undo all of this.
+void deliver_signal(Frame* frame, int signo, u64 handler)
+{
+    u64 sp = frame->user_rsp;
+    sp -= 128;                          // skip the SysV red zone
+    sp -= sizeof(SignalContext);
+    sp &= ~0xFull;                      // the ABI's 16-byte alignment
+
+    const u64 restorer = scheduler::signal_restorer();
+    if (restorer == 0 || !user_range_ok(sp - 8, sizeof(SignalContext) + 8)) {
+        // No way back from the handler: treat it as fatal rather than jumping
+        // into a handler that can never return.
+        scheduler::exit_current(128 + signo);
+        return;
+    }
+
+    auto* context = reinterpret_cast<SignalContext*>(sp);
+    context->frame = *frame;
+
+    sp -= 8;
+    *reinterpret_cast<u64*>(sp) = restorer;   // where the handler's RET goes
+
+    frame->user_rsp = sp;
+    frame->user_rip = handler;
+    frame->rdi      = static_cast<u64>(signo);   // handler(int signo)
+    // A handler runs with a clean flags word; the saved copy is what gets
+    // restored, so nothing is lost.
+    frame->user_flags = kUserFlags;
+}
+
+// Called on the way out of every syscall. Takes at most one pending signal per
+// return, which is enough: if more are pending the next syscall (or the
+// restorer's own sigreturn) picks up the next one.
+void handle_pending_signals(Frame* frame)
+{
+    if (!scheduler::signal_pending())
+        return;
+
+    const int signo = scheduler::signal_take_pending();
+    if (signo == 0)
+        return;
+
+    const u64 handler = scheduler::signal_handler(signo);
+    if (handler == signals::kSigIgnore)
+        return;
+    if (handler == signals::kSigDefault) {
+        if (signals::default_kills(signo))
+            scheduler::exit_current(128 + signo);
+        return;                          // the rest default to being ignored
+    }
+    // SIGKILL is never catchable, whatever the process asked for.
+    if (signo == signals::kSigKill) {
+        scheduler::exit_current(128 + signo);
+        return;
+    }
+    deliver_signal(frame, signo, handler);
+}
+
+// Restore the context a signal handler interrupted. The user stack pointer is
+// sitting at the saved context, because the handler's RET popped the restorer
+// address that deliver_signal pushed below it.
+i64 sys_sigreturn(Frame* frame)
+{
+    const u64 sp = frame->user_rsp;
+    if (!user_range_ok(sp, sizeof(SignalContext)))
+        return -1;
+    const auto* context = reinterpret_cast<const SignalContext*>(sp);
+
+    // Everything the interrupted code had, including the rax the original
+    // syscall was about to return.
+    *frame = context->frame;
+    return static_cast<i64>(frame->rax);
+}
+
+// Start a thread in the calling process: same address space, same open files,
+// its own stack and register state. The caller supplies the stack (its libc
+// mmaps one), which keeps thread stacks out of the kernel's bookkeeping.
+// Returns the new thread's tid, or -1.
+i64 sys_clone(u64 entry, u64 arg, u64 stack_top)
+{
+    if (entry == 0 || stack_top == 0)
+        return -1;
+    if (!user_range_ok(entry, 1) || !user_range_ok(stack_top, 1))
+        return -1;
+
+    scheduler::TrapFrame tf{};
+    tf.rip    = entry;
+    tf.rdi    = arg;                    // the SysV first argument
+    tf.rsp    = stack_top & ~0xFull;    // the ABI wants a 16-aligned stack
+    tf.cs     = kUserCode;
+    tf.ss     = kUserData;
+    tf.rflags = kUserFlags;
+
+    const u32 tid = scheduler::spawn_thread(tf);
+    return tid == 0 ? -1 : static_cast<i64>(tid);
+}
+
 // Turn the saved syscall registers into the full ring-3 frame a forked child
 // resumes on. The child re-enters user mode through IRETQ (see user_entry.asm)
 // rather than SYSRET, so it needs CS/SS/RFLAGS as well as the general set.
@@ -128,7 +314,9 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
 
     case GetPid:
-        frame->rax = scheduler::current_pid();
+        // The process id, shared by every thread of the process; gettid gives
+        // the caller's own thread id.
+        frame->rax = scheduler::current_tgid();
         break;
 
     case Open:
@@ -192,6 +380,80 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
     case Sbrk:
         frame->rax = static_cast<u64>(sys_sbrk(static_cast<i64>(frame->rdi)));
         break;
+
+    case Mmap:
+        frame->rax = static_cast<u64>(
+            sys_mmap(frame->rdi, frame->rsi, frame->rdx, frame->r10));
+        break;
+
+    case Munmap:
+        frame->rax = static_cast<u64>(sys_munmap(frame->rdi, frame->rsi));
+        break;
+
+    case Clone:
+        frame->rax = static_cast<u64>(
+            sys_clone(frame->rdi, frame->rsi, frame->rdx));
+        break;
+
+    case Gettid:
+        frame->rax = scheduler::current_tid();
+        break;
+
+    case Getuid:
+        frame->rax = scheduler::current_uid();
+        break;
+
+    case Setuid:
+        frame->rax = static_cast<u64>(
+            scheduler::set_current_uid(static_cast<u32>(frame->rdi)) ? 0 : -1);
+        break;
+
+    case Getgid:
+        frame->rax = scheduler::current_gid();
+        break;
+
+    case Setgid:
+        frame->rax = static_cast<u64>(
+            scheduler::set_current_gid(static_cast<u32>(frame->rdi)) ? 0 : -1);
+        break;
+
+    case Chmod:
+        frame->rax = static_cast<u64>(
+            files::chmod(reinterpret_cast<const char*>(frame->rdi),
+                         static_cast<u16>(frame->rsi)));
+        break;
+
+    case Chown:
+        frame->rax = static_cast<u64>(
+            files::chown(reinterpret_cast<const char*>(frame->rdi),
+                         static_cast<u32>(frame->rsi),
+                         static_cast<u32>(frame->rdx)));
+        break;
+
+    case Kill:
+        frame->rax = static_cast<u64>(
+            scheduler::signal_send(static_cast<u32>(frame->rdi),
+                                   static_cast<int>(frame->rsi)) ? 0 : -1);
+        break;
+
+    case Signal: {
+        // signal(signo, handler, restorer): the restorer is libc's trampoline,
+        // registered here so the kernel has a return path out of a handler
+        // without putting code on the (non-executable) user stack.
+        const int signo = static_cast<int>(frame->rdi);
+        const u64 previous = scheduler::signal_handler(signo);
+        scheduler::signal_set_handler(signo, frame->rsi);
+        if (frame->rdx != 0)
+            scheduler::signal_set_restorer(frame->rdx);
+        frame->rax = previous;
+        break;
+    }
+
+    case Sigreturn:
+        // Restores the interrupted context wholesale, including rax - so unlike
+        // every other call, this one must not overwrite frame->rax afterwards.
+        sys_sigreturn(frame);
+        return;
 
     case Rename:
         frame->rax = static_cast<u64>(
@@ -267,6 +529,10 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         // "returns" to the caller; on failure it leaves frame->rax = -1.
         process::exec(*frame, reinterpret_cast<const char*>(frame->rdi),
                       reinterpret_cast<char**>(frame->rsi));
+        // A new image knows nothing of the old one's handlers, and their
+        // addresses no longer mean anything, so dispositions go back to default.
+        if (frame->rax != static_cast<u64>(-1))
+            scheduler::signal_reset_all();
         break;
 
     case Wait: {
@@ -287,4 +553,9 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         frame->rax = static_cast<u64>(-1);
         break;
     }
+
+    // The last thing before returning to ring 3: this is where the kernel holds
+    // the full user register state, so it is the only place a handler can be
+    // spliced in front of the interrupted code.
+    handle_pending_signals(frame);
 }

@@ -51,6 +51,18 @@ constexpr paddr_t direct_to_phys(vaddr_t virt) { return virt - kDirectMapBase; }
 // with either.
 constexpr vaddr_t kUserBrkBase = 0x10000000ull;   // 256 MiB
 
+// Where mmap hands out anonymous regions, when the caller does not name an
+// address. Above the sbrk heap so the two can grow without meeting, and still
+// far below the user stack.
+constexpr vaddr_t kUserMmapBase = 0x40000000ull;  // 1 GiB
+constexpr vaddr_t kUserMmapEnd  = 0x80000000ull;  // 2 GiB
+
+// Where a thread's stack is placed when clone() is not given one. Each thread
+// gets its own slot below the main stack, spaced so a guard gap sits between.
+constexpr vaddr_t kUserThreadStackTop = 0x600000000000ull;
+constexpr u64     kUserThreadStackSize = 64 * 1024;
+constexpr u64     kUserThreadStackStride = 1024 * 1024;
+
 // Where device MMIO windows (PCI BARs) are mapped, uncached, in the high half.
 // The direct map would reach them too, but cached - registers must not sit in a
 // cache line, so they get their own mapping here.

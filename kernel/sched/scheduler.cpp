@@ -5,6 +5,7 @@
 #include <leah/panic.hpp>
 #include <leah/file.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/signal.hpp>
 #include <leah/string.hpp>
 
 // Implemented in context.asm, user_entry.asm and syscall_entry.asm.
@@ -16,6 +17,7 @@ namespace scheduler {
 namespace {
 
 constexpr usize kMaxTasks   = 32;
+constexpr u32   kMaxSignals = signals::kMaxSignals;
 constexpr usize kStackSize  = 16 * 1024;
 constexpr u32   kQuantum    = 1;            // one 10 ms tick per slice
 
@@ -34,12 +36,27 @@ struct Task {
     u64   kernel_stack_top;  // loaded into TSS.rsp0 while this task runs
     u32   pid;
     u32   parent_pid;
+    // Thread group: every thread of a process shares one tgid, which is the pid
+    // of the group leader. A single-threaded process is its own leader. Threads
+    // share the leader's address space and open-file table.
+    u32   tgid;
     State state;
     bool  is_user;
     vmm::AddressSpace space; // 0 for kernel threads (they use the kernel space)
     i32   exit_code;
     u64   wait_channel;      // when Blocked on block_on(); 0 otherwise
     u64   brk;               // sbrk program break, for user tasks
+    u64   mmap_next;         // next free address mmap hands out
+    // Credentials, inherited across fork and execve. uid 0 is root and bypasses
+    // permission checks; everything starts as root until someone calls setuid.
+    u32   uid;
+    u32   gid;
+    // Signals. The pending set is per-task (a signal is delivered to the thread
+    // it was sent to), but the dispositions are per-process, so handlers and the
+    // restorer are read from and written to the group leader.
+    u32   sig_pending;
+    u64   sig_handler[kMaxSignals];
+    u64   sig_restorer;      // libc's trampoline, which calls sigreturn
     const char* name;
     Entry entry;             // kernel threads only
     void* arg;
@@ -79,6 +96,53 @@ Task* alloc_slot()
         }
     }
     return nullptr;
+}
+
+// True if another live task still uses `space`. A thread group shares one
+// address space, so the last one out is the only one that may free it - and a
+// zombie has already released its own reference (space set to 0), so it does
+// not keep the space alive.
+bool space_still_used(vmm::AddressSpace space, const Task* except)
+{
+    if (space == 0)
+        return false;
+    for (u32 i = 0; i < g_task_count; ++i) {
+        const Task* t = &g_tasks[i];
+        if (t == except || t->state == State::Unused || t->state == State::Dead)
+            continue;
+        if (t->is_user && t->space == space)
+            return true;
+    }
+    return false;
+}
+
+// The task holding a thread group's shared state: the group leader, or the task
+// itself when the leader is gone or it is not part of a group.
+Task* group_leader(Task* task)
+{
+    if (task->tgid != 0 && task->tgid != task->pid) {
+        Task* leader = find(task->tgid);
+        if (leader != nullptr && leader->state != State::Unused &&
+            leader->state != State::Zombie && leader->state != State::Dead)
+            return leader;
+    }
+    return task;
+}
+
+// True if another thread of the same group is still alive.
+bool group_still_alive(const Task* except)
+{
+    if (except->tgid == 0)
+        return false;
+    for (u32 i = 0; i < g_task_count; ++i) {
+        const Task* t = &g_tasks[i];
+        if (t == except || t->state == State::Unused ||
+            t->state == State::Dead || t->state == State::Zombie)
+            continue;
+        if (t->tgid == except->tgid)
+            return true;
+    }
+    return false;
 }
 
 [[noreturn]] void kernel_thread_trampoline()
@@ -171,6 +235,7 @@ void init()
 
     Task& main_task = g_tasks[0];
     main_task.pid    = g_next_pid++;
+    main_task.tgid   = main_task.pid;
     main_task.state  = State::Running;
     main_task.name   = "main";
     main_task.space  = vmm::kernel_space();
@@ -226,16 +291,67 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
     task->kernel_stack     = reinterpret_cast<u64>(stack);
     task->kernel_stack_top = task->kernel_stack + kStackSize;
     task->pid        = g_next_pid++;
+    task->tgid       = task->pid;      // a new process leads its own group
     task->parent_pid = parent_pid;
     task->state      = State::Ready;
     task->is_user    = true;
     task->space      = space;
     task->name       = name;
     task->brk        = memory::kUserBrkBase;
+    task->mmap_next  = memory::kUserMmapBase;
+    task->sig_pending  = 0;
+    task->sig_restorer = 0;
+    memset(task->sig_handler, 0, sizeof(task->sig_handler));
+    task->uid = 0;
+    task->gid = 0;
     files::init_table(task->files);
 
     // The first switch to this task returns into user_return, which restores
     // the TrapFrame and drops to ring 3.
+    fabricate(task, reinterpret_cast<u64>(&user_return), &frame, sizeof(frame));
+    return task->pid;
+}
+
+u32 spawn_thread(const TrapFrame& frame)
+{
+    cpu::InterruptGuard guard;
+
+    Task* self = current();
+    if (!self->is_user || self->space == 0)
+        return 0;                       // threads only exist inside a process
+
+    Task* task = alloc_slot();
+    if (task == nullptr)
+        return 0;
+
+    auto* stack = static_cast<u8*>(kmalloc(kStackSize));
+    if (stack == nullptr) {
+        task->state = State::Unused;
+        return 0;
+    }
+
+    task->kernel_stack     = reinterpret_cast<u64>(stack);
+    task->kernel_stack_top = task->kernel_stack + kStackSize;
+    task->pid        = g_next_pid++;
+    // Same group, same address space: this is a thread, not a process. The
+    // creator is its parent so wait() can be used to join it.
+    task->tgid       = self->tgid;
+    task->parent_pid = self->pid;
+    task->state      = State::Ready;
+    task->is_user    = true;
+    task->space      = self->space;
+    task->name       = self->name;
+    task->brk        = self->brk;
+    task->mmap_next  = self->mmap_next;
+    task->uid        = self->uid;
+    task->gid        = self->gid;
+    task->sig_pending  = 0;
+    task->sig_restorer = 0;
+    memset(task->sig_handler, 0, sizeof(task->sig_handler));
+    // The fd table is the leader's; this copy is never consulted (current_files
+    // redirects to the group leader), but zero it so close_all cannot double-free.
+    files::init_table(task->files);
+
     fabricate(task, reinterpret_cast<u64>(&user_return), &frame, sizeof(frame));
     return task->pid;
 }
@@ -324,7 +440,17 @@ u32 fork_current(const TrapFrame& parent_user)
     if (child_task != nullptr) {
         child_task->files = parent->files;
         child_task->brk   = parent->brk;
+        child_task->mmap_next = parent->mmap_next;
         files::inherit(child_task->files);
+
+        // Dispositions carry across fork (the image is the same, so its handler
+        // addresses are still valid); pending signals do not.
+        memcpy(child_task->sig_handler, parent->sig_handler,
+               sizeof(child_task->sig_handler));
+        child_task->sig_restorer = parent->sig_restorer;
+        child_task->sig_pending  = 0;
+        child_task->uid = parent->uid;
+        child_task->gid = parent->gid;
     }
     return child;
 }
@@ -336,15 +462,22 @@ void exit_current(i32 code)
     Task* self = current();
     self->exit_code = code;
 
-    // Release open files - notably pipe ends, so the other side sees EOF.
-    files::close_all(self->files);
+    // Release open files - notably pipe ends, so the other side sees EOF. The
+    // table is shared across a thread group, so only the last thread out closes
+    // it; otherwise a thread exiting would pull the fds from under its siblings.
+    if (!group_still_alive(self))
+        files::close_all(group_leader(self)->files);
 
     // Drop the user address space now; the kernel stack (in the shared heap)
-    // stays until a parent reaps it. Switch off the space before freeing it.
+    // stays until a parent reaps it. Threads share one space, so it is freed
+    // only once the last of them has let go of it. Switch off it before freeing.
     if (self->is_user && self->space != 0) {
-        vmm::switch_address_space(vmm::kernel_space());
-        vmm::destroy_address_space(self->space);
+        const vmm::AddressSpace space = self->space;
         self->space = 0;
+        if (!space_still_used(space, self)) {
+            vmm::switch_address_space(vmm::kernel_space());
+            vmm::destroy_address_space(space);
+        }
     }
 
     self->state = self->is_user ? State::Zombie : State::Dead;
@@ -390,16 +523,119 @@ i64 wait_child(i32* status)
     }
 }
 
+// --- signals ----------------------------------------------------------------
+
+bool signal_send(u32 pid, int signo)
+{
+    if (signo <= 0 || signo >= static_cast<int>(kMaxSignals))
+        return false;
+    cpu::InterruptGuard guard;
+
+    Task* target = find(pid);
+    if (target == nullptr || !target->is_user ||
+        target->state == State::Zombie || target->state == State::Dead)
+        return false;
+
+    target->sig_pending |= 1u << signo;
+
+    // A signal is a reason to run: a target parked in wait() or on a channel
+    // has to come back so the delivery check on its way out to user mode runs.
+    if (target->state == State::Blocked) {
+        target->state = State::Ready;
+        target->wait_channel = 0;
+    }
+    return true;
+}
+
+int signal_take_pending()
+{
+    Task* self = current();
+    if (self->sig_pending == 0)
+        return 0;
+    for (u32 signo = 1; signo < kMaxSignals; ++signo) {
+        if (self->sig_pending & (1u << signo)) {
+            self->sig_pending &= ~(1u << signo);
+            return static_cast<int>(signo);
+        }
+    }
+    return 0;
+}
+
+bool signal_pending() { return current()->sig_pending != 0; }
+
+u64 signal_handler(int signo)
+{
+    if (signo <= 0 || signo >= static_cast<int>(kMaxSignals))
+        return signals::kSigDefault;
+    return group_leader(current())->sig_handler[signo];
+}
+
+void signal_set_handler(int signo, u64 handler)
+{
+    if (signo <= 0 || signo >= static_cast<int>(kMaxSignals))
+        return;
+    // SIGKILL must stay fatal, or a process could make itself unkillable.
+    if (signo == signals::kSigKill)
+        return;
+    group_leader(current())->sig_handler[signo] = handler;
+}
+
+void signal_reset_all()
+{
+    Task* leader = group_leader(current());
+    for (u32 i = 0; i < kMaxSignals; ++i)
+        leader->sig_handler[i] = signals::kSigDefault;
+    leader->sig_restorer = 0;
+    leader->sig_pending = 0;
+}
+
+u64  signal_restorer()          { return group_leader(current())->sig_restorer; }
+void signal_set_restorer(u64 r) { group_leader(current())->sig_restorer = r; }
+
+u32 current_uid() { return current()->uid; }
+u32 current_gid() { return current()->gid; }
+
+bool set_current_uid(u32 uid)
+{
+    Task* self = current();
+    // Only root may become another user; anyone else is refused. There is no
+    // saved-set-uid subtlety here because there is no setuid-on-exec yet.
+    if (self->uid != 0 && uid != self->uid)
+        return false;
+    self->uid = uid;
+    return true;
+}
+
+bool set_current_gid(u32 gid)
+{
+    Task* self = current();
+    if (self->uid != 0 && gid != self->gid)
+        return false;
+    self->gid = gid;
+    return true;
+}
+
+u32 current_tid()  { return current()->pid; }
+u32 current_tgid() { return current()->tgid; }
+
 u32 current_pid() { return current()->pid; }
 
 vmm::AddressSpace current_task_space() { return current()->space; }
 
 void current_task_set_space(vmm::AddressSpace space) { current()->space = space; }
 
-files::Table& current_files() { return current()->files; }
+// Threads share one open-file table, the group leader's: opening a file in one
+// thread must be visible in its siblings.
+files::Table& current_files() { return group_leader(current())->files; }
 
-u64  current_brk()            { return current()->brk; }
-void set_current_brk(u64 brk) { current()->brk = brk; }
+// The heap and the mmap arena live in the address space, which a thread group
+// shares - so both cursors belong to the group leader. Keeping them per-task
+// would hand two threads the same addresses.
+u64  current_brk()            { return group_leader(current())->brk; }
+void set_current_brk(u64 brk) { group_leader(current())->brk = brk; }
+
+u64  current_mmap_next()             { return group_leader(current())->mmap_next; }
+void set_current_mmap_next(u64 next) { group_leader(current())->mmap_next = next; }
 
 u32 alive_count()
 {

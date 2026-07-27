@@ -29,6 +29,19 @@
 #define SYS_ping     22
 #define SYS_arp      23
 #define SYS_resolve  24
+#define SYS_mmap     25
+#define SYS_munmap   26
+#define SYS_clone    27
+#define SYS_gettid   28
+#define SYS_kill     29
+#define SYS_signal   30
+#define SYS_sigreturn 31
+#define SYS_getuid   32
+#define SYS_setuid   33
+#define SYS_getgid   34
+#define SYS_setgid   35
+#define SYS_chmod    36
+#define SYS_chown    37
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused

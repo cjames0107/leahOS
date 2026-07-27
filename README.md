@@ -167,7 +167,10 @@ over a `SYSCALL` ABI — as processes in their own private address spaces — an
 time-slices them with a preemptive scheduler. Processes `fork`,
 `execve` and `wait`, open files through a per-process descriptor table, and run
 an interactive **shell** with real commands (`ls`, `cat`, `echo`, `pwd`, `cp`,
-`mv`, `rm`, and more), pipes and redirection. An **e1000 NIC driver** and a
+`mv`, `rm`, and more), pipes and redirection. Processes catch **signals**, run
+**threads** that share their address space, map anonymous memory with **mmap**,
+and run under **users and permissions** enforced against the ext inode's own
+mode and owner bits. An **e1000 NIC driver** and a
 small **IPv4 stack** (Ethernet, ARP, ICMP, UDP, and a minimal DNS resolver)
 bring up networking, with `ifconfig`, `arp`, `ping` and `nslookup` talking to
 QEMU's virtual network — `ping example.com` resolves and reaches the host. User
@@ -573,6 +576,38 @@ it during the send, before the loop ever halts — but an asynchronous one like 
 DNS answer needs both. Everything is verified against QEMU's user-mode network
 (guest `10.0.2.15`, gateway `10.0.2.2`, DNS `10.0.2.3`).
 
+## Processes, threads and signals
+
+A **thread** is a task that shares its creator's address space and open-file
+table instead of copying them; `clone` takes an entry point, an argument and a
+stack that libc has already `mmap`ed, which keeps thread stacks out of the
+kernel's bookkeeping entirely. Every thread of a process carries the same
+`tgid`, and the shared state - fd table, `brk`, the mmap cursor - is read
+through the group leader, so two threads can never be handed the same address.
+The address space is freed by whichever thread leaves last, not the first one
+out; `getpid` returns the process, `gettid` the thread.
+
+**Signals** are delivered on the way out of a syscall, because that is the one
+place the kernel holds the full user register state and can splice a handler in
+front of the interrupted code. Delivery pushes the saved context onto the user's
+own stack, then a return address pointing at a trampoline libc registers with
+the first `signal()` call - the kernel cannot put that code on the stack itself,
+since the stack is mapped non-executable. When the handler returns it lands on
+the trampoline, which calls `sigreturn`, and the kernel restores the context
+wholesale (including `rax`, so an interrupted syscall's return value survives).
+Sending a signal wakes a blocked target so it reaches that check; a process that
+never enters the kernel will not see one until it does. `SIGKILL` is refused at
+`signal()` and again at delivery, so it cannot be caught.
+
+**Users and permissions** are what the ext root filesystem was groundwork for.
+Each task carries a uid and gid, inherited across `fork` and `execve`; uid 0 is
+root and bypasses the checks. `open` consults the inode's real mode and owner,
+applying the usual UNIX rule that only the first matching class counts - so mode
+0007 really does lock the owner out. Only root or a file's owner may `chmod` it,
+only root may `chown`, and dropping root is one-way. `id`, `chmod`, `chown` and
+`su` expose it; there is no password file yet, so `su` enforces exactly what the
+kernel does and no more.
+
 ## Roadmap
 
 - [x] stage 1/2 bootloader, real → protected → long mode
@@ -610,3 +645,8 @@ DNS answer needs both. Everything is verified against QEMU's user-mode network
 - [x] an e1000 NIC driver and an IPv4 stack: Ethernet, ARP, ICMP, UDP
 - [x] a minimal DNS resolver, so `ping` and `nslookup` take hostnames
 - [x] network commands: `ifconfig`, `arp`, `ping`, `nslookup`
+- [x] `mmap`/`munmap` for anonymous memory
+- [x] threads within a process: `clone`, a shared address space and fd table
+- [x] signals: handlers, `kill`, `sigreturn`, default and ignored dispositions
+- [x] users and permissions: uid/gid, `setuid`, `chmod`/`chown`, mode checks
+- [ ] a password file, and `su` that actually authenticates

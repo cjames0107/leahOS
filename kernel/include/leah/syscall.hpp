@@ -37,7 +37,28 @@ enum Number : u64 {
     Ping    = 22,
     Arp     = 23,
     Resolve = 24,
+    Mmap    = 25,
+    Munmap  = 26,
+    Clone   = 27,
+    Gettid  = 28,
+    Kill      = 29,
+    Signal    = 30,
+    Sigreturn = 31,
+    Getuid    = 32,
+    Setuid    = 33,
+    Getgid    = 34,
+    Setgid    = 35,
+    Chmod     = 36,
+    Chown     = 37,
 };
+
+// mmap protection and flags, mirrored in user/libc/include/sys/mman.h.
+constexpr u64 kProtRead  = 1;
+constexpr u64 kProtWrite = 2;
+constexpr u64 kProtExec  = 4;
+constexpr u64 kMapPrivate   = 0x02;
+constexpr u64 kMapAnonymous = 0x20;
+constexpr u64 kMapFixed     = 0x10;
 
 // The register state a syscall handler sees. Field order is a contract with
 // syscall_entry in syscall_entry.asm - do not reorder without editing both.

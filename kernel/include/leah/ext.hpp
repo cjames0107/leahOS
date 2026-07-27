@@ -31,6 +31,8 @@ public:
     bool create(const char* path, vfs::Type type) override;
     bool remove(const char* path) override;
     bool rename(const char* old_path, const char* new_path) override;
+    bool chmod(const char* path, u16 mode) override;
+    bool chown(const char* path, u32 uid, u32 gid) override;
 
     u32 block_size() const { return m_block_size; }
 

@@ -48,6 +48,16 @@ bool rename(const char* old_path, const char* new_path)
     return g_root != nullptr && g_root->rename(old_path, new_path);
 }
 
+bool chmod(const char* path, u16 mode)
+{
+    return g_root != nullptr && g_root->chmod(path, mode);
+}
+
+bool chown(const char* path, u32 uid, u32 gid)
+{
+    return g_root != nullptr && g_root->chown(path, uid, gid);
+}
+
 bool write_entire_file(const char* path, const void* buffer, usize bytes)
 {
     // Removing first rather than truncating keeps this honest: a shorter

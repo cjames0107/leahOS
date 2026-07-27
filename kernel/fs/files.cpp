@@ -14,8 +14,10 @@ namespace {
 // libc's sys/stat.h.
 struct [[gnu::packed]] UserStat {
     u32 type;       // 0 = file, 1 = directory
-    u32 reserved;
+    u32 mode;       // permission bits, 0777
     u64 size;
+    u32 uid;
+    u32 gid;
 };
 
 Table& table() { return scheduler::current_files(); }
@@ -222,6 +224,32 @@ void init_table(Table& t)
     t.cwd[1] = '\0';
 }
 
+// Whether the calling process may touch a file with these owner and mode bits.
+// The usual UNIX rule: root may do anything, otherwise the owner's bits apply to
+// the owner, the group's to the group, and the other bits to everyone else -
+// and only the first matching class is consulted, so a mode of 0007 really does
+// lock the owner out.
+bool may_access(const vfs::Stat& st, bool want_write)
+{
+    const u32 uid = scheduler::current_uid();
+    if (uid == 0)
+        return true;
+
+    u16 read_bit;
+    u16 write_bit;
+    if (st.uid == uid) {
+        read_bit  = vfs::kModeOwnerRead;
+        write_bit = vfs::kModeOwnerWrite;
+    } else if (st.gid == scheduler::current_gid()) {
+        read_bit  = vfs::kModeGroupRead;
+        write_bit = vfs::kModeGroupWrite;
+    } else {
+        read_bit  = vfs::kModeOtherRead;
+        write_bit = vfs::kModeOtherWrite;
+    }
+    return (st.mode & (want_write ? write_bit : read_bit)) != 0;
+}
+
 i64 open(const char* path, u32 flags)
 {
     char resolved[kPathMax];
@@ -237,6 +265,8 @@ i64 open(const char* path, u32 flags)
             return -1;
     } else if (st.type == vfs::Type::Directory && (flags & kWrite) != 0) {
         return -1;                          // cannot open a directory for writing
+    } else if (!may_access(st, (flags & kWrite) != 0)) {
+        return -1;                          // permission denied
     } else if ((flags & kTrunc) != 0 && st.type == vfs::Type::File) {
         vfs::write_entire_file(resolved, "", 0);
     }
@@ -354,9 +384,41 @@ i64 stat(const char* path, void* statbuf)
 
     auto* out = static_cast<UserStat*>(statbuf);
     out->type = st.type == vfs::Type::Directory ? 1 : 0;
-    out->reserved = 0;
+    out->mode = st.mode;
     out->size = st.size;
+    out->uid  = st.uid;
+    out->gid  = st.gid;
     return 0;
+}
+
+i64 chmod(const char* path, u16 mode)
+{
+    char resolved[kPathMax];
+    resolve(path, resolved);
+
+    vfs::Stat st{};
+    if (!vfs::stat(resolved, st))
+        return -1;
+    // Only root or the file's owner may change its permissions.
+    const u32 uid = scheduler::current_uid();
+    if (uid != 0 && st.uid != uid)
+        return -1;
+    return vfs::chmod(resolved, mode) ? 0 : -1;
+}
+
+i64 chown(const char* path, u32 uid, u32 gid)
+{
+    char resolved[kPathMax];
+    resolve(path, resolved);
+
+    vfs::Stat st{};
+    if (!vfs::stat(resolved, st))
+        return -1;
+    // Giving a file away is root's privilege: otherwise a user could dodge a
+    // quota, or plant a file owned by someone else.
+    if (scheduler::current_uid() != 0)
+        return -1;
+    return vfs::chown(resolved, uid, gid) ? 0 : -1;
 }
 
 i64 getdents(const char* path, void* buffer, usize max_entries)

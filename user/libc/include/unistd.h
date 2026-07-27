@@ -25,6 +25,12 @@ int    dup2(int oldfd, int newfd);
 int    rename(const char* oldpath, const char* newpath);
 void*  sbrk(long increment);
 
+/* Credentials. uid 0 is root; only root may change them. */
+unsigned getuid(void);
+unsigned getgid(void);
+int      setuid(unsigned uid);
+int      setgid(unsigned gid);
+
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2
