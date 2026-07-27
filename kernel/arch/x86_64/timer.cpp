@@ -2,6 +2,7 @@
 #include <leah/io.hpp>
 #include <leah/pic.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/hpet.hpp>
 #include <leah/timer.hpp>
 
 namespace timer {
@@ -63,6 +64,10 @@ u64 ticks()
 
 u64 uptime_ms()
 {
+    // The HPET counts at tens of MHz; the tick counter only resolves to a
+    // scheduling quantum. Prefer the real clock when the machine has one.
+    if (hpet::available())
+        return hpet::uptime_us() / 1000;
     return g_ticks * 1000 / g_frequency;
 }
 

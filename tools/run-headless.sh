@@ -23,7 +23,7 @@ rm -f "$LOG"
 # test run. Verifying writes against an external checker is a separate, opt-in
 # step - see tools/fsck-image.sh - precisely because it needs real persistence.
 # shellcheck disable=SC2086  # QEMU_EXTRA is deliberately word-split
-qemu-system-x86_64 \
+qemu-system-x86_64 -machine pc,hpet=on \
     -drive format=raw,file=build/dist/leahos.img,if=ide \
     -drive format=raw,file=build/dist/ext.img,if=ide -snapshot -netdev user,id=net0 -device e1000,netdev=net0 \
     -m "$MEM" -smp "$CPUS" -display none -serial "file:$LOG" \

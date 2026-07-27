@@ -215,7 +215,8 @@ $(DIST):
 # Two IDE disks: disk 0 boots and holds the kernel; disk 1 is the ext4 root
 # filesystem. QEMU assigns them to the primary channel master and slave in
 # order, so the kernel's ATA driver finds the ext disk as drive index 1.
-QEMUFLAGS := -drive format=raw,file=$(IMG),if=ide \
+QEMUFLAGS := -machine pc,hpet=on \
+             -drive format=raw,file=$(IMG),if=ide \
              -drive format=raw,file=$(EXT_IMG),if=ide \
              -m $(MEM) -smp $(CPUS) \
              -netdev user,id=net0 -device e1000,netdev=net0 \

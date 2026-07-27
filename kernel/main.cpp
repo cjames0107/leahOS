@@ -1,3 +1,5 @@
+#include <leah/acpi.hpp>
+#include <leah/apic.hpp>
 #include <leah/ata.hpp>
 #include <leah/blockdev.hpp>
 #include <leah/bootinfo.hpp>
@@ -10,6 +12,7 @@
 #include <leah/fat32.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
+#include <leah/hpet.hpp>
 #include <leah/interrupts.hpp>
 #include <leah/keyboard.hpp>
 #include <leah/memory.hpp>
@@ -649,6 +652,52 @@ extern "C" void kernel_main(const boot::Info* boot_info)
 
     timer::init();
     step("PIT running at 100 Hz on IRQ 0");
+
+    // ACPI names the interrupt controllers and the HPET. With those in hand the
+    // legacy pair can be retired: the I/O APIC routes device interrupts and the
+    // local APIC timer raises the scheduling tick, one per CPU rather than one
+    // shared chip - which is what makes SMP possible at all.
+    if (acpi::init()) {
+        console::printf("  [ ok ] ACPI: %llu tables, %llu CPU(s), %llu I/O APIC(s)\n",
+                        static_cast<u64>(acpi::table_count()),
+                        static_cast<u64>(acpi::cpu_count()),
+                        static_cast<u64>(acpi::io_apic_count()));
+
+        if (hpet::init()) {
+            console::printf("  [ ok ] HPET at %llu MHz, %u fs per tick\n",
+                            hpet::frequency_hz() / 1000000, hpet::period_fs());
+        }
+
+        if (apic::init()) {
+            console::printf("  [ ok ] local APIC id %u up, PIC masked\n",
+                            apic::local_id());
+            // The keyboard has to be re-routed: masking the PIC took its line
+            // away, and the I/O APIC starts with everything masked.
+            // Every device line has to be re-opened: masking the PIC took them
+            // all away, and the I/O APIC starts with everything masked.
+            constexpr u8 kIrqMouse = 12;
+            const bool kbd = apic::route_irq(
+                interrupts::kIrqKeyboard,
+                interrupts::kIrqBase + interrupts::kIrqKeyboard);
+            const bool mouse = apic::route_irq(kIrqMouse,
+                                               interrupts::kIrqBase + kIrqMouse);
+            if (kbd)
+                console::printf("  [ ok ] I/O APIC routing IRQ 1 (keyboard)%s\n",
+                                mouse ? ", IRQ 12 (mouse)" : "");
+
+            // Same vector the PIT used, so the existing tick handler is reached
+            // unchanged - only the source of the tick has moved.
+            if (apic::start_timer(interrupts::kIrqBase + interrupts::kIrqTimer,
+                                  timer::kFrequencyHz)) {
+                console::printf("  [ ok ] local APIC timer at %llu Hz "
+                                "(core clock %llu MHz), PIT retired\n",
+                                static_cast<u64>(timer::kFrequencyHz),
+                                apic::timer_frequency() / 1000000);
+            }
+        }
+    } else {
+        step("no ACPI tables found - staying on the PIC and PIT");
+    }
 
     keyboard::init();
     step("PS/2 keyboard on IRQ 1");

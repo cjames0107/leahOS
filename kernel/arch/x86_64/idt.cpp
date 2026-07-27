@@ -1,5 +1,6 @@
 #include <leah/gdt.hpp>
 #include <leah/interrupts.hpp>
+#include <leah/apic.hpp>
 #include <leah/pic.hpp>
 #include <leah/panic.hpp>
 #include <leah/console.hpp>
@@ -140,11 +141,17 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
     if (vector < 32)
         panic(exception_name(vector), *frame);
 
+    // The local APIC's spurious vector. It is delivered when an interrupt is
+    // withdrawn mid-delivery and must not be acknowledged.
+    if (vector == 0xFF)
+        return;
+
     if (vector >= kIrqBase && vector < kIrqBase + 16) {
         const u8 irq = static_cast<u8>(vector - kIrqBase);
         // A spurious IRQ is the PIC withdrawing a line before we serviced it.
         // It must not be acknowledged or the PIC's state machine desynchronises.
-        if (pic::is_spurious(irq)) {
+        // Only meaningful while the PIC is the live controller.
+        if (!apic::available() && pic::is_spurious(irq)) {
             pic::handle_spurious(irq);
             return;
         }
@@ -152,7 +159,12 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
         if (g_irq_handlers[irq] != nullptr)
             g_irq_handlers[irq](*frame);
 
-        pic::end_of_interrupt(irq);
+        // Whichever controller delivered it is the one that must be told the
+        // interrupt is done. The local APIC needs no line number - it knows.
+        if (apic::available())
+            apic::eoi();
+        else
+            pic::end_of_interrupt(irq);
 
         // Only now, with the interrupt acknowledged, is it safe to let the
         // scheduler switch threads: switching before the EOI would leave the

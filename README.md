@@ -608,6 +608,38 @@ only root may `chown`, and dropping root is one-way. `id`, `chmod`, `chown` and
 `su` expose it; there is no password file yet, so `su` enforces exactly what the
 kernel does and no more.
 
+## Interrupt controllers and timekeeping
+
+The PIC and PIT are what the machine hands you at boot, and both are now
+retired in favour of what ACPI describes.
+
+**ACPI**, in `kernel/acpi/`, goes only as far as it needs to: find the RSDP by
+scanning the EBDA and the ROM area for its signature (checksummed, so a chance
+match is rejected), follow it to the XSDT or RSDT, and pick out two tables. The
+MADT gives every CPU's local APIC id, the I/O APICs, and the interrupt source
+overrides; the HPET table gives a register block. There is no AML interpreter
+and there does not need to be — nothing here requires executing bytecode.
+
+**The APIC** splits the PIC's job in two. An I/O APIC routes each device
+interrupt to a chosen vector on a chosen CPU; a local APIC per core receives
+them and provides that core's own timer. That per-core half is the part SMP
+cannot do without. Two details matter more than they look: the *source
+overrides* must be honoured, since a machine that wires the timer's IRQ 0 to
+GSI 2 will silently deliver nothing if you ignore them, and the global enable in
+`IA32_APIC_BASE` is separate from the software enable in the spurious vector
+register.
+
+**Timekeeping** now has two clocks. The HPET is a free-running counter of known
+frequency — the thing the PIT never was — and `uptime` reads it directly, so
+resolution is microseconds rather than a scheduling quantum. The local APIC
+timer raises the scheduling tick on the same vector the PIT used, so the tick
+handler did not change; only the source did. Its rate is not architecturally
+known, so it is measured: count it down for a fixed interval against the HPET,
+or against PIT channel 2 when there is no HPET. That fallback is not
+hypothetical — QEMU disables the HPET by default, and the first boot after
+masking the PIC hung precisely because calibration had nothing to measure
+against.
+
 ## Copy-on-write
 
 `fork` used to deep-copy every page of the parent's address space. Now both
@@ -649,7 +681,6 @@ process still mapped them.
 - [x] unreal mode in stage 2 — kernel ceiling raised from 64 KiB to 8 MiB
 - [x] ATA/IDE block driver, PIO, LBA28 and LBA48
 - [x] VBE mode set in stage 2, linear framebuffer console
-- [ ] APIC + HPET, retiring the PIC and PIT
 - [x] VFS layer and FAT32, read and write, including long filenames
 - [x] a unified ext2/3/4 driver, read and write, extents and indirect blocks
 - [x] an ext4 root filesystem on a second disk, verified with `e2fsck`
@@ -680,7 +711,9 @@ process still mapped them.
 - [x] signal delivery on the interrupt return path, not just at syscalls
 - [x] copy-on-write fork with reference-counted frames
 - [ ] demand paging: anonymous pages allocated on first touch
-- [ ] ACPI, the local APIC and HPET, retiring the PIC and PIT
+- [x] ACPI table discovery: RSDP, RSDT/XSDT, MADT and HPET
+- [x] the local APIC and I/O APIC, with the PIC masked and the PIT retired
+- [x] the HPET as a monotonic clock, and a calibrated local APIC timer
 - [ ] SMP: AP startup and a locked scheduler
 - [ ] AHCI with DMA, TCP and sockets, xHCI
 - [ ] a password file, and `su` that actually authenticates

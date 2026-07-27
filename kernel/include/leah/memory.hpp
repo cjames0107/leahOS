@@ -68,4 +68,10 @@ constexpr u64     kUserThreadStackStride = 1024 * 1024;
 // cache line, so they get their own mapping here.
 constexpr vaddr_t kDeviceMmioBase = 0xFFFFE00000000000ull;
 
+// Fixed windows within that region for the platform's own register blocks, kept
+// clear of the span PCI BARs are mapped into at kDeviceMmioBase itself.
+constexpr vaddr_t kLapicMmio  = kDeviceMmioBase + 0x00100000ull;
+constexpr vaddr_t kIoApicMmio = kDeviceMmioBase + 0x00200000ull;
+constexpr vaddr_t kHpetMmio   = kDeviceMmioBase + 0x00300000ull;
+
 } // namespace memory

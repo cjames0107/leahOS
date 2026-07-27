@@ -21,7 +21,7 @@ FAT32_LBA=20480
 rm -f build/dist/leahos.img
 make --no-print-directory >/dev/null
 
-qemu-system-x86_64 \
+qemu-system-x86_64 -machine pc,hpet=on \
     -drive format=raw,file=build/dist/leahos.img,if=ide \
     -drive format=raw,file=build/dist/ext.img,if=ide -netdev user,id=net0 -device e1000,netdev=net0 \
     -m 512M -display none -serial file:build/dist/serial.log \
