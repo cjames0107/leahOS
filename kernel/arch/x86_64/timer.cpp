@@ -3,6 +3,7 @@
 #include <leah/pic.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/hpet.hpp>
+#include <leah/usb_hid.hpp>
 #include <leah/timer.hpp>
 
 namespace timer {
@@ -26,6 +27,12 @@ void on_tick(interrupts::Frame&)
     // Spelled out rather than ++: a compound operation on a volatile is
     // deprecated because it hides that this is a separate load and store.
     g_ticks = g_ticks + 1;
+
+    // USB has no interrupt of its own here, so the tick is what drives it. It
+    // has to happen on a timer rather than only when someone is reading: a task
+    // blocked waiting for a key is asleep on a channel that nothing else would
+    // ever wake, since the wake comes from the keypress this poll discovers.
+    usb::hid::poll();
 
     // Charge the running thread's time slice. The switch itself is deferred to
     // on_irq_return, after the PIC is acknowledged.

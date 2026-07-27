@@ -658,13 +658,19 @@ a bytecode descriptor that must be parsed to know what any bit means; boot
 protocol exists to avoid exactly that, and a keyboard in it always sends the
 same eight bytes. `SET_PROTOCOL` puts it there.
 
-One structural point worth stating: an interrupt endpoint **cannot be waited
-on**. A keyboard completes its transfer only when a key changes, so a blocking
+Two structural points worth stating. The first: an interrupt endpoint **cannot
+be waited on**. A keyboard completes its transfer only when a key changes, so a blocking
 read would hang the console until someone typed. Those transfers are posted and
 collected later, and because the event ring is shared, a completion belonging to
 a posted interrupt transfer is filed against it rather than handed to whichever
 control transfer happens to be waiting — without that, a control transfer
 consumes the keyboard's completion and calls it its own.
+
+The second: the poll has to be driven by the **timer**, not by whoever is
+reading. Doing it in the console read path looks right and deadlocks — the
+reader polls once, finds nothing, and sleeps on the keyboard channel, which is
+woken by the keypress that only the poll would have discovered. Nothing else
+wakes it, so the first key after a read begins is lost and the shell hangs.
 
 ## AHCI
 

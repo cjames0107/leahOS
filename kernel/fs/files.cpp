@@ -6,7 +6,6 @@
 #include <leah/scheduler.hpp>
 #include <leah/string.hpp>
 #include <leah/tcp.hpp>
-#include <leah/usb_hid.hpp>
 #include <leah/vfs.hpp>
 
 namespace files {
@@ -188,14 +187,10 @@ char read_key()
     // Sleep the task (letting others run) until a key is buffered, then take it.
     // Interrupts are masked in the syscall, so the has_input check and the block
     // cannot race the keyboard IRQ that would wake us.
-    // USB keyboards are not interrupt-driven here, so this path drives their
-    // poll the same way the network waits drive the NIC's.
-    while (!keyboard::has_input()) {
-        usb::hid::poll();
-        if (keyboard::has_input())
-            break;
+    // Both keyboards feed the same buffer and the same wake channel: the PS/2
+    // one from its IRQ, the USB one from the timer tick, which is what polls it.
+    while (!keyboard::has_input())
         scheduler::block_on(scheduler::kKeyboardChannel);
-    }
     return keyboard::read();
 }
 
