@@ -6,6 +6,7 @@
 #include <leah/elf.hpp>
 #include <leah/syscall.hpp>
 #include <leah/framebuffer.hpp>
+#include <leah/ext.hpp>
 #include <leah/fat32.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
@@ -216,6 +217,23 @@ block::Device* g_partition = nullptr;
 
 void mount_root()
 {
+    // The root filesystem is an ext4 volume on disk 1 (the whole disk, no
+    // partition table). Disk 0 remains the bootable/kernel disk; its FAT32
+    // partition is the fallback if the ext disk is absent.
+    if (ata::drive_count() > 1) {
+        auto* ext_disk = new block::AtaDevice(1);
+        fs::Ext* ext = fs::Ext::probe(ext_disk);
+        if (ext != nullptr) {
+            g_disk = ext_disk;
+            vfs::mount(ext);
+            console::set_color(console::Color::White);
+            console::printf("\n  root  ext4 on hd1, label \"%s\"\n", ext->volume_label());
+            console::set_color(console::Color::LightGray);
+            return;
+        }
+        delete ext_disk;
+    }
+
     g_disk = new block::AtaDevice(0);
 
     block::PartitionInfo parts[4];
@@ -282,9 +300,10 @@ void print_tree(const char* path, int depth)
     }
 }
 
-// Checks the three things that are easy to get subtly wrong: reading a file
-// smaller than a cluster, following a FAT chain across several clusters, and
-// resolving a name that only exists as long filename entries.
+// Reads the three cases that catch a subtly broken block map: a file smaller
+// than one block, a file spanning several blocks (which exercises the extent or
+// indirect map), and a name reached through a subdirectory. The fixtures come
+// from tools/mkext.sh.
 void self_test_fs()
 {
     if (vfs::mounted() == nullptr)
@@ -292,54 +311,42 @@ void self_test_fs()
 
     u64 size = 0;
     char* hello = vfs::read_entire_file("/HELLO.TXT", &size);
-    if (hello == nullptr || size != 18)
-        panic("fat32: /HELLO.TXT did not read back at its stated size");
-    if (memcmp(hello, "Hello from FAT32.\n", 18) != 0)
-        panic("fat32: /HELLO.TXT contents are wrong");
+    if (hello == nullptr || size != 17)
+        panic("ext: /HELLO.TXT did not read back at its stated size");
+    if (memcmp(hello, "Hello from ext4.\n", 17) != 0)
+        panic("ext: /HELLO.TXT contents are wrong");
     kfree(hello);
 
-    // Larger than one 512-byte cluster, so this only works if next_cluster()
-    // walks the chain correctly.
+    // Larger than one 4 KiB block, so this only passes if the block map walks
+    // past the first block correctly.
     vfs::Stat readme{};
-    if (!vfs::stat("/README.MD", readme) || readme.size < 2048)
-        panic("fat32: /README.MD is missing or unexpectedly small");
+    if (!vfs::stat("/README.MD", readme) || readme.size < 4096)
+        panic("ext: /README.MD is missing or unexpectedly small");
 
     char* text = vfs::read_entire_file("/README.MD", &size);
     if (text == nullptr || size != readme.size)
-        panic("fat32: short read on a multi-cluster file");
+        panic("ext: short read on a multi-block file");
     if (memcmp(text, "# leahOS", 8) != 0)
-        panic("fat32: multi-cluster read returned the wrong bytes");
-    // The tail matters more than the head: a broken chain still gets cluster
-    // one right.
-    if (memcmp(text + size - 2, ". ", 2) != 0)
-        panic("fat32: the end of a multi-cluster file is wrong");
+        panic("ext: multi-block read returned the wrong bytes");
+    // The tail matters more than the head: a broken map still gets block 0 right.
+    if (memcmp(text + size - 8, "block. \n", 8) != 0)
+        panic("ext: the end of a multi-block file is wrong");
     kfree(text);
 
-    // Case-insensitive lookup, and a path through a subdirectory.
+    // A path through a subdirectory.
     char* notes = vfs::read_entire_file("/docs/notes.txt", &size);
     if (notes == nullptr || size != 30)
-        panic("fat32: /docs/notes.txt did not resolve");
+        panic("ext: /docs/notes.txt did not resolve");
     kfree(notes);
 
-    // Only reachable through long filename entries: its 8.3 name is mangled.
-    static const char kLongNameText[] =
-        "This file needs long filename entries to be named correctly.\n";
-
-    char* lfn = vfs::read_entire_file("/a-long-file-name-for-leahos.txt", &size);
-    if (lfn == nullptr)
-        panic("fat32: could not resolve a long filename");
-    if (size != sizeof(kLongNameText) - 1 || memcmp(lfn, kLongNameText, size) != 0)
-        panic("fat32: long filename resolved but its contents are wrong");
-    kfree(lfn);
-
     if (vfs::stat("/nope.txt", readme))
-        panic("fat32: stat succeeded on a file that does not exist");
+        panic("ext: stat succeeded on a file that does not exist");
 }
 
 // Writing is where a filesystem gets to corrupt itself, so this covers the
 // cases that actually allocate: a fresh file, one that outgrows a cluster, a
 // name needing long filename entries, a subdirectory, and deletion.
-void self_test_fs_write()
+[[maybe_unused]] void self_test_fs_write()
 {
     // Be idempotent: a persistent disk (from `make run` or a previous boot) may
     // still hold this test's directory from last time, and create() of an
@@ -659,10 +666,10 @@ extern "C" void kernel_main(const boot::Info* boot_info)
 
     mount_root();
     self_test_fs();
-    step("FAT32 mounted, read path verified");
+    step("ext4 root mounted, read path verified");
 
-    self_test_fs_write();
-    step("FAT32 write path verified");
+    // The ext write path is not implemented yet; self_test_fs_write() still
+    // targets FAT32 and is re-enabled against ext in the next checkpoint.
 
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");

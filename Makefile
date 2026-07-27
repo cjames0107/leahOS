@@ -17,6 +17,9 @@ BUILD   := build
 # QEMU or a debugger.
 DIST    := $(BUILD)/dist
 IMG     := $(DIST)/leahos.img
+# The root filesystem lives on a second disk, an ext4 volume built by mke2fs.
+# Disk 0 (IMG) stays the bootable/kernel disk; the kernel mounts this as root.
+EXT_IMG := $(DIST)/ext.img
 DIST_ELF := $(DIST)/leahos.elf
 SERIAL  := $(DIST)/serial.log
 QEMU_LOG := $(DIST)/qemu.log
@@ -28,6 +31,7 @@ KERNEL_LBA      := 64
 KERNEL_MAX_SECTORS := 16384              # 8 MiB of image reserved for the kernel
 IMAGE_MIB       := 64
 FAT32_LBA       := 20480          # 10 MiB in, clear of the kernel's slot
+EXT_MIB         := 64             # the ext4 root filesystem on disk 1
 
 # --- knobs ------------------------------------------------------------------
 # Override on the command line, e.g. `make run MEM=2G` or
@@ -97,7 +101,7 @@ STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
 
 .PHONY: all image run headless debug gdb toolchain clean help
-all: $(IMG)
+all: $(IMG) $(EXT_IMG)
 image: $(IMG)
 
 # --- bootloader -------------------------------------------------------------
@@ -187,6 +191,13 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_ELFS) | $
 	@echo "image:  $@"
 	@echo "symbols: $(DIST_ELF)"
 
+# The ext4 root filesystem (disk 1). BIN/NAME.ELF=build/name.elf for every
+# program, upper-cased to match the paths the kernel loads today.
+EXT_ADDS := $(foreach p,$(USER_PROGRAMS),BIN/$(shell echo $(p) | tr a-z A-Z).ELF=$(BUILD)/$(p).elf)
+
+$(EXT_IMG): $(USER_ELFS) tools/mkext.sh | $(DIST)
+	@tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
+
 $(BUILD):
 	@mkdir -p $(BUILD)
 
@@ -201,22 +212,26 @@ $(DIST):
 # (SLIRP) networking. The guest is 10.0.2.15, the gateway/DNS is 10.0.2.2/3.
 # Naming the netdev explicitly also suppresses the legacy default NIC, so there
 # is exactly one card to find.
+# Two IDE disks: disk 0 boots and holds the kernel; disk 1 is the ext4 root
+# filesystem. QEMU assigns them to the primary channel master and slave in
+# order, so the kernel's ATA driver finds the ext disk as drive index 1.
 QEMUFLAGS := -drive format=raw,file=$(IMG),if=ide \
+             -drive format=raw,file=$(EXT_IMG),if=ide \
              -m $(MEM) -smp $(CPUS) \
              -netdev user,id=net0 -device e1000,netdev=net0 \
              -no-reboot -no-shutdown \
              $(QEMU_EXTRA)
 
-run: $(IMG)
+run: $(IMG) $(EXT_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio
 
 # Boot with no window, give the kernel TIMEOUT seconds, then print COM1.
-headless: $(IMG)
+headless: $(IMG) $(EXT_IMG)
 	@tools/run-headless.sh $(TIMEOUT)
 
 # Halts before the first instruction and waits for `make gdb` on :1234.
 # int,cpu_reset logging is how you find out which vector triple-faulted.
-debug: $(IMG)
+debug: $(IMG) $(EXT_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio -S -s -d int,cpu_reset -D $(QEMU_LOG)
 
 gdb:
