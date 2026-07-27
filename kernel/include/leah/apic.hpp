@@ -18,6 +18,10 @@ namespace apic {
 bool init();
 bool available();
 
+// Enable the calling CPU's own local APIC. init() does this for the bootstrap
+// processor; an application processor calls it for itself once it is running.
+void init_this_cpu();
+
 // This CPU's local APIC id.
 u8 local_id();
 
@@ -45,5 +49,17 @@ u64 calibrate_timer();
 bool start_timer(u8 vector, u32 frequency_hz);
 
 u64 timer_frequency();
+
+// --- inter-processor interrupts ---------------------------------------------
+//
+// How one CPU gets another's attention. Starting an application processor is
+// the first use: it takes an INIT to reset it, then a startup IPI naming the
+// page its trampoline sits on.
+void send_init(u8 apic_id);
+void send_startup(u8 apic_id, u8 trampoline_page);
+
+// Busy-wait using whichever calibrated source exists. Available before the APs
+// have a scheduler to yield to.
+void delay_us(u64 microseconds);
 
 } // namespace apic

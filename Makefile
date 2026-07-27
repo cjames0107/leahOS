@@ -126,6 +126,14 @@ $(STAGE2_BIN): boot/stage2.asm boot/layout.inc $(KERNEL_BIN) | $(BUILD)
 	 if [ $$size -gt $$limit ]; then \
 	   echo "error: stage2 is $$size bytes, exceeds $$limit"; exit 1; fi
 
+# The AP trampoline is a flat binary for a fixed low address, incbin'd into the
+# kernel rather than linked, so it has to exist before ap_blob.asm assembles.
+$(BUILD)/ap_trampoline.bin: boot/ap_trampoline.asm | $(BUILD)
+	@mkdir -p $(dir $@)
+	$(AS) $(ASFLAGS_BIN) -w-implicit-abs-deprecated $< -o $@
+
+$(BUILD)/kernel/arch/x86_64/ap_blob.asm.o: $(BUILD)/ap_trampoline.bin
+
 # --- kernel -----------------------------------------------------------------
 $(BUILD)/%.asm.o: %.asm
 	@mkdir -p $(dir $@)

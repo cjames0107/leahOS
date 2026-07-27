@@ -151,6 +151,19 @@ void init()
     asm volatile("ltr %0" : : "r"(kTss));
 }
 
+void load_on_this_cpu()
+{
+    // A descriptor table is read-only to the CPU, so every processor can point
+    // at the same one. The TSS is the exception - it holds a stack pointer, so
+    // it is genuinely per-CPU - but an application processor that only halts
+    // never makes a ring transition and so never consults one.
+    const Pointer pointer{
+        .limit = sizeof(g_gdt) - 1,
+        .base  = reinterpret_cast<u64>(&g_gdt),
+    };
+    load(pointer);
+}
+
 void set_kernel_stack(u64 rsp0)
 {
     g_tss.rsp[0] = rsp0;

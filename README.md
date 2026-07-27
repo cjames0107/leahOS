@@ -608,6 +608,34 @@ only root may `chown`, and dropping root is one-way. `id`, `chmod`, `chown` and
 `su` expose it; there is no password file yet, so `su` enforces exactly what the
 kernel does and no more.
 
+## Bringing up the other processors
+
+An x86 machine boots one core. The rest sit halted until the bootstrap
+processor sends an INIT followed by a startup IPI, at which point each begins in
+**16-bit real mode** at a page the SIPI names — no GDT, no paging, no long mode.
+`boot/ap_trampoline.asm` walks each one up the same road stage 2 walked the
+first CPU, then jumps to a 64-bit C function.
+
+The trampoline lives at physical `0x8000`, because a startup IPI carries a page
+number rather than an address and so cannot reach above 1 MiB. That is stage 2's
+old load address, long finished with, and the frame allocator already reserves
+the whole first megabyte.
+
+Two things caught us out. The kernel's page tables map **nothing** in the low
+half, so the trampoline's own instructions would fault the instant it enabled
+paging — it needs a temporary identity map. And that map must then be torn down
+*completely*, tables and all: `create_address_space` copies the kernel's PML4
+entries into every new process, so a leftover low-half entry is inherited as
+though it were kernel-shared, and every user space then builds its mappings
+inside one shared page table. The symptom was a forked child's writes showing up
+in its parent — copy-on-write looking broken when the fault was in SMP startup.
+
+The application processors currently **park**. They come up, load the shared GDT
+and IDT, enable their own local APICs, check in, and halt. Letting them run
+tasks means making every structure the scheduler touches safe for more than one
+CPU first, and a half-locked scheduler on four cores is considerably worse than
+one core that works.
+
 ## Interrupt controllers and timekeeping
 
 The PIC and PIT are what the machine hands you at boot, and both are now
@@ -714,6 +742,7 @@ process still mapped them.
 - [x] ACPI table discovery: RSDP, RSDT/XSDT, MADT and HPET
 - [x] the local APIC and I/O APIC, with the PIC masked and the PIT retired
 - [x] the HPET as a monotonic clock, and a calibrated local APIC timer
-- [ ] SMP: AP startup and a locked scheduler
+- [x] SMP: application processors brought out of reset into long mode
+- [ ] SMP: a locked scheduler, so those processors can run tasks
 - [ ] AHCI with DMA, TCP and sockets, xHCI
 - [ ] a password file, and `su` that actually authenticates

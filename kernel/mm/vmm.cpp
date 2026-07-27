@@ -234,6 +234,22 @@ u64* walk_to_pte(u64* pml4, vaddr_t virt)
     return &pt[index_of(virt, 1)];
 }
 
+// Free a table sub-tree, leaving the frames it mapped alone. Used for a
+// temporary mapping whose target is not ours to free - low memory the frame
+// allocator has reserved, in the trampoline's case.
+void free_tables_only(u64 table_phys, int level)
+{
+    u64* table = phys_ptr(table_phys);
+    for (u64 i = 0; i < kEntriesPerTable; ++i) {
+        const u64 entry = table[i];
+        if ((entry & Present) == 0)
+            continue;
+        if (level > 1 && (entry & Huge) == 0)
+            free_tables_only(entry & kAddressMask, level - 1);
+    }
+    pmm::free(table_phys);
+}
+
 paddr_t translate_into(u64* pml4, vaddr_t virt)
 {
     u64* pdpt = next_level(pml4, index_of(virt, 4), false);
@@ -291,6 +307,28 @@ bool map(vaddr_t virt, paddr_t phys, u64 flags)
 // The first write to a shared page. If we are the only owner left the page can
 // simply be made writable again; otherwise it is copied and this space keeps the
 // copy, dropping its reference to the original.
+// Free the page tables describing the kernel's low half, without touching the
+// frames they mapped.
+//
+// The kernel maps nothing below the direct map, so any low-half entry is a
+// temporary - the AP trampoline's identity map is the only one. Leaving it in
+// place would be quietly catastrophic: create_address_space copies the kernel's
+// PML4 entries into every new process, so a stray low-half entry would be
+// inherited as if it were kernel-shared, and every user space would then build
+// its own mappings inside one shared page table.
+void release_low_half()
+{
+    u64* pml4 = kernel_pml4();
+    for (u64 i = 0; i < kEntriesPerTable / 2; ++i) {    // entries 0-255
+        if ((pml4[i] & Present) == 0)
+            continue;
+        free_tables_only(pml4[i] & kAddressMask, 3);
+        pml4[i] = 0;
+    }
+    // Reload CR3 rather than invalidating page by page: whole sub-trees went.
+    asm volatile("mov %0, %%cr3" : : "r"(g_current_pml4) : "memory");
+}
+
 bool handle_cow_fault(vaddr_t virt)
 {
     u64* pt_entry = walk_to_pte(current_pml4(), virt);

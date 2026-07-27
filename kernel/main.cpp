@@ -25,6 +25,7 @@
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/smp.hpp>
 #include <leah/timer.hpp>
 #include <leah/types.hpp>
 #include <leah/string.hpp>
@@ -671,8 +672,6 @@ extern "C" void kernel_main(const boot::Info* boot_info)
         if (apic::init()) {
             console::printf("  [ ok ] local APIC id %u up, PIC masked\n",
                             apic::local_id());
-            // The keyboard has to be re-routed: masking the PIC took its line
-            // away, and the I/O APIC starts with everything masked.
             // Every device line has to be re-opened: masking the PIC took them
             // all away, and the I/O APIC starts with everything masked.
             constexpr u8 kIrqMouse = 12;
@@ -694,6 +693,15 @@ extern "C" void kernel_main(const boot::Info* boot_info)
                                 static_cast<u64>(timer::kFrequencyHz),
                                 apic::timer_frequency() / 1000000);
             }
+
+            // With the local APIC up, the other processors can be started.
+            const usize cpus = smp::init();
+            if (cpus > 1)
+                console::printf("  [ ok ] SMP: %llu processors online "
+                                "(application processors parked)\n",
+                                static_cast<u64>(cpus));
+            else if (acpi::cpu_count() > 1)
+                step("SMP: application processors did not start");
         }
     } else {
         step("no ACPI tables found - staying on the PIC and PIT");

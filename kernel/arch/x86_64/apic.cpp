@@ -20,6 +20,13 @@ constexpr u32 kLapicLvtTimer  = 0x320;
 constexpr u32 kLapicTimerInit = 0x380;
 constexpr u32 kLapicTimerCur  = 0x390;
 constexpr u32 kLapicTimerDiv  = 0x3E0;
+constexpr u32 kLapicIcrLow    = 0x300;
+constexpr u32 kLapicIcrHigh   = 0x310;
+
+constexpr u32 kIcrDeliveryInit    = 0x5 << 8;
+constexpr u32 kIcrDeliveryStartup = 0x6 << 8;
+constexpr u32 kIcrLevelAssert     = 1u << 14;
+constexpr u32 kIcrDeliveryPending = 1u << 12;
 
 constexpr u32 kSpuriousEnable = 1u << 8;     // switches the local APIC on
 constexpr u32 kSpuriousVector = 0xFF;
@@ -179,6 +186,17 @@ bool init()
     return true;
 }
 
+void init_this_cpu()
+{
+    if (g_lapic == nullptr)
+        return;
+    // Only the local APIC is per-CPU; the I/O APIC and the PIC are the
+    // machine's, and the bootstrap processor already dealt with those.
+    cpu::write_msr(kIa32ApicBase, cpu::read_msr(kIa32ApicBase) | kApicGlobalEnable);
+    lapic_write(kLapicTpr, 0);
+    lapic_write(kLapicSpurious, kSpuriousVector | kSpuriousEnable);
+}
+
 bool available() { return g_up; }
 
 u8 local_id()
@@ -267,5 +285,37 @@ bool start_timer(u8 vector, u32 frequency_hz)
 }
 
 u64 timer_frequency() { return g_timer_hz; }
+
+void delay_us(u64 microseconds) { busy_wait_us(microseconds); }
+
+namespace {
+
+// The destination goes in the high half; writing the low half is what actually
+// sends it, so the order matters.
+void send_ipi(u8 apic_id, u32 command)
+{
+    lapic_write(kLapicIcrHigh, static_cast<u32>(apic_id) << 24);
+    lapic_write(kLapicIcrLow, command);
+    while ((lapic_read(kLapicIcrLow) & kIcrDeliveryPending) != 0)
+        asm volatile("pause");      // wait for the local APIC to accept it
+}
+
+} // namespace
+
+void send_init(u8 apic_id)
+{
+    if (g_lapic == nullptr)
+        return;
+    send_ipi(apic_id, kIcrDeliveryInit | kIcrLevelAssert);
+}
+
+void send_startup(u8 apic_id, u8 trampoline_page)
+{
+    if (g_lapic == nullptr)
+        return;
+    // The vector is the page number the AP starts executing at, so a trampoline
+    // at physical 0x8000 is vector 0x08.
+    send_ipi(apic_id, kIcrDeliveryStartup | kIcrLevelAssert | trampoline_page);
+}
 
 } // namespace apic

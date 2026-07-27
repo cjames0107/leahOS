@@ -107,6 +107,11 @@ void init()
     // the IST commentary in gdt.cpp.
     set_entry(8, isr_stub_table[8], gdt::kIstDoubleFault);
 
+    load_on_this_cpu();
+}
+
+void load_on_this_cpu()
+{
     const Pointer pointer{
         .limit = sizeof(g_idt) - 1,
         .base  = reinterpret_cast<u64>(&g_idt),

@@ -25,6 +25,10 @@ constexpr u8 kIstDoubleFault = 1;
 
 void init();
 
+// Point this CPU at the GDT init() built. Used by application processors,
+// which share the table rather than each building their own.
+void load_on_this_cpu();
+
 // Stack the CPU switches to on a ring 3 -> ring 0 transition. Unused until we
 // have userspace, but the TSS field has to exist before the first such trap.
 void set_kernel_stack(u64 rsp0);

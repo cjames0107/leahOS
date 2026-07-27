@@ -73,6 +73,12 @@ void destroy_address_space(AddressSpace space);
 // CoW page, in which case the fault is a real one.
 bool handle_cow_fault(vaddr_t virt);
 
+// Drop every mapping in the kernel's low half and free the tables describing
+// them, leaving the frames themselves untouched. The AP trampoline's identity
+// map is the only such mapping, and it must not survive into the address spaces
+// that copy the kernel's PML4 entries.
+void release_low_half();
+
 // Make a space active: load CR3 and record it as current. Cheap to call with
 // the already-active space (skips the reload).
 void switch_address_space(AddressSpace space);

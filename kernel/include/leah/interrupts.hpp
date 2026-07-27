@@ -39,6 +39,9 @@ constexpr u8 kIrqKeyboard = 1;
 
 void init();
 
+// Point this CPU at the IDT init() built; application processors share it.
+void load_on_this_cpu();
+
 // Register a handler for a hardware IRQ line (0-15, not a raw vector). The
 // dispatcher acknowledges the PIC afterwards, so handlers must not.
 void register_irq(u8 irq, Handler handler);
