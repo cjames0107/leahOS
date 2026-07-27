@@ -74,8 +74,13 @@ constexpr Entry make_entry(u8 access, u8 granularity)
     };
 }
 
-alignas(16) Table  g_gdt{};
-alignas(16) Tss    g_tss{};
+// One GDT and TSS per processor. The descriptors themselves are identical, but
+// the TSS holds this CPU's ring-0 stack pointer, so it cannot be shared: two
+// cores taking a ring transition at once would land on the same stack.
+constexpr usize kMaxCpus = 32;
+
+alignas(16) Table  g_gdt[kMaxCpus]{};
+alignas(16) Tss    g_tss[kMaxCpus]{};
 
 // Dedicated stacks for the traps that must not touch the interrupted stack.
 //
@@ -85,8 +90,12 @@ alignas(16) Tss    g_tss{};
 // the machine with no diagnostic whatsoever. Routing #DF through IST1 gives it
 // known-good ground to stand on, turning the worst failure mode in the kernel
 // into a readable panic.
-alignas(16) u8 g_double_fault_stack[16 * 1024];
-alignas(16) u8 g_kernel_stack[16 * 1024];
+alignas(16) u8 g_double_fault_stack[kMaxCpus][16 * 1024];
+alignas(16) u8 g_kernel_stack[kMaxCpus][16 * 1024];
+
+// Which slot the running CPU owns. Set by init_cpu before anything reads it,
+// and read through GS so each core sees its own.
+u32 g_boot_cpu_slot = 0;
 
 void load(const Pointer& pointer)
 {
@@ -112,26 +121,35 @@ void load(const Pointer& pointer)
 
 } // namespace
 
-void init()
-{
-    g_gdt.null        = Entry{};
-    g_gdt.kernel_code = make_entry(0x9A, 0xAF);
-    g_gdt.kernel_data = make_entry(0x92, 0xCF);
-    g_gdt.user_data   = make_entry(0xF2, 0xCF);
-    g_gdt.user_code   = make_entry(0xFA, 0xAF);
+void init() { init_cpu(0); }
 
-    memset(&g_tss, 0, sizeof(g_tss));
-    g_tss.ist[kIstDoubleFault - 1] =
-        reinterpret_cast<u64>(g_double_fault_stack) + sizeof(g_double_fault_stack);
-    g_tss.rsp[0] =
-        reinterpret_cast<u64>(g_kernel_stack) + sizeof(g_kernel_stack);
+void init_cpu(u32 slot)
+{
+    if (slot >= kMaxCpus)
+        return;
+    g_boot_cpu_slot = slot;
+
+    Table& gdt = g_gdt[slot];
+    Tss&   tss = g_tss[slot];
+
+    gdt.null        = Entry{};
+    gdt.kernel_code = make_entry(0x9A, 0xAF);
+    gdt.kernel_data = make_entry(0x92, 0xCF);
+    gdt.user_data   = make_entry(0xF2, 0xCF);
+    gdt.user_code   = make_entry(0xFA, 0xAF);
+
+    memset(&tss, 0, sizeof(tss));
+    tss.ist[kIstDoubleFault - 1] = reinterpret_cast<u64>(g_double_fault_stack[slot]) +
+                                   sizeof(g_double_fault_stack[slot]);
+    tss.rsp[0] = reinterpret_cast<u64>(g_kernel_stack[slot]) +
+                 sizeof(g_kernel_stack[slot]);
 
     // No I/O permission bitmap. Setting the base past the TSS limit is the
     // documented way to say "ring 3 may not touch any port".
-    g_tss.iomap_base = sizeof(Tss);
+    tss.iomap_base = sizeof(Tss);
 
-    const u64 tss_base = reinterpret_cast<u64>(&g_tss);
-    g_gdt.tss = TssEntry{
+    const u64 tss_base = reinterpret_cast<u64>(&tss);
+    gdt.tss = TssEntry{
         .limit_low   = sizeof(Tss) - 1,
         .base_low    = static_cast<u16>(tss_base & 0xFFFF),
         .base_mid    = static_cast<u8>(tss_base >> 16 & 0xFF),
@@ -143,30 +161,18 @@ void init()
     };
 
     const Pointer pointer{
-        .limit = sizeof(g_gdt) - 1,
-        .base  = reinterpret_cast<u64>(&g_gdt),
+        .limit = sizeof(Table) - 1,
+        .base  = reinterpret_cast<u64>(&gdt),
     };
 
     load(pointer);
     asm volatile("ltr %0" : : "r"(kTss));
 }
 
-void load_on_this_cpu()
+void set_kernel_stack(u32 slot, u64 rsp0)
 {
-    // A descriptor table is read-only to the CPU, so every processor can point
-    // at the same one. The TSS is the exception - it holds a stack pointer, so
-    // it is genuinely per-CPU - but an application processor that only halts
-    // never makes a ring transition and so never consults one.
-    const Pointer pointer{
-        .limit = sizeof(g_gdt) - 1,
-        .base  = reinterpret_cast<u64>(&g_gdt),
-    };
-    load(pointer);
-}
-
-void set_kernel_stack(u64 rsp0)
-{
-    g_tss.rsp[0] = rsp0;
+    if (slot < kMaxCpus)
+        g_tss[slot].rsp[0] = rsp0;
 }
 
 } // namespace gdt

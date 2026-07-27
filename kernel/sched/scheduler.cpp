@@ -3,6 +3,7 @@
 #include <leah/heap.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
+#include <leah/percpu.hpp>
 #include <leah/file.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/signal.hpp>
@@ -192,7 +193,7 @@ void switch_to(u32 next_index)
     // switches to, are both this task's own kernel stack - so a syscall or
     // interrupt handler that blocks keeps its state on a stack no other task
     // will reuse.
-    gdt::set_kernel_stack(next->kernel_stack_top);
+    gdt::set_kernel_stack(percpu::slot(), next->kernel_stack_top);
     set_syscall_stack(next->kernel_stack_top);
     vmm::switch_address_space(next->space != 0 ? next->space : vmm::kernel_space());
 

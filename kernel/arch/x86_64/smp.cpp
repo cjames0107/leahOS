@@ -5,6 +5,7 @@
 #include <leah/heap.hpp>
 #include <leah/interrupts.hpp>
 #include <leah/memory.hpp>
+#include <leah/percpu.hpp>
 #include <leah/smp.hpp>
 #include <leah/string.hpp>
 #include <leah/vmm.hpp>
@@ -35,6 +36,7 @@ constexpr usize kApStackSize = 16 * 1024;
 // CPUs, not two threads the compiler knows about.
 volatile u32 g_online = 1;              // the bootstrap processor counts itself
 volatile u32 g_handshake = 0;
+u32 g_next_slot = 0;                    // slot 0 is the bootstrap processor
 
 usize g_cpu_count = 1;
 
@@ -58,8 +60,12 @@ extern "C" [[noreturn]] void ap_main()
     // so every processor can point at the same one. What is *not* shared is the
     // TSS, and this AP never needs one: it takes no interrupts and makes no
     // ring transition. That changes the moment it runs user tasks.
-    gdt::load_on_this_cpu();
+    // Its own GDT and TSS, then its own per-CPU block: the order matters,
+    // because loading a data selector into GS resets the base the block needs.
+    const u32 slot = __atomic_add_fetch(&g_next_slot, 1, __ATOMIC_SEQ_CST);
+    gdt::init_cpu(slot);
     interrupts::load_on_this_cpu();
+    percpu::init(slot, apic::local_id());
 
     // Its own local APIC still has to be switched on; only the bootstrap
     // processor's was touched during boot.

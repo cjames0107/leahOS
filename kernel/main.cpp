@@ -22,6 +22,7 @@
 #include <leah/net.hpp>
 #include <leah/panic.hpp>
 #include <leah/pci.hpp>
+#include <leah/percpu.hpp>
 #include <leah/pic.hpp>
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
@@ -687,7 +688,8 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     // Descriptor tables first: everything below can fault, and a fault before
     // the IDT exists is a triple fault with no diagnostic.
     gdt::init();
-    step("GDT + TSS installed, IST1 armed for #DF");
+    percpu::init(0, 0);
+    step("GDT + TSS installed per CPU, IST1 armed for #DF");
 
     interrupts::init();
     step("IDT installed, 256 vectors");

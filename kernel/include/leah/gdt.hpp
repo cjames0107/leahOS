@@ -25,12 +25,12 @@ constexpr u8 kIstDoubleFault = 1;
 
 void init();
 
-// Point this CPU at the GDT init() built. Used by application processors,
-// which share the table rather than each building their own.
-void load_on_this_cpu();
+// Build and load this processor's own GDT and TSS. Each CPU needs its own,
+// because the TSS carries the ring-0 stack the CPU switches to on a trap from
+// ring 3 - sharing one would land two cores on the same stack.
+void init_cpu(u32 slot);
 
-// Stack the CPU switches to on a ring 3 -> ring 0 transition. Unused until we
-// have userspace, but the TSS field has to exist before the first such trap.
-void set_kernel_stack(u64 rsp0);
+// Stack the given CPU switches to on a ring 3 -> ring 0 transition.
+void set_kernel_stack(u32 slot, u64 rsp0);
 
 } // namespace gdt
