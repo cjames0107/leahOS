@@ -9,6 +9,7 @@
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/signal.hpp>
+#include <leah/spinlock.hpp>
 #include <leah/string.hpp>
 #include <leah/syscall.hpp>
 #include <leah/vfs.hpp>
@@ -289,6 +290,9 @@ void handle_pending_signals(Frame* frame)
     constexpr u64 kSafeFlags = 0x8D5;    // CF PF AF ZF SF DF OF
     restored.rflags = (restored.rflags & kSafeFlags) | kUserFlags;
 
+    // This path leaves through IRETQ rather than returning, so the dispatcher's
+    // scope guard will never fire: drop the kernel lock by hand first.
+    sync::bkl::release();
     sigreturn_to_user(&restored);
 }
 
@@ -407,6 +411,11 @@ void init()
 
 extern "C" void syscall_dispatch(syscall::Frame* frame)
 {
+    // One lock around the whole kernel. Released on every path out, including
+    // the one sigreturn takes, which does not return here.
+    sync::bkl::acquire();
+    struct Unlock { ~Unlock() { sync::bkl::release(); } } unlock;
+
     using namespace syscall;
 
     switch (frame->rax) {

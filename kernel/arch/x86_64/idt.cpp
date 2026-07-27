@@ -6,6 +6,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/spinlock.hpp>
 #include <leah/syscall.hpp>
 #include <leah/vmm.hpp>
 #include <leah/string.hpp>
@@ -127,6 +128,20 @@ void load_on_this_cpu()
 extern "C" void interrupt_dispatch(interrupts::Frame* frame)
 {
     using namespace interrupts;
+
+    // A TLB shootdown is serviced before anything else and without the kernel
+    // lock: the CPU that sent it is holding that lock and waiting for this
+    // acknowledgement, so taking it here would deadlock the pair.
+    if (frame->vector == kTlbShootdownVector) {
+        vmm::on_shootdown_ipi();
+        apic::eoi();
+        return;
+    }
+
+    // The same lock as the syscall path, and recursive for the same reason: a
+    // syscall that enabled interrupts may already hold it on this CPU.
+    sync::bkl::acquire();
+    struct Unlock { ~Unlock() { sync::bkl::release(); } } unlock;
 
     const u64 vector = frame->vector;
 

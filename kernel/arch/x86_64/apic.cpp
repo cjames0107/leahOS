@@ -27,6 +27,7 @@ constexpr u32 kIcrDeliveryInit    = 0x5 << 8;
 constexpr u32 kIcrDeliveryStartup = 0x6 << 8;
 constexpr u32 kIcrLevelAssert     = 1u << 14;
 constexpr u32 kIcrDeliveryPending = 1u << 12;
+constexpr u32 kIcrAllExcludingSelf = 0x3 << 18;   // destination shorthand
 
 constexpr u32 kSpuriousEnable = 1u << 8;     // switches the local APIC on
 constexpr u32 kSpuriousVector = 0xFF;
@@ -307,6 +308,17 @@ void send_init(u8 apic_id)
     if (g_lapic == nullptr)
         return;
     send_ipi(apic_id, kIcrDeliveryInit | kIcrLevelAssert);
+}
+
+void send_ipi_all_but_self(u8 vector)
+{
+    if (g_lapic == nullptr)
+        return;
+    // The shorthand saves iterating over every APIC id, and reaches CPUs the
+    // sender does not have to know about.
+    lapic_write(kLapicIcrLow, kIcrAllExcludingSelf | kIcrLevelAssert | vector);
+    while ((lapic_read(kLapicIcrLow) & kIcrDeliveryPending) != 0)
+        asm volatile("pause");
 }
 
 void send_startup(u8 apic_id, u8 trampoline_page)

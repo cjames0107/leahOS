@@ -19,6 +19,9 @@ alignas(64) Cpu g_cpus[kMaxCpus]{};
 // kernel entry and exit; the table costs one uncached read and no new invariant.
 u8 g_slot_by_apic[256]{};
 
+// Valid while the kernel lock is held; see the header.
+volatile u32 g_active_slot = 0;
+
 } // namespace
 
 void init(u32 slot, u32 apic_id)
@@ -51,6 +54,9 @@ u32 slot()
     return g_slot_by_apic[apic::local_id()];
 }
 
-Cpu& current() { return g_cpus[slot()]; }
+void set_active(u32 s) { g_active_slot = s; }
+u32  active()          { return g_active_slot; }
+
+Cpu& current() { return g_cpus[active()]; }
 
 } // namespace percpu

@@ -540,10 +540,6 @@ void run_userland()
     console::write("\n  starting /BIN/INIT.ELF\n\n");
     console::set_color(console::Color::LightGray);
 
-    // With real processes that block on I/O, the scheduler needs something to
-    // run when everyone is asleep.
-    scheduler::start_idle();
-
     const u32 pid = process::create("init", "/BIN/INIT.ELF", scheduler::current_pid());
     if (pid == 0)
         panic("could not create the init process");
@@ -591,7 +587,10 @@ void worker_thread(void* arg)
 
 void self_test_scheduler()
 {
-    scheduler::init();
+    // The scheduler is initialised once, early, before any application
+    // processor exists - re-initialising it here would wipe the task table out
+    // from under the CPUs already running on it.
+    const u32 baseline = scheduler::alive_count();
 
     for (usize i = 0; i < kWorkers; ++i)
         g_work_counter[i] = 0;
@@ -619,7 +618,9 @@ void self_test_scheduler()
     }
 
     g_work_stop = true;
-    while (scheduler::alive_count() > 1)
+    // Wait for the workers specifically, not for the machine to fall idle:
+    // every CPU has its own idle task, so "one task left" is never true again.
+    for (u64 i = 0; i < 100'000'000ull && scheduler::alive_count() > baseline; ++i)
         scheduler::yield();
 
     if (!ok)
@@ -756,7 +757,18 @@ extern "C" void kernel_main(const boot::Info* boot_info)
             }
 
             // With the local APIC up, the other processors can be started.
+            // The bootstrap processor needs its idle task before any other CPU
+            // starts scheduling: the moment an AP picks up work, this one can
+            // find itself with nothing to run, and no idle task is a panic.
+            scheduler::init();
+            scheduler::start_idle();
+
             const usize cpus = smp::init();
+            // Only worth doing when the other CPUs can actually answer: one
+            // halted with interrupts off never will, and every unmap would then
+            // wait out the full shootdown timeout.
+            vmm::enable_tlb_shootdown(
+                smp::scheduling() ? static_cast<u32>(cpus) : 1);
             if (cpus > 1)
                 console::printf("  [ ok ] SMP: %llu processors online "
                                 "(application processors parked)\n",

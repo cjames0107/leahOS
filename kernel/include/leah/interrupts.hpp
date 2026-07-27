@@ -37,6 +37,11 @@ constexpr u8 kIrqBase     = 32;
 constexpr u8 kIrqTimer    = 0;
 constexpr u8 kIrqKeyboard = 1;
 
+// Inter-processor vectors, above the device range. The TLB shootdown is
+// handled without taking the kernel lock - the CPU that sent it is waiting for
+// an acknowledgement while holding that very lock.
+constexpr u8 kTlbShootdownVector = 0xFD;
+
 void init();
 
 // Point this CPU at the IDT init() built; application processors share it.

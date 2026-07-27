@@ -32,6 +32,14 @@ void init();
 // runnable. Call once, after the heap is up, before any task can block.
 void start_idle();
 
+// An idle task for a specific processor; each CPU needs its own, or two would
+// try to run the same one.
+void start_idle_for(u32 cpu_slot);
+
+// An application processor's last call: join the scheduler and never return.
+// Must be entered holding the kernel lock.
+[[noreturn]] void enter_scheduler_on_this_cpu();
+
 // A kernel thread in the kernel's address space. Returns its pid, or 0.
 u32 spawn(const char* name, Entry entry, void* arg);
 

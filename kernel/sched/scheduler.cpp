@@ -1,3 +1,4 @@
+#include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
@@ -7,6 +8,7 @@
 #include <leah/file.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/signal.hpp>
+#include <leah/spinlock.hpp>
 #include <leah/string.hpp>
 
 // Implemented in context.asm, user_entry.asm and syscall_entry.asm.
@@ -46,6 +48,7 @@ struct Task {
     vmm::AddressSpace space; // 0 for kernel threads (they use the kernel space)
     i32   exit_code;
     u64   wait_channel;      // when Blocked on block_on(); 0 otherwise
+    u32   bkl_depth;         // kernel-lock depth this task was suspended holding
     u64   brk;               // sbrk program break, for user tasks
     u64   mmap_next;         // next free address mmap hands out
     // Credentials, inherited across fork and execve. uid 0 is root and bypasses
@@ -66,17 +69,25 @@ struct Task {
 
 Task g_tasks[kMaxTasks];
 u32  g_task_count = 0;
-u32  g_current = 0;                  // index into g_tasks
+// Which task each CPU is running, and which idle task belongs to it. Both were
+// single globals before there was more than one processor; a CPU picking a task
+// another CPU is already running, or two CPUs sharing one idle task, is exactly
+// the corruption SMP invites.
+constexpr usize kMaxCpuSlots = 32;
+u32  g_current_by_cpu[kMaxCpuSlots]{};   // index into g_tasks, per CPU
 u32  g_next_pid = 1;
 
 constexpr u32 kNoIdle = 0xFFFFFFFF;
-u32  g_idle_index = kNoIdle;         // the halt-when-idle task, run only as a last resort
+u32  g_idle_by_cpu[kMaxCpuSlots];    // the halt-when-idle task, one per CPU
 
 bool g_preemption = false;
 u32  g_quantum = kQuantum;
 volatile bool g_need_resched = false;
 
-Task* current() { return &g_tasks[g_current]; }
+u32& current_index() { return g_current_by_cpu[percpu::active()]; }
+u32  idle_index()    { return g_idle_by_cpu[percpu::active()]; }
+
+Task* current() { return &g_tasks[current_index()]; }
 
 Task* find(u32 pid)
 {
@@ -85,6 +96,17 @@ Task* find(u32 pid)
             return &g_tasks[i];
     }
     return nullptr;
+}
+
+// True for any CPU's idle task. Idle is only ever run as a last resort, and one
+// CPU must never pick up another's.
+bool is_idle_task(u32 index)
+{
+    for (usize i = 0; i < kMaxCpuSlots; ++i) {
+        if (g_idle_by_cpu[i] == index)
+            return true;
+    }
+    return false;
 }
 
 Task* alloc_slot()
@@ -158,17 +180,19 @@ u32 pick_next()
 {
     // Any Ready task other than idle, round-robin from the current one.
     for (u32 step = 1; step <= g_task_count; ++step) {
-        const u32 index = (g_current + step) % g_task_count;
-        if (index != g_idle_index && g_tasks[index].state == State::Ready)
+        const u32 index = (current_index() + step) % g_task_count;
+        // Ready means runnable and not already running elsewhere: a task another
+        // CPU is executing is marked Running, so this skips it.
+        if (!is_idle_task(index) && g_tasks[index].state == State::Ready)
             return index;
     }
     // Keep running the current task if it is still runnable.
-    if (g_current != g_idle_index &&
+    if (!is_idle_task(current_index()) &&
         (current()->state == State::Running || current()->state == State::Ready))
-        return g_current;
-    // Nothing else to do: fall back to the idle task.
-    if (g_idle_index != kNoIdle)
-        return g_idle_index;
+        return current_index();
+    // Nothing else to do: fall back to this CPU's own idle task.
+    if (idle_index() != kNoIdle)
+        return idle_index();
     panic("scheduler: nothing runnable and no idle task");
 }
 
@@ -177,7 +201,7 @@ u32 pick_next()
 // task takes an interrupt or a syscall while in ring 3.
 void switch_to(u32 next_index)
 {
-    if (next_index == g_current)
+    if (next_index == current_index())
         return;
 
     Task* prev = current();
@@ -186,16 +210,23 @@ void switch_to(u32 next_index)
     if (prev->state == State::Running)
         prev->state = State::Ready;
     next->state = State::Running;
-    g_current = next_index;
+    current_index() = next_index;
     g_quantum = kQuantum;
 
     // The ring-0 stack for an interrupt from ring 3, and the stack SYSCALL
     // switches to, are both this task's own kernel stack - so a syscall or
     // interrupt handler that blocks keeps its state on a stack no other task
     // will reuse.
-    gdt::set_kernel_stack(percpu::slot(), next->kernel_stack_top);
+    gdt::set_kernel_stack(percpu::active(), next->kernel_stack_top);
     set_syscall_stack(next->kernel_stack_top);
     vmm::switch_address_space(next->space != 0 ? next->space : vmm::kernel_space());
+
+    // The kernel lock travels with the task, not the CPU: save what this one
+    // was holding and give the incoming task back what it had. A task entered
+    // for the first time has depth 0, so the lock is dropped here rather than
+    // being carried into code that would never release it.
+    prev->bkl_depth = sync::bkl::depth();
+    sync::bkl::handoff(next->bkl_depth);
 
     context_switch(&prev->kernel_rsp, next->kernel_rsp);
 }
@@ -242,7 +273,10 @@ void init()
     main_task.space  = vmm::kernel_space();
     files::init_table(main_task.files);
     g_task_count = 1;
-    g_current = 0;
+    for (usize i = 0; i < kMaxCpuSlots; ++i) {
+        g_current_by_cpu[i] = 0;
+        g_idle_by_cpu[i] = kNoIdle;
+    }
 }
 
 u32 spawn(const char* name, Entry entry, void* arg)
@@ -267,6 +301,7 @@ u32 spawn(const char* name, Entry entry, void* arg)
     task->is_user    = false;
     task->space      = vmm::kernel_space();
     task->name       = name;
+    task->bkl_depth  = 0;
     task->entry      = entry;
     task->arg        = arg;
 
@@ -302,6 +337,7 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
     task->mmap_next  = memory::kUserMmapBase;
     task->sig_pending  = 0;
     task->sig_restorer = 0;
+    task->bkl_depth    = 0;
     memset(task->sig_handler, 0, sizeof(task->sig_handler));
     task->uid = 0;
     task->gid = 0;
@@ -348,6 +384,7 @@ u32 spawn_thread(const TrapFrame& frame)
     task->gid        = self->gid;
     task->sig_pending  = 0;
     task->sig_restorer = 0;
+    task->bkl_depth    = 0;
     memset(task->sig_handler, 0, sizeof(task->sig_handler));
     // The fd table is the leader's; this copy is never consulted (current_files
     // redirects to the group leader), but zero it so close_all cannot double-free.
@@ -370,21 +407,63 @@ namespace {
 
 [[noreturn]] void idle_entry(void*)
 {
-    for (;;)
+    for (;;) {
+        // The kernel lock must not be held across the halt. Idle is reached by
+        // a context switch from a task that held it, so this CPU owns it on
+        // arrival - and halting while owning it would freeze every other
+        // processor out of the kernel entirely.
+        const u32 held = sync::bkl::release_all();
         cpu::wait_for_interrupt();       // sti; hlt until something happens
+        sync::bkl::reacquire(held);
+
+        // Something woke us; go and look for work.
+        cpu::cli();
+        switch_to(pick_next());
+    }
 }
 
 } // namespace
 
-void start_idle()
+void start_idle_for(u32 cpu_slot)
 {
+    if (cpu_slot >= kMaxCpuSlots)
+        return;
     const u32 pid = spawn("idle", idle_entry, nullptr);
-    // The idle task is the last task spawned so far; find its slot.
     for (u32 i = 0; i < g_task_count; ++i) {
         if (g_tasks[i].pid == pid) {
-            g_idle_index = i;
+            g_idle_by_cpu[cpu_slot] = i;
             break;
         }
+    }
+}
+
+void start_idle() { start_idle_for(0); }
+
+[[noreturn]] void enter_scheduler_on_this_cpu()
+{
+    cpu::cli();
+
+    // Adopt this CPU's idle task before doing anything that could switch away.
+    // Until now current_index() still named task 0 - the bootstrap processor's -
+    // and the first context switch would have saved this CPU's state straight
+    // over the BSP's, which is as bad as it sounds.
+    //
+    // The AP is running on its trampoline stack, so that stack becomes the idle
+    // task's kernel stack from here on. Idle never exits, so the unused one
+    // spawn() allocated is simply never reclaimed.
+    const u32 idle = idle_index();
+    current_index() = idle;
+    g_tasks[idle].state = State::Running;
+
+    // From here it is an ordinary scheduling CPU: run whatever is ready, and
+    // fall back to idling when nothing is.
+    for (;;) {
+        switch_to(pick_next());
+
+        const u32 held = sync::bkl::release_all();
+        cpu::wait_for_interrupt();      // sti; hlt - lets other CPUs in
+        sync::bkl::reacquire(held);
+        cpu::cli();
     }
 }
 
@@ -463,6 +542,7 @@ u32 fork_current(const TrapFrame& parent_user)
                sizeof(child_task->sig_handler));
         child_task->sig_restorer = parent->sig_restorer;
         child_task->sig_pending  = 0;
+        child_task->bkl_depth = 1;   // resumes inside a syscall, as the parent does
         child_task->uid = parent->uid;
         child_task->gid = parent->gid;
     }

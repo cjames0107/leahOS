@@ -62,4 +62,8 @@ void send_startup(u8 apic_id, u8 trampoline_page);
 // have a scheduler to yield to.
 void delay_us(u64 microseconds);
 
+// Send `vector` to every processor except this one. Used for TLB shootdown,
+// where the point is precisely to reach everybody else.
+void send_ipi_all_but_self(u8 vector);
+
 } // namespace apic

@@ -1,6 +1,8 @@
 #include <leah/cpu.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
+#include <leah/apic.hpp>
+#include <leah/interrupts.hpp>
 #include <leah/pmm.hpp>
 #include <leah/string.hpp>
 #include <leah/vmm.hpp>
@@ -211,6 +213,7 @@ bool unmap_into(u64* pml4, vaddr_t virt)
 
     pt[index_of(virt, 1)] = 0;
     invalidate(virt);
+    shootdown();            // the entry is gone here; make it gone everywhere
     return true;
 }
 
@@ -316,6 +319,46 @@ bool map(vaddr_t virt, paddr_t phys, u64 flags)
 // PML4 entries into every new process, so a stray low-half entry would be
 // inherited as if it were kernel-shared, and every user space would then build
 // its own mappings inside one shared page table.
+namespace {
+bool g_shootdown_enabled = false;
+volatile u32 g_shootdown_acks = 0;
+u32 g_other_cpus = 0;
+} // namespace
+
+void enable_tlb_shootdown(u32 total_cpus)
+{
+    g_other_cpus = total_cpus > 0 ? total_cpus - 1 : 0;
+    g_shootdown_enabled = g_other_cpus > 0;
+}
+
+void on_shootdown_ipi()
+{
+    // Reloading CR3 drops every non-global translation, which is heavier than
+    // invalidating one page but needs no agreement about which page.
+    u64 cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(cr3));
+    asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+    __atomic_add_fetch(&g_shootdown_acks, 1, __ATOMIC_SEQ_CST);
+}
+
+void shootdown()
+{
+    if (!g_shootdown_enabled)
+        return;
+    const u32 other_cpus = g_other_cpus;
+
+    __atomic_store_n(&g_shootdown_acks, 0, __ATOMIC_SEQ_CST);
+    apic::send_ipi_all_but_self(interrupts::kTlbShootdownVector);
+
+    // Bounded: a CPU that never answers must not wedge the kernel. Overrunning
+    // this is a bug, but hanging forever would be a worse one.
+    for (int spin = 0; spin < 10000000; ++spin) {
+        if (__atomic_load_n(&g_shootdown_acks, __ATOMIC_SEQ_CST) >= other_cpus)
+            return;
+        asm volatile("pause");
+    }
+}
+
 void release_low_half()
 {
     u64* pml4 = kernel_pml4();
@@ -356,6 +399,9 @@ bool handle_cow_fault(vaddr_t virt)
 
     *pt_entry = copy | flags;
     invalidate(virt);
+    // This page now points somewhere else; a stale translation on another CPU
+    // would keep writing to the copy we just stopped sharing.
+    shootdown();
     pmm::release(source);
     return true;
 }

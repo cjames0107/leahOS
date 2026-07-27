@@ -24,4 +24,11 @@ usize cpu_count();
 // True once more than one processor is running.
 bool multiprocessor();
 
+// True once the application processors are actually scheduling, as opposed to
+// merely being awake. TLB shootdown depends on this and not on the CPU count: a
+// parked processor is halted with interrupts off and can never acknowledge one,
+// so enabling shootdowns for it would make every unmap wait out its full
+// timeout.
+bool scheduling();
+
 } // namespace smp

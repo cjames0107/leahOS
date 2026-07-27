@@ -79,6 +79,25 @@ bool handle_cow_fault(vaddr_t virt);
 // that copy the kernel's PML4 entries.
 void release_low_half();
 
+// --- TLB coherence ----------------------------------------------------------
+//
+// A page table is shared: threads of one process can run on different CPUs, and
+// the kernel's own mappings are in every address space. Changing an entry only
+// invalidates the TLB of the CPU that changed it, so every other CPU has to be
+// told - or it keeps using a translation that no longer exists, which after the
+// frame is reused means reading and writing someone else's memory.
+
+// Enable shootdowns. Until the application processors are actually scheduling
+// there is nobody to tell, and a CPU halted with interrupts off would never
+// acknowledge.
+void enable_tlb_shootdown(u32 total_cpus);
+
+// Make every other CPU drop its cached translations. Returns once they have.
+void shootdown();
+
+// Called from the shootdown interrupt on the receiving CPU.
+void on_shootdown_ipi();
+
 // Make a space active: load CR3 and record it as current. Cheap to call with
 // the already-active space (skips the reload).
 void switch_address_space(AddressSpace space);

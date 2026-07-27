@@ -6,7 +6,10 @@
 #include <leah/interrupts.hpp>
 #include <leah/memory.hpp>
 #include <leah/percpu.hpp>
+#include <leah/scheduler.hpp>
 #include <leah/smp.hpp>
+#include <leah/spinlock.hpp>
+#include <leah/timer.hpp>
 #include <leah/string.hpp>
 #include <leah/vmm.hpp>
 
@@ -74,8 +77,13 @@ extern "C" [[noreturn]] void ap_main()
     __atomic_add_fetch(&g_online, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&g_handshake, 1, __ATOMIC_SEQ_CST);
 
-    // Parked. Waking these up means making the scheduler safe for more than one
-    // CPU first; until then a halted core is the honest state.
+    // Parked, still. Everything an AP needs to *run* is now in place - its own
+    // GDT and TSS, a per-CPU slot, a kernel lock that hands off across context
+    // switches, TLB shootdown - and four processors do interleave real work when
+    // this is switched on. What is not yet right is the handoff between that
+    // lock and the idle loop: the deadlock it produces moves when timing
+    // changes, which is exactly the class of bug that must not be shipped.
+    // scheduler::enter_scheduler_on_this_cpu() is the one line to re-enable.
     for (;;)
         asm volatile("cli; hlt");
 }
@@ -147,5 +155,9 @@ usize init()
 usize cpu_count() { return g_cpu_count; }
 
 bool multiprocessor() { return g_cpu_count > 1; }
+
+// Flipped on when the application processors join the scheduler. They do not
+// yet - see the comment in ap_main - so this is false and shootdowns stay off.
+bool scheduling() { return false; }
 
 } // namespace smp

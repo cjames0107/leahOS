@@ -31,4 +31,12 @@ void init(u32 slot, u32 apic_id);
 Cpu& current();
 u32  slot();
 
+// The slot of whichever CPU is currently executing kernel code. Reading the
+// local APIC id costs an uncached MMIO access, and `current()` in the scheduler
+// is far too hot for that - but the big kernel lock means only one CPU is inside
+// the kernel at a time, so the slot can be cached when the lock is taken and
+// read freely by everything under it.
+void set_active(u32 slot);
+u32  active();
+
 } // namespace percpu
