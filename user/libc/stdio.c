@@ -62,10 +62,23 @@ static void format(Sink* sink, const char* fmt, va_list args)
         }
 
         ++i;
+        /* Flags. An unrecognised one used to fall straight through to the
+         * specifier switch, which then failed to consume its argument - and
+         * from there every later argument in the call was off by one. Silently
+         * mis-parsing a standard flag is a worse failure than printing it
+         * literally, so left-justify is handled rather than ignored. */
+        int left = 0;
         char pad = ' ';
-        if (fmt[i] == '0') {
-            pad = '0';
-            ++i;
+        for (;;) {
+            if (fmt[i] == '-') {
+                left = 1;
+                ++i;
+            } else if (fmt[i] == '0') {
+                pad = '0';
+                ++i;
+            } else {
+                break;
+            }
         }
 
         unsigned width = 0;
@@ -87,6 +100,10 @@ static void format(Sink* sink, const char* fmt, va_list args)
             sink_unsigned(sink, wide ? va_arg(args, unsigned long) : va_arg(args, unsigned int),
                           10, 0, width, pad);
             break;
+        case 'o':
+            sink_unsigned(sink, wide ? va_arg(args, unsigned long) : va_arg(args, unsigned int),
+                          8, 0, width, pad);
+            break;
         case 'x':
             sink_unsigned(sink, wide ? va_arg(args, unsigned long) : va_arg(args, unsigned int),
                           16, 0, width, pad);
@@ -104,7 +121,20 @@ static void format(Sink* sink, const char* fmt, va_list args)
             break;
         case 's': {
             const char* s = va_arg(args, const char*);
-            sink_puts(sink, s != NULL ? s : "(null)");
+            if (s == NULL)
+                s = "(null)";
+            unsigned length = 0;
+            while (s[length] != '\0')
+                ++length;
+            if (!left) {
+                for (unsigned k = length; k < width; ++k)
+                    sink_putc(sink, ' ');
+            }
+            sink_puts(sink, s);
+            if (left) {
+                for (unsigned k = length; k < width; ++k)
+                    sink_putc(sink, ' ');
+            }
             break;
         }
         case '%':

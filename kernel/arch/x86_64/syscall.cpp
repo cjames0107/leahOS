@@ -41,6 +41,23 @@ bool user_range_ok(vaddr_t base, u64 length)
     return true;
 }
 
+// Copy a NUL-terminated string out of user memory, bounded. Returns false when
+// the pointer is not in the user half; a missing terminator truncates rather
+// than running off the end of the mapping.
+bool copy_user_string(u64 user_pointer, char* out, usize out_size)
+{
+    if (user_pointer == 0 || !user_range_ok(user_pointer, 1))
+        return false;
+    const char* in = reinterpret_cast<const char*>(user_pointer);
+    usize n = 0;
+    while (n + 1 < out_size && in[n] != '\0') {
+        out[n] = in[n];
+        ++n;
+    }
+    out[n] = '\0';
+    return true;
+}
+
 // Grow (or query) the process's heap. Returns the previous break, or -1. The
 // new pages are mapped into the process's own space, which is active during the
 // syscall, so zeroing them is a plain write.
@@ -563,6 +580,47 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             memcpy(reinterpret_cast<void*>(frame->rdx), home, sizeof(home));
         // Wipe the copy rather than leave a password lying in kernel memory.
         memset(password, 0, sizeof(password));
+        frame->rax = static_cast<u64>(ok ? 0 : -1);
+        break;
+    }
+
+    case UserAdd: {
+        // Strings are copied in before use, as everywhere: a user pointer that
+        // changes under the kernel is a bug waiting to happen.
+        char name[accounts::kMaxName] = {};
+        char password[128] = {};
+        char home[accounts::kMaxHome] = {};
+        if (!copy_user_string(frame->rdi, name, sizeof(name)) ||
+            !copy_user_string(frame->rsi, password, sizeof(password)) ||
+            !copy_user_string(frame->r8, home, sizeof(home))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const bool ok = accounts::create(name, password,
+                                         static_cast<u32>(frame->rdx),
+                                         static_cast<u32>(frame->r10), home);
+        memset(password, 0, sizeof(password));
+        frame->rax = static_cast<u64>(ok ? 0 : -1);
+        break;
+    }
+
+    case SetPasswd: {
+        char name[accounts::kMaxName] = {};
+        char old_password[128] = {};
+        char new_password[128] = {};
+        if (!copy_user_string(frame->rdi, name, sizeof(name)) ||
+            !copy_user_string(frame->rdx, new_password, sizeof(new_password))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const bool have_old = frame->rsi != 0 &&
+                              copy_user_string(frame->rsi, old_password,
+                                               sizeof(old_password));
+        const bool ok = accounts::set_password(name,
+                                               have_old ? old_password : nullptr,
+                                               new_password);
+        memset(old_password, 0, sizeof(old_password));
+        memset(new_password, 0, sizeof(new_password));
         frame->rax = static_cast<u64>(ok ? 0 : -1);
         break;
     }

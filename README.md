@@ -791,6 +791,31 @@ a correct password is authenticated and then refused; and digests are compared
 in constant time, since returning early on the first differing byte leaks how
 much of a guess was right.
 
+**Root is the hub.** Identity changes route through it: an ordinary user may
+only climb to root, so reaching another ordinary user costs two passwords —
+root's, then theirs. And root itself is asked for the target account's password,
+so holding root is authority over the machine rather than knowledge of everyone
+else's secrets.
+
+Worth being precise about what that does and does not buy. It is a policy about
+who you may *become*; it is not a wall around files. uid 0 still bypasses
+permission checks, so root can read anyone's data directly — making it otherwise
+would leave nobody able to administer the system. What the rule prevents is a
+user quietly *becoming* someone else and acting as them.
+
+Home directories are `0700` and owned by their user, so the ordinary permission
+checks already stop one user reading another's files without going through that
+route. `mke2fs -d` copies the host's mode and owner, so the image build fixes
+both up with `debugfs` — a home directory anyone can read would make the whole
+model decorative.
+
+`login` runs from init and stays root: the shell it starts is a child that drops
+to the authenticated user, so when that shell exits control returns to the
+prompt. That is what makes `exit` a logout. `useradd` and `passwd` go through the
+kernel for the same reason `su` does — the hash is never in a user process — and
+`useradd` allocates the next free uid, because handing out one already in use
+would not fail loudly, it would silently make two accounts the same person.
+
 Passwords are in `tools/mkaccounts.py`, written down rather than pretended to be
 secret: `root`/`toor`, `leah`/`leah`, `guest`/`guest`.
 
@@ -873,4 +898,5 @@ process still mapped them.
 - [x] xHCI, with the HID and mass-storage class drivers
 - [ ] USB interrupt transfers driven by the controller's own interrupt
 - [x] a password file, `su` that authenticates, and per-user home directories
-- [ ] `login` at boot, so the shell starts unauthenticated
+- [x] `login` at boot, `useradd`, `passwd`, `logout`
+- [x] `ls -l` and `stat` for permissions and metadata

@@ -84,14 +84,27 @@ if [ -x "$DEBUGFS" ]; then
         echo "sif /etc/shadow gid 0"
         echo "sif /etc/shadow mode 0100600"
         echo "sif /etc/passwd mode 0100644"
+        # Home directories are private. mke2fs -d copies the *host* mode as
+        # well as the host owner, which leaves them world readable - and a home
+        # directory anyone can read makes the whole account model decorative.
         echo "sif /root uid 0"
+        echo "sif /root gid 0"
         echo "sif /root mode 040700"
+        echo "sif /root/readme.txt uid 0"
+        echo "sif /root/readme.txt gid 0"
+        echo "sif /root/readme.txt mode 0100600"
         echo "sif /home/leah uid 1000"
         echo "sif /home/leah gid 1000"
+        echo "sif /home/leah mode 040700"
         echo "sif /home/leah/readme.txt uid 1000"
+        echo "sif /home/leah/readme.txt gid 1000"
+        echo "sif /home/leah/readme.txt mode 0100600"
         echo "sif /home/guest uid 1001"
         echo "sif /home/guest gid 1001"
+        echo "sif /home/guest mode 040700"
         echo "sif /home/guest/readme.txt uid 1001"
+        echo "sif /home/guest/readme.txt gid 1001"
+        echo "sif /home/guest/readme.txt mode 0100600"
     } | "$DEBUGFS" -w "$OUT" >/dev/null 2>&1
 fi
 

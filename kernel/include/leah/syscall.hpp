@@ -59,6 +59,8 @@ enum Number : u64 {
     Login     = 42,   // authenticate and switch credentials
     SetEcho   = 43,   // console echo, off while a password is typed
     UserName  = 44,
+    UserAdd   = 45,
+    SetPasswd = 46,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

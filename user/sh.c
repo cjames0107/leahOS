@@ -123,7 +123,7 @@ static _Noreturn void child(char** argv, char* infile, char* outfile, int append
 int main(void)
 {
     printf("\nleahOS shell - try: ls /, cat /README.MD, ls / | cat, echo hi > /F\n");
-    printf("builtins: cd, exit, help. put spaces around | < > >>\n");
+    printf("builtins: cd, exit, logout, help. put spaces around | < > >>\n");
 
     char line[256];
     char* tokens[MAX_TOKENS];
@@ -140,10 +140,12 @@ int main(void)
         if (n == 0)
             continue;
 
-        if (strcmp(tokens[0], "exit") == 0)
+        // logout is exit under another name: the shell ending is what
+        // returns control to login.
+        if (strcmp(tokens[0], "exit") == 0 || strcmp(tokens[0], "logout") == 0)
             break;
         if (strcmp(tokens[0], "help") == 0) {
-            printf("builtins: cd exit help. commands run from /BIN.\n");
+            printf("builtins: cd exit logout help. commands run from /BIN.\n");
             printf("redirection: < > >>, pipe: |  (spaces around operators)\n");
             continue;
         }

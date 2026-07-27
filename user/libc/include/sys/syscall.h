@@ -47,6 +47,8 @@
 #define SYS_login    42
 #define SYS_setecho  43
 #define SYS_username 44
+#define SYS_useradd  45
+#define SYS_passwd   46
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused

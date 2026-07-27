@@ -30,6 +30,19 @@ int username(unsigned uid, char* name_out)
     return (int)__syscall(SYS_username, (long)uid, (long)name_out, 0, 0, 0);
 }
 
+int useradd(const char* name, const char* password, unsigned uid, unsigned gid,
+            const char* home)
+{
+    return (int)__syscall(SYS_useradd, (long)name, (long)password, (long)uid,
+                          (long)gid, (long)home);
+}
+
+int passwd(const char* name, const char* old_password, const char* new_password)
+{
+    return (int)__syscall(SYS_passwd, (long)name, (long)old_password,
+                          (long)new_password, 0, 0);
+}
+
 int chmod(const char* path, unsigned mode)
 {
     return (int)__syscall(SYS_chmod, (long)path, (long)mode, 0, 0, 0);

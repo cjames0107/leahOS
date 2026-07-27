@@ -9,9 +9,11 @@
 
 int main(void)
 {
-    char* sh_args[] = { "sh", 0 };
-    execve("/BIN/SH.ELF", sh_args, 0);
+    // login owns the console from here: it authenticates, starts a shell as
+    // whoever logged in, and comes back to its prompt when that shell exits.
+    char* login_args[] = { "login", 0 };
+    execve("/BIN/LOGIN.ELF", login_args, 0);
 
-    printf("init: could not launch shell\n");
+    printf("init: could not launch login\n");
     return 1;
 }

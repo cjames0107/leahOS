@@ -427,8 +427,9 @@ static void test_accounts(void)
         int fails = 0;
         char home[128] = {};
 
-        /* Root is not asked for a password, and lands in leah's home. */
-        if (login("leah", 0, home) != 0)              fails |= 1;
+        /* Root may become anyone, but still has to know the password. */
+        if (login("leah", 0, home) == 0)               fails |= 1;
+        if (login("leah", "leah", home) != 0)          fails |= 1;
         if (getuid() != 1000)                          fails |= 2;
         if (strcmp(home, "/home/leah") != 0)           fails |= 4;
 
@@ -444,6 +445,10 @@ static void test_accounts(void)
         /* An unknown account fails too. */
         if (login("nosuchuser", "whatever", home) == 0) fails |= 128;
 
+        /* And one ordinary user may not become another even with the right
+         * password: the route to guest runs through root. */
+        if (login("guest", "guest", home) == 0)        fails |= 128;
+
         /* And the right password works. */
         if (login("root", "toor", home) != 0)          fails |= 256;
         if (getuid() != 0)                             fails |= 512;
@@ -452,14 +457,54 @@ static void test_accounts(void)
     }
     int status = 0;
     wait(&status);
-    check("root becomes another user without a password", (status & 1) == 0);
+    check("root still needs the target's password", (status & 1) == 0);
     check("the new uid takes effect", (status & 2) == 0);
     check("login reports the home directory", (status & 4) == 0);
     check("a normal user cannot read the shadow file", (status & 8) == 0);
     check("but can read the public passwd file", (status & 16) == 0);
     check("a wrong password is refused", (status & 32) == 0);
     check("a refused login leaves credentials alone", (status & 64) == 0);
-    check("an unknown account is refused", (status & 128) == 0);
+    check("unknown accounts and sideways switches are refused",
+          (status & 128) == 0);
+
+    /* Account creation, in a child so the uid change stays contained. */
+    pid = fork();
+    if (pid == 0) {
+        int fails = 0;
+        char home[128] = {};
+
+        if (useradd("tester", "secret", 0, 0, "/home/tester") != 0) fails |= 1;
+        /* The uid must be a free one, not a collision with an existing user. */
+        char who[32] = {};
+        if (username(1000, who) != 0 || strcmp(who, "leah") != 0)     fails |= 2;
+        /* Creating the same name twice must fail. */
+        if (useradd("tester", "secret", 0, 0, "/home/tester") == 0)   fails |= 4;
+        /* The new account authenticates with its password and not without. */
+        if (login("tester", "wrong", home) == 0)                      fails |= 8;
+        if (login("tester", "secret", home) != 0)                     fails |= 16;
+        /* ...and it is not root. */
+        if (getuid() == 0)                                            fails |= 32;
+        exit(fails);
+    }
+    status = 0;
+    wait(&status);
+    check("root can create an account", (status & 1) == 0);
+    check("a new account does not reuse an existing uid", (status & 2) == 0);
+    check("a duplicate account name is refused", (status & 4) == 0);
+    check("the new account rejects a wrong password", (status & 8) == 0);
+    check("the new account accepts its own password", (status & 16) == 0);
+    check("the new account is unprivileged", (status & 32) == 0);
+
+    /* A non-root user may not create accounts. */
+    pid = fork();
+    if (pid == 0) {
+        char home[128] = {};
+        login("leah", "leah", home);
+        exit(useradd("sneak", "x", 0, 0, "/home/sneak") == 0 ? 1 : 0);
+    }
+    status = 0;
+    wait(&status);
+    check("a normal user cannot create accounts", status == 0);
     /* The last two share the truncated bit, so check the child got that far. */
     check("the correct password is accepted", status != 255);
 }

@@ -43,6 +43,15 @@ void setecho(int on);
 /* The account name for a uid. Returns 0, or -1 when there is no such account. */
 int username(unsigned uid, char* name_out);
 
+/* Create an account. Root only. The kernel hashes the password and creates the
+ * home directory; nothing here ever sees a digest. Returns 0, or -1. */
+int useradd(const char* name, const char* password, unsigned uid, unsigned gid,
+            const char* home);
+
+/* Change a password. Root may change anyone's and may pass a null `old`;
+ * anyone else may change only their own and must prove it. Returns 0, or -1. */
+int passwd(const char* name, const char* old_password, const char* new_password);
+
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2

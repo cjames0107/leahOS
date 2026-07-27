@@ -5,8 +5,9 @@
  * password matches. That is why su needs no setuid bit and why no user process
  * ever holds a password hash.
  *
- * Root is not asked for a password. It can already become anyone by other
- * means, so demanding one would be theatre rather than security.
+ * Every switch needs the target account's password, root included. Root is the
+ * hub the others go through - an ordinary user can only climb to root, so
+ * reaching another ordinary user costs two passwords: root's, then theirs.
  */
 
 #include <stdio.h>
@@ -39,15 +40,20 @@ int main(int argc, char** argv)
     }
     const char* user = argc == 2 ? argv[1] : "root";
 
+    /* Say why before asking for a password that cannot possibly work. */
+    if (getuid() != 0 && strcmp(user, "root") != 0) {
+        printf("su: only root can become %s - su to root first\n", user);
+        return 1;
+    }
+
     char password[128] = {};
-    const int need_password = getuid() != 0;
-    if (need_password && read_password(password, sizeof(password)) < 0) {
+    if (read_password(password, sizeof(password)) < 0) {
         printf("su: could not read a password\n");
         return 1;
     }
 
     char home[128] = {};
-    if (login(user, need_password ? password : 0, home) < 0) {
+    if (login(user, password, home) < 0) {
         /* Deliberately vague: saying which of the two was wrong tells an
          * attacker which usernames exist. */
         printf("su: authentication failed\n");

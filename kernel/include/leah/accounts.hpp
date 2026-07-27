@@ -22,10 +22,34 @@ constexpr usize kMaxHome = 128;
 // Verify `password` for `user` and, if it is right, switch the calling task to
 // that user's uid and gid. Writes the account's home directory to `home_out`.
 //
-// Root is not asked for a password - it can already become anyone by other
-// means, and pretending otherwise would be theatre.
+// Identity changes flow through root. An ordinary user may only become root;
+// becoming a *different* ordinary user means going to root first and coming
+// back down. Root may become anyone - but every step needs the target account's
+// own password, root included, so holding root is not the same as holding
+// everyone's identity.
+//
+// That is a policy about who you may *become*, not a barrier around files: uid
+// 0 still bypasses permission checks, so root can read anyone's data directly.
+// Making it otherwise would leave nobody able to administer the system.
 bool login(const char* user, const char* password, char* home_out,
            usize home_size);
+
+// Create an account, generating a salt and hashing the password. Root only.
+// A uid of 0 means "allocate the next free one" - a second root is never what
+// was meant, and a uid that is already taken would silently make two accounts
+// the same person, since permission checks work on the number and not the name.
+// False if the name or uid is taken, the caller is not root, or the files
+// cannot be written.
+bool create(const char* user, const char* password, u32 uid, u32 gid,
+            const char* home);
+
+// Change an account's password. Root may change anyone's without knowing the
+// old one; anyone else may change only their own, and must prove it.
+bool set_password(const char* user, const char* old_password,
+                  const char* new_password);
+
+// True when an account of this name exists.
+bool exists(const char* user);
 
 // Look up an account without authenticating: what `whoami` and a prompt need.
 bool lookup_uid(u32 uid, char* name_out, usize name_size);
