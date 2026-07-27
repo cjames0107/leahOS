@@ -1,4 +1,5 @@
 #include <leah/console.hpp>
+#include <leah/spinlock.hpp>
 #include <leah/framebuffer.hpp>
 #include <leah/io.hpp>
 #include <leah/string.hpp>
@@ -25,6 +26,12 @@ volatile u16* const g_vga = reinterpret_cast<volatile u16*>(kVgaBuffer);
 bool g_graphical = false;
 u32  g_columns = kVgaWidth;
 u32  g_rows    = kVgaHeight;
+
+// The console has state - a cursor, a scroll position - that two CPUs writing
+// at once will corrupt. A lock of its own rather than the kernel lock: panic
+// prints from a CPU that may hold neither, and interleaved output from two
+// panicking cores is how the first SMP bug here announced itself.
+sync::Spinlock g_console_lock;
 
 u32 g_row    = 0;
 u32 g_column = 0;
@@ -202,6 +209,24 @@ void serial_put(char c)
 
 // --- number formatting -----------------------------------------------------
 
+// Emit one character with the console lock already held. Everything inside this
+// file goes through here; the public entry points are what take the lock, once,
+// at the outermost call - taking it again further in would deadlock, since a
+// plain spinlock has no notion of already owning it.
+void put_locked(char c)
+{
+    display_put(c);
+    if (c == '\n')
+        serial_put('\r');
+    serial_put(c);
+}
+
+void write_locked(const char* str)
+{
+    for (usize i = 0; str[i] != '\0'; ++i)
+        put_locked(str[i]);
+}
+
 void put_unsigned(u64 value, u32 base, bool upper, u32 min_width, char pad)
 {
     const char* digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
@@ -214,15 +239,15 @@ void put_unsigned(u64 value, u32 base, bool upper, u32 min_width, char pad)
     } while (value != 0);
 
     for (u32 i = len; i < min_width; ++i)
-        put(pad);
+        put_locked(pad);
     while (len > 0)
-        put(buf[--len]);
+        put_locked(buf[--len]);
 }
 
 void put_signed(i64 value, u32 min_width, char pad)
 {
     if (value < 0) {
-        put('-');
+        put_locked('-');
         put_unsigned(~static_cast<u64>(value) + 1, 10, false,
                      min_width > 0 ? min_width - 1 : 0, pad);
         return;
@@ -254,6 +279,7 @@ u32 rows() { return g_rows; }
 
 void clear()
 {
+    sync::ScopedLock guard(g_console_lock);
     if (g_graphical) {
         framebuffer::clear(background_rgb());
     } else {
@@ -267,32 +293,32 @@ void clear()
 
 void set_color(Color fg, Color bg)
 {
+    sync::ScopedLock guard(g_console_lock);
     g_attr = static_cast<u8>(static_cast<u8>(fg) | static_cast<u8>(bg) << 4);
 }
 
 void put(char c)
 {
-    display_put(c);
-    if (c == '\n')
-        serial_put('\r');
-    serial_put(c);
+    sync::ScopedLock guard(g_console_lock);
+    put_locked(c);
 }
 
 void write(const char* str)
 {
-    for (usize i = 0; str[i] != '\0'; ++i)
-        put(str[i]);
+    sync::ScopedLock guard(g_console_lock);
+    write_locked(str);
     update_cursor();
 }
 
 void printf(const char* fmt, ...)
 {
+    sync::ScopedLock guard(g_console_lock);
     va_list args;
     va_start(args, fmt);
 
     for (usize i = 0; fmt[i] != '\0'; ++i) {
         if (fmt[i] != '%') {
-            put(fmt[i]);
+            put_locked(fmt[i]);
             continue;
         }
 
@@ -335,23 +361,23 @@ void printf(const char* fmt, ...)
                          16, true, width, pad);
             break;
         case 'p':
-            write("0x");
+            write_locked("0x");
             put_unsigned(reinterpret_cast<u64>(va_arg(args, void*)), 16, false, 16, '0');
             break;
         case 'c':
-            put(static_cast<char>(va_arg(args, int)));
+            put_locked(static_cast<char>(va_arg(args, int)));
             break;
         case 's': {
             const char* s = va_arg(args, const char*);
-            write(s != nullptr ? s : "(null)");
+            write_locked(s != nullptr ? s : "(null)");
             break;
         }
         case '%':
-            put('%');
+            put_locked('%');
             break;
         default:
-            put('%');
-            put(fmt[i]);
+            put_locked('%');
+            put_locked(fmt[i]);
             break;
         }
     }

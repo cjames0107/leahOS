@@ -40,8 +40,8 @@ void init(u32 slot, u32 apic_id)
     // kernel code can always read gs: without asking where it came from.
     g_slot_by_apic[apic_id & 0xFF] = static_cast<u8>(slot);
 
-    // GS still carries the block for anything that wants the fast path later,
-    // but nothing depends on it yet: ring 3 resets the base on every entry.
+    // GS carries the block for a future SYSCALL stub that reaches it through
+    // SWAPGS. Nothing reads it that way yet - see set_syscall_stack below.
     cpu::write_msr(kIa32GsBase, reinterpret_cast<u64>(&cpu));
     cpu::write_msr(kIa32KernelGsBase, 0);
 }
@@ -58,5 +58,22 @@ void set_active(u32 s) { g_active_slot = s; }
 u32  active()          { return g_active_slot; }
 
 Cpu& current() { return g_cpus[active()]; }
+
+// The stack SYSCALL lands on. This is still a single global inside
+// syscall_entry.asm, which is correct only because one CPU runs user tasks: the
+// stub has no free register on entry (RSP still points into user memory), so
+// reaching a per-CPU block needs SWAPGS - and SWAPGS is only sound once *every*
+// entry from ring 3 does it, interrupts included, and every exit undoes it. Half
+// of that discipline is worse than none: a task first entered through IRETQ
+// inherits the kernel's GS, and its next syscall swaps in a zero base and writes
+// to address 0x10. Doing it properly is the prerequisite for an application
+// processor running user code.
+extern "C" void set_syscall_stack(u64 rsp);
+
+void set_syscall_stack_for_this_cpu(u64 rsp)
+{
+    g_cpus[active()].syscall_stack = rsp;
+    set_syscall_stack(rsp);
+}
 
 } // namespace percpu

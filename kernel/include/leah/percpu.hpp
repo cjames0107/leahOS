@@ -39,4 +39,10 @@ u32  slot();
 void set_active(u32 slot);
 u32  active();
 
+// Record the kernel stack SYSCALL switches to on this CPU. Kept per CPU here,
+// and also written to the global the entry stub still reads - see the comment
+// on the definition for why that global has to go before an application
+// processor can run user code.
+void set_syscall_stack_for_this_cpu(u64 rsp);
+
 } // namespace percpu

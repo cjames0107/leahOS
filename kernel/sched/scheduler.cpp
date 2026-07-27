@@ -14,7 +14,6 @@
 // Implemented in context.asm, user_entry.asm and syscall_entry.asm.
 extern "C" void context_switch(u64* save_rsp, u64 load_rsp);
 extern "C" void user_return();
-extern "C" void set_syscall_stack(u64 rsp);
 
 namespace scheduler {
 namespace {
@@ -88,6 +87,17 @@ u32& current_index() { return g_current_by_cpu[percpu::active()]; }
 u32  idle_index()    { return g_idle_by_cpu[percpu::active()]; }
 
 Task* current() { return &g_tasks[current_index()]; }
+
+// Every entry into the scheduler has to be serialised, not only the ones that
+// arrive through a syscall or an interrupt. A kernel thread calling yield() or
+// exit_current(), or the boot path spawning a task, reaches this code with no
+// lock held at all - and on more than one CPU that is a race over the task
+// table. The lock is recursive per CPU, so taking it again inside a syscall
+// that already holds it costs nothing.
+struct KernelLock {
+    KernelLock()  { sync::bkl::acquire(); }
+    ~KernelLock() { sync::bkl::release(); }
+};
 
 Task* find(u32 pid)
 {
@@ -218,7 +228,7 @@ void switch_to(u32 next_index)
     // interrupt handler that blocks keeps its state on a stack no other task
     // will reuse.
     gdt::set_kernel_stack(percpu::active(), next->kernel_stack_top);
-    set_syscall_stack(next->kernel_stack_top);
+    percpu::set_syscall_stack_for_this_cpu(next->kernel_stack_top);
     vmm::switch_address_space(next->space != 0 ? next->space : vmm::kernel_space());
 
     // The kernel lock travels with the task, not the CPU: save what this one
@@ -281,6 +291,7 @@ void init()
 
 u32 spawn(const char* name, Entry entry, void* arg)
 {
+    KernelLock lock;
     cpu::InterruptGuard guard;
 
     Task* task = alloc_slot();
@@ -312,6 +323,7 @@ u32 spawn(const char* name, Entry entry, void* arg)
 u32 spawn_user(const char* name, vmm::AddressSpace space,
                const TrapFrame& frame, u32 parent_pid)
 {
+    KernelLock lock;
     cpu::InterruptGuard guard;
 
     Task* task = alloc_slot();
@@ -351,6 +363,7 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
 
 u32 spawn_thread(const TrapFrame& frame)
 {
+    KernelLock lock;
     cpu::InterruptGuard guard;
 
     Task* self = current();
@@ -428,6 +441,7 @@ void start_idle_for(u32 cpu_slot)
 {
     if (cpu_slot >= kMaxCpuSlots)
         return;
+    KernelLock lock;
     const u32 pid = spawn("idle", idle_entry, nullptr);
     for (u32 i = 0; i < g_task_count; ++i) {
         if (g_tasks[i].pid == pid) {
@@ -441,6 +455,7 @@ void start_idle() { start_idle_for(0); }
 
 [[noreturn]] void enter_scheduler_on_this_cpu()
 {
+    sync::bkl::acquire();
     cpu::cli();
 
     // Adopt this CPU's idle task before doing anything that could switch away.
@@ -469,12 +484,14 @@ void start_idle() { start_idle_for(0); }
 
 void yield()
 {
+    KernelLock lock;
     cpu::InterruptGuard guard;
     switch_to(pick_next());
 }
 
 void block_on(u64 channel)
 {
+    KernelLock lock;
     // Caller holds interrupts off, so no wake can slip in between the check that
     // led here and this block.
     current()->wait_channel = channel;
@@ -485,6 +502,7 @@ void block_on(u64 channel)
 
 void wake(u64 channel)
 {
+    KernelLock lock;
     for (u32 i = 0; i < g_task_count; ++i) {
         if (g_tasks[i].state == State::Blocked && g_tasks[i].wait_channel == channel) {
             g_tasks[i].state = State::Ready;
@@ -495,6 +513,7 @@ void wake(u64 channel)
 
 u32 wake_n(u64 channel, u32 limit)
 {
+    KernelLock lock;
     u32 woken = 0;
     for (u32 i = 0; i < g_task_count && woken < limit; ++i) {
         if (g_tasks[i].state == State::Blocked && g_tasks[i].wait_channel == channel) {
@@ -508,6 +527,7 @@ u32 wake_n(u64 channel, u32 limit)
 
 u32 fork_current(const TrapFrame& parent_user)
 {
+    KernelLock lock;
     cpu::InterruptGuard guard;
 
     Task* parent = current();
@@ -551,6 +571,9 @@ u32 fork_current(const TrapFrame& parent_user)
 
 void exit_current(i32 code)
 {
+    // Acquired and never released here: the task is going away, and the lock
+    // passes to whatever runs next through the handoff in switch_to.
+    sync::bkl::acquire();
     cpu::cli();
 
     Task* self = current();
@@ -588,6 +611,7 @@ void exit_current(i32 code)
 
 i64 wait_child(i32* status)
 {
+    KernelLock lock;
     for (;;) {
         cpu::InterruptGuard guard;
 

@@ -77,13 +77,21 @@ extern "C" [[noreturn]] void ap_main()
     __atomic_add_fetch(&g_online, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&g_handshake, 1, __ATOMIC_SEQ_CST);
 
-    // Parked, still. Everything an AP needs to *run* is now in place - its own
-    // GDT and TSS, a per-CPU slot, a kernel lock that hands off across context
-    // switches, TLB shootdown - and four processors do interleave real work when
-    // this is switched on. What is not yet right is the handoff between that
-    // lock and the idle loop: the deadlock it produces moves when timing
-    // changes, which is exactly the class of bug that must not be shipped.
-    // scheduler::enter_scheduler_on_this_cpu() is the one line to re-enable.
+    // Parked. Everything an application processor needs in order to run tasks
+    // is now in place and verified - its own GDT and TSS, its own SYSCALL stack
+    // reached through SWAPGS, a kernel lock that hands off across context
+    // switches, TLB shootdown, a locked console - and switching the two lines
+    // below back on does start all of them scheduling.
+    //
+    // What is not right yet is work distribution: with several CPUs a worker
+    // can sit Ready and never be picked, and a task that never runs never sees
+    // a stop flag, so it never exits either. That is a scheduling-policy bug
+    // rather than a locking one, and it is not worth shipping around.
+    //
+    //   apic::start_timer(interrupts::kIrqBase + interrupts::kIrqTimer,
+    //                     timer::kFrequencyHz);
+    //   scheduler::start_idle_for(slot);
+    //   scheduler::enter_scheduler_on_this_cpu();
     for (;;)
         asm volatile("cli; hlt");
 }
@@ -156,8 +164,9 @@ usize cpu_count() { return g_cpu_count; }
 
 bool multiprocessor() { return g_cpu_count > 1; }
 
-// Flipped on when the application processors join the scheduler. They do not
-// yet - see the comment in ap_main - so this is false and shootdowns stay off.
+// False while the APs are parked: a halted processor with interrupts off can
+// never acknowledge a shootdown, and gating on the CPU count instead made every
+// unmap wait out the full timeout.
 bool scheduling() { return false; }
 
 } // namespace smp

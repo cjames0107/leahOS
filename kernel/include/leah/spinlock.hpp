@@ -38,6 +38,18 @@ private:
     volatile u32 m_locked = 0;
 };
 
+// RAII: take on construction, drop on scope exit.
+class ScopedLock {
+public:
+    explicit ScopedLock(Spinlock& lock) : m_lock(lock) { m_lock.acquire(); }
+    ~ScopedLock() { m_lock.release(); }
+    ScopedLock(const ScopedLock&) = delete;
+    ScopedLock& operator=(const ScopedLock&) = delete;
+
+private:
+    Spinlock& m_lock;
+};
+
 // --- the big kernel lock ----------------------------------------------------
 //
 // One lock around every entry into the kernel: syscalls and interrupts. Coarse

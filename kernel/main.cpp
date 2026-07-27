@@ -608,9 +608,19 @@ void self_test_scheduler()
     // among the workers. If preemption were broken this would spin forever, so
     // it is bounded; the bound is generous because TCG advances guest time
     // slowly under a full load of spinning threads.
+    // Wait for a long enough interleave *and* for every worker to have run.
+    // On one CPU round-robin guaranteed the second once the first held; with
+    // several CPUs a couple of workers can ping-pong enough to satisfy the
+    // interleave while another has not been scheduled at all - and a worker
+    // that never runs never sees the stop flag, so it never exits either.
     bool ok = false;
     for (u64 i = 0; i < 20'000'000'000ull; ++i) {
-        if (g_interleave_len >= 12) {
+        bool every_worker_ran = true;
+        for (usize w = 0; w < kWorkers; ++w) {
+            if (g_work_counter[w] == 0)
+                every_worker_ran = false;
+        }
+        if (g_interleave_len >= 12 && every_worker_ran) {
             ok = true;
             break;
         }
@@ -620,7 +630,7 @@ void self_test_scheduler()
     g_work_stop = true;
     // Wait for the workers specifically, not for the machine to fall idle:
     // every CPU has its own idle task, so "one task left" is never true again.
-    for (u64 i = 0; i < 100'000'000ull && scheduler::alive_count() > baseline; ++i)
+    for (u64 i = 0; i < 3'000'000ull && scheduler::alive_count() > baseline; ++i)
         scheduler::yield();
 
     if (!ok)
