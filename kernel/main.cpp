@@ -1,4 +1,5 @@
 #include <leah/acpi.hpp>
+#include <leah/ahci.hpp>
 #include <leah/apic.hpp>
 #include <leah/ata.hpp>
 #include <leah/blockdev.hpp>
@@ -214,6 +215,64 @@ void self_test_disk()
 
     kfree(back);
     kfree(out);
+}
+
+// The same shape as the ATA check: write a pattern well clear of anything that
+// matters, read it back through the controller, and compare. A DMA path can
+// fail in ways PIO cannot - a wrong physical address in the scatter/gather
+// table reads back someone else's memory rather than erroring - so the
+// round trip is the check that counts.
+void self_test_ahci()
+{
+    if (ahci::drive_count() == 0)
+        return;
+
+    constexpr u32 kSectors = 8;
+    constexpr u64 kScratchLba = 64;
+    const usize bytes = kSectors * ahci::kSectorSize;
+
+    auto* out  = static_cast<u8*>(kmalloc(bytes));
+    auto* back = static_cast<u8*>(kmalloc(bytes));
+    if (out == nullptr || back == nullptr)
+        panic("ahci: out of memory for the self-test");
+
+    for (usize i = 0; i < bytes; ++i)
+        out[i] = static_cast<u8>(i * 13 + 7);
+
+    if (!ahci::write(0, kScratchLba, kSectors, out))
+        panic("ahci: DMA write failed");
+
+    memset(back, 0, bytes);
+    if (!ahci::read(0, kScratchLba, kSectors, back))
+        panic("ahci: DMA read failed");
+    if (memcmp(out, back, bytes) != 0)
+        panic("ahci: what came back is not what was written");
+
+    kfree(back);
+    kfree(out);
+
+    // A transfer larger than one DMA buffer, so the chunking loop runs more
+    // than once and the second chunk's LBA has to be right.
+    constexpr u32 kBigSectors = 200;        // the buffer holds 128
+    const usize big_bytes = kBigSectors * ahci::kSectorSize;
+    auto* big = static_cast<u8*>(kmalloc(big_bytes));
+    auto* big_back = static_cast<u8*>(kmalloc(big_bytes));
+    if (big == nullptr || big_back == nullptr)
+        panic("ahci: out of memory for the large-transfer test");
+
+    for (usize i = 0; i < big_bytes; ++i)
+        big[i] = static_cast<u8>(i * 31 + 11);
+
+    if (!ahci::write(0, 1024, kBigSectors, big))
+        panic("ahci: multi-chunk DMA write failed");
+    memset(big_back, 0, big_bytes);
+    if (!ahci::read(0, 1024, kBigSectors, big_back))
+        panic("ahci: multi-chunk DMA read failed");
+    if (memcmp(big, big_back, big_bytes) != 0)
+        panic("ahci: a transfer spanning several chunks did not round trip");
+
+    kfree(big_back);
+    kfree(big);
 }
 
 block::Device* g_disk = nullptr;
@@ -719,6 +778,18 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     ata::init();
     self_test_disk();
     step("ATA drives identified, read-back verified against the loaded kernel");
+
+    // AHCI moves sectors by DMA rather than through the CPU a word at a time.
+    if (ahci::init()) {
+        for (usize i = 0; i < ahci::drive_count(); ++i) {
+            console::printf("  [ ok ] AHCI sd%llu  %llu MiB  %s (DMA)\n",
+                            static_cast<u64>(i),
+                            ahci::sector_count(i) * ahci::kSectorSize / kMiB,
+                            ahci::model(i));
+        }
+        self_test_ahci();
+        step("AHCI read/write verified by DMA round trip");
+    }
 
     cpu::sti();
     step("interrupts enabled");

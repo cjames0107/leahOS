@@ -608,6 +608,32 @@ only root may `chown`, and dropping root is one-way. `id`, `chmod`, `chown` and
 `su` expose it; there is no password file yet, so `su` enforces exactly what the
 kernel does and no more.
 
+## AHCI
+
+The ATA driver moves every sector through the CPU a word at a time — that is
+what PIO means, and it is why reading a megabyte costs a megabyte of `IN`
+instructions. AHCI hands the controller a command list and a scatter/gather
+table in memory and lets it DMA straight to and from RAM: the CPU writes one bit
+to start a transfer and reads one bit to see it finish.
+
+The driver finds the controller by PCI class (mass storage / SATA), takes its
+registers from **BAR5** rather than BAR0, enables bus mastering, and switches
+the controller out of legacy IDE emulation into AHCI mode. Each implemented port
+is checked for a live link and a plain-disk signature, stopped, given its
+command list and FIS receive area, restarted, and identified.
+
+Commands are issued in slot 0 and polled. With one request in flight there is
+nothing for a queue to do, and polling keeps the driver out of the interrupt
+path entirely. A port has to be genuinely idle before its base addresses are
+written — both the command-list and FIS engines actually stopped, not merely
+asked to.
+
+The self-test is a DMA round trip rather than a status check, and deliberately
+so: a wrong physical address in the scatter/gather table does not raise an
+error, it reads back someone else's memory. It also runs a transfer larger than
+the driver's DMA buffer, so the chunking loop executes more than once and the
+second chunk's LBA has to be right.
+
 ## Bringing up the other processors
 
 An x86 machine boots one core. The rest sit halted until the bootstrap
@@ -713,7 +739,7 @@ process still mapped them.
 - [x] a unified ext2/3/4 driver, read and write, extents and indirect blocks
 - [x] an ext4 root filesystem on a second disk, verified with `e2fsck`
 - [ ] exFAT
-- [ ] AHCI with DMA, replacing PIO
+- [x] AHCI with DMA, alongside the PIO ATA driver
 - [x] relocate the kernel to the higher half
 - [x] ELF64 loading from the filesystem
 - [x] ring 3, `syscall`/`sysret`, a first system-call ABI
@@ -744,5 +770,5 @@ process still mapped them.
 - [x] the HPET as a monotonic clock, and a calibrated local APIC timer
 - [x] SMP: application processors brought out of reset into long mode
 - [ ] SMP: a locked scheduler, so those processors can run tasks
-- [ ] AHCI with DMA, TCP and sockets, xHCI
+- [ ] TCP and sockets, xHCI
 - [ ] a password file, and `su` that actually authenticates
