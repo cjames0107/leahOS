@@ -35,15 +35,14 @@ static int tokenize(char* line, char** tokens)
 
 static int read_line(char* buffer, int max)
 {
-    int n = 0;
-    while (n < max - 1) {
-        char c;
-        if (read(0, &c, 1) <= 0)
-            return -1;
-        if (c == '\n')
-            break;
-        buffer[n++] = c;
-    }
+    // One read for the whole line: the console driver cooks it - echoing keys
+    // and applying backspace - and returns at the newline, so line editing lives
+    // in one place rather than being re-implemented here.
+    int n = (int)read(0, buffer, max - 1);
+    if (n <= 0)
+        return -1;
+    if (buffer[n - 1] == '\n')
+        --n;
     buffer[n] = '\0';
     return n;
 }

@@ -195,10 +195,10 @@ i64 read_console(void* buffer, usize count)
     usize n = 0;
     while (n < count) {
         const char c = read_key();
-        if (c == '\b') {
+        if (c == '\b' || c == 0x7F) {       // Backspace, or DEL from some terminals
             if (n > 0) {
                 --n;
-                console::write("\b \b");
+                console::write("\b \b");     // erase: back up, blank, back up
             }
             continue;
         }
