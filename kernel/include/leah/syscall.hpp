@@ -2,6 +2,8 @@
 
 #include <leah/types.hpp>
 
+namespace interrupts { struct Frame; }
+
 // The system call interface, and the machinery to run a program in ring 3.
 //
 // Calls come in through the SYSCALL instruction: number in RAX, arguments in
@@ -84,5 +86,10 @@ constexpr u64 kUserData = 0x18 | 3;
 constexpr u64 kUserFlags = 0x202;       // IF set
 
 void init();
+
+// Deliver a pending signal to a task interrupted in ring 3 by a hardware IRQ,
+// rewriting the frame the ISR is about to IRETQ through. Called from the
+// interrupt dispatcher once the IRQ has been acknowledged.
+void deliver_on_interrupt(interrupts::Frame& frame);
 
 } // namespace syscall

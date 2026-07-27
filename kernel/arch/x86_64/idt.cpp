@@ -5,6 +5,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/syscall.hpp>
 #include <leah/string.hpp>
 
 // Provided by isr.asm: 256 entry points, one per vector.
@@ -143,6 +144,11 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
         // scheduler switch threads: switching before the EOI would leave the
         // PIC holding this line and starve every other thread of timer ticks.
         scheduler::on_irq_return();
+
+        // Last thing before the IRETQ back to ring 3: a signal sent to a task
+        // that never makes syscalls still gets delivered, because the timer
+        // interrupt reaches it here.
+        syscall::deliver_on_interrupt(*frame);
         return;
     }
 

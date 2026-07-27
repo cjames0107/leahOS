@@ -2,6 +2,7 @@
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
 #include <leah/gdt.hpp>
+#include <leah/interrupts.hpp>
 #include <leah/memory.hpp>
 #include <leah/net.hpp>
 #include <leah/pmm.hpp>
@@ -181,49 +182,40 @@ i64 sys_futex(u64 uaddr, u64 op, u64 val)
     }
 }
 
-// What a signal handler's frame leaves on the user stack so sigreturn can put
-// everything back. Saving the whole syscall frame is both simplest and exact:
-// the interrupted context is precisely what the syscall was going to restore.
-struct [[gnu::packed]] SignalContext {
-    Frame frame;
-};
+// The context a handler's frame leaves on the user stack. A signal can arrive
+// at a syscall or at a hardware IRQ, so the saved form is the neutral full
+// register set rather than either entry path's own frame - and restoring it
+// goes out through IRETQ, which can put back RCX and R11 that SYSRET would
+// destroy.
+using SavedContext = scheduler::TrapFrame;
 
-// Rewrite the outgoing user context so it enters `handler` instead of resuming
-// where the syscall left off. The handler's frame is built on the user's own
-// stack: the saved context, then a return address pointing at libc's restorer,
-// which calls sigreturn to undo all of this.
-void deliver_signal(Frame* frame, int signo, u64 handler)
+extern "C" [[noreturn]] void sigreturn_to_user(const SavedContext* frame);
+
+// Build a handler frame on the user's own stack: the saved context, then a
+// return address pointing at libc's restorer, which calls sigreturn to undo all
+// of this. Reports where the handler should start and on what stack.
+bool push_signal_frame(const SavedContext& saved, u64& new_rsp)
 {
-    u64 sp = frame->user_rsp;
+    u64 sp = saved.rsp;
     sp -= 128;                          // skip the SysV red zone
-    sp -= sizeof(SignalContext);
+    sp -= sizeof(SavedContext);
     sp &= ~0xFull;                      // the ABI's 16-byte alignment
 
     const u64 restorer = scheduler::signal_restorer();
-    if (restorer == 0 || !user_range_ok(sp - 8, sizeof(SignalContext) + 8)) {
-        // No way back from the handler: treat it as fatal rather than jumping
-        // into a handler that can never return.
-        scheduler::exit_current(128 + signo);
-        return;
-    }
+    if (restorer == 0 || !user_range_ok(sp - 8, sizeof(SavedContext) + 8))
+        return false;
 
-    auto* context = reinterpret_cast<SignalContext*>(sp);
-    context->frame = *frame;
-
+    *reinterpret_cast<SavedContext*>(sp) = saved;
     sp -= 8;
     *reinterpret_cast<u64*>(sp) = restorer;   // where the handler's RET goes
 
-    frame->user_rsp = sp;
-    frame->user_rip = handler;
-    frame->rdi      = static_cast<u64>(signo);   // handler(int signo)
-    // A handler runs with a clean flags word; the saved copy is what gets
-    // restored, so nothing is lost.
-    frame->user_flags = kUserFlags;
+    new_rsp = sp;
+    return true;
 }
 
 // Called on the way out of every syscall. Takes at most one pending signal per
-// return, which is enough: if more are pending the next syscall (or the
-// restorer's own sigreturn) picks up the next one.
+// return, which is enough: if more are pending the next return picks up the
+// next one.
 void handle_pending_signals(Frame* frame)
 {
     if (!scheduler::signal_pending())
@@ -239,30 +231,65 @@ void handle_pending_signals(Frame* frame)
     if (handler == signals::kSigDefault) {
         if (signals::default_kills(signo))
             scheduler::exit_current(128 + signo);
-        return;                          // the rest default to being ignored
+        return;
     }
-    // SIGKILL is never catchable, whatever the process asked for.
-    if (signo == signals::kSigKill) {
+    if (signo == signals::kSigKill)
+        scheduler::exit_current(128 + signo);
+
+    // RCX and R11 are call-clobbered across a syscall by the ABI, so the
+    // interrupted code cannot depend on them; everything else is exact.
+    SavedContext saved{};
+    saved.r15 = frame->r15; saved.r14 = frame->r14; saved.r13 = frame->r13;
+    saved.r12 = frame->r12; saved.r11 = frame->user_flags;
+    saved.r10 = frame->r10; saved.r9  = frame->r9;  saved.r8  = frame->r8;
+    saved.rbp = frame->rbp; saved.rdi = frame->rdi; saved.rsi = frame->rsi;
+    saved.rdx = frame->rdx; saved.rcx = frame->user_rip;
+    saved.rbx = frame->rbx; saved.rax = frame->rax;
+    saved.rip = frame->user_rip;
+    saved.cs  = kUserCode;
+    saved.rflags = frame->user_flags;
+    saved.rsp = frame->user_rsp;
+    saved.ss  = kUserData;
+
+    u64 new_rsp = 0;
+    if (!push_signal_frame(saved, new_rsp)) {
+        // No way back from the handler: fatal rather than jumping into a
+        // handler that can never return.
         scheduler::exit_current(128 + signo);
         return;
     }
-    deliver_signal(frame, signo, handler);
+
+    frame->user_rsp   = new_rsp;
+    frame->user_rip   = handler;
+    frame->rdi        = static_cast<u64>(signo);   // handler(int signo)
+    frame->user_flags = kUserFlags;
 }
 
-// Restore the context a signal handler interrupted. The user stack pointer is
-// sitting at the saved context, because the handler's RET popped the restorer
-// address that deliver_signal pushed below it.
-i64 sys_sigreturn(Frame* frame)
+// Restore the context a signal handler interrupted, and go straight back to
+// ring 3 through IRETQ rather than the syscall's SYSRET - the saved context may
+// have come from a hardware interrupt, where RCX and R11 hold live values.
+//
+// The saved frame sits in the user's own memory, so every field it controls has
+// to be sanitised: the segment selectors are forced back to ring 3 (or a
+// process could ask to be resumed in ring 0), and RFLAGS is masked down to the
+// arithmetic bits plus a set IF, dropping IOPL and NT.
+[[noreturn]] void sys_sigreturn(Frame* frame)
 {
     const u64 sp = frame->user_rsp;
-    if (!user_range_ok(sp, sizeof(SignalContext)))
-        return -1;
-    const auto* context = reinterpret_cast<const SignalContext*>(sp);
+    if (!user_range_ok(sp, sizeof(SavedContext)))
+        scheduler::exit_current(128 + signals::kSigSegv);
 
-    // Everything the interrupted code had, including the rax the original
-    // syscall was about to return.
-    *frame = context->frame;
-    return static_cast<i64>(frame->rax);
+    SavedContext restored = *reinterpret_cast<const SavedContext*>(sp);
+
+    if (!user_range_ok(restored.rip, 1) || !user_range_ok(restored.rsp, 1))
+        scheduler::exit_current(128 + signals::kSigSegv);
+
+    restored.cs = kUserCode;
+    restored.ss = kUserData;
+    constexpr u64 kSafeFlags = 0x8D5;    // CF PF AF ZF SF DF OF
+    restored.rflags = (restored.rflags & kSafeFlags) | kUserFlags;
+
+    sigreturn_to_user(&restored);
 }
 
 // Start a thread in the calling process: same address space, same open files,
@@ -307,6 +334,58 @@ scheduler::TrapFrame to_trap_frame(const Frame& f)
 }
 
 } // namespace
+
+// Deliver a pending signal to a task that a hardware interrupt caught in ring 3.
+// This is what lets a signal reach a process that is not making syscalls at all
+// - a compute-bound loop is interrupted by the timer, and the handler is spliced
+// in on the way back out. The interrupted context is saved in full, because
+// unlike a syscall an IRQ leaves every register live.
+void deliver_on_interrupt(interrupts::Frame& frame)
+{
+    if ((frame.cs & 3) != 3)
+        return;                          // interrupted the kernel, not userland
+    if (!scheduler::signal_pending())
+        return;
+
+    const int signo = scheduler::signal_take_pending();
+    if (signo == 0)
+        return;
+
+    const u64 handler = scheduler::signal_handler(signo);
+    if (handler == signals::kSigIgnore)
+        return;
+    if (handler == signals::kSigDefault) {
+        if (signals::default_kills(signo))
+            scheduler::exit_current(128 + signo);
+        return;
+    }
+    if (signo == signals::kSigKill)
+        scheduler::exit_current(128 + signo);
+
+    SavedContext saved{};
+    saved.r15 = frame.r15; saved.r14 = frame.r14; saved.r13 = frame.r13;
+    saved.r12 = frame.r12; saved.r11 = frame.r11; saved.r10 = frame.r10;
+    saved.r9  = frame.r9;  saved.r8  = frame.r8;  saved.rbp = frame.rbp;
+    saved.rdi = frame.rdi; saved.rsi = frame.rsi; saved.rdx = frame.rdx;
+    saved.rcx = frame.rcx; saved.rbx = frame.rbx; saved.rax = frame.rax;
+    saved.rip = frame.rip;
+    saved.cs  = kUserCode;
+    saved.rflags = frame.rflags;
+    saved.rsp = frame.rsp;
+    saved.ss  = kUserData;
+
+    u64 new_rsp = 0;
+    if (!push_signal_frame(saved, new_rsp)) {
+        scheduler::exit_current(128 + signo);
+        return;
+    }
+
+    // The IRETQ at the end of the ISR now lands in the handler instead.
+    frame.rsp    = new_rsp;
+    frame.rip    = handler;
+    frame.rdi    = static_cast<u64>(signo);
+    frame.rflags = kUserFlags;
+}
 
 void init()
 {

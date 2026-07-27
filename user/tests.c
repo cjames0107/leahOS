@@ -234,6 +234,52 @@ static void test_signals(void)
     status = 0;
     wait(&status);
     check("SIGKILL cannot be caught", status == 128 + SIGKILL);
+
+    /* Delivery must not depend on the target entering the kernel. This child
+     * spins on a pure computation with no syscall in the loop at all, so the
+     * only way the signal reaches it is the timer interrupt's return path. */
+    pid = fork();
+    if (pid == 0) {
+        volatile unsigned long spin = 0;
+        for (;;)
+            spin = spin * 1664525u + 1013904223u;
+    }
+    kill(pid, SIGTERM);
+    status = 0;
+    wait(&status);
+    check("a signal reaches a process making no syscalls",
+          status == 128 + SIGTERM);
+
+    /* And a caught signal must resume that loop intact: the handler runs, the
+     * IRETQ path restores every register, and the child carries on to exit
+     * normally rather than dying or faulting.
+     *
+     * The pipe is a readiness handshake, not decoration: signalling before the
+     * child has installed its handler would take the default action and kill
+     * it, so the parent waits to be told the handler is in place. */
+    int ready[2];
+    pipe(ready);
+    pid = fork();
+    if (pid == 0) {
+        close(ready[0]);
+        g_caught = 0;               /* fork copied the parent's tally */
+        signal(SIGUSR1, catcher);
+        write(ready[1], "r", 1);
+        close(ready[1]);
+        volatile unsigned long spin = 0;
+        for (int i = 0; i < 5000000 && g_caught == 0; ++i)
+            spin = spin * 1664525u + 1013904223u;
+        exit(g_caught == 1 ? 7 : 8);
+    }
+    close(ready[1]);
+    char ack = 0;
+    read(ready[0], &ack, 1);
+    close(ready[0]);
+
+    kill(pid, SIGUSR1);
+    status = 0;
+    wait(&status);
+    check("a handler interrupts and resumes a compute loop", status == 7);
 }
 
 static void test_permissions(void)

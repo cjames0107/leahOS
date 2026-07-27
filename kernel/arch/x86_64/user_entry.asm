@@ -46,3 +46,21 @@ user_return:
 
     ; RSP now points at the IRETQ frame: RIP, CS, RFLAGS, RSP, SS.
     iretq
+
+; ----------------------------------------------------------------------------
+; sigreturn_to_user - leave a signal handler by the IRETQ path.
+;
+; A signal can interrupt user code at a hardware IRQ as well as at a syscall, so
+; restoring the interrupted context has to put back every register - including
+; RCX and R11, which the SYSRET the syscall path normally returns through would
+; clobber. Switching RSP onto a fully populated TrapFrame and falling into
+; user_return restores the lot with an IRETQ instead.
+;
+; RDI points at a scheduler::TrapFrame the caller has already validated. The
+; kernel stack below it is abandoned, which is fine: the next entry from ring 3
+; starts again from TSS.rsp0.
+; ----------------------------------------------------------------------------
+GLOBAL sigreturn_to_user
+sigreturn_to_user:
+    mov rsp, rdi
+    jmp user_return
