@@ -49,6 +49,10 @@ void block_on(u64 channel);
 // Make every task sleeping on `channel` runnable. Safe to call from an IRQ.
 void wake(u64 channel);
 
+// Wake at most `limit` sleepers on `channel`; returns how many were woken. This
+// is what futex needs: waking one waiter rather than a thundering herd.
+u32 wake_n(u64 channel, u32 limit);
+
 // A user process: its own address space, entered in ring 3 with the given
 // register state the first time it is scheduled. Returns its pid, or 0.
 u32 spawn_user(const char* name, vmm::AddressSpace space,

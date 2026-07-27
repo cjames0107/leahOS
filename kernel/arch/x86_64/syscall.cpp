@@ -148,6 +148,39 @@ i64 sys_munmap(u64 addr, u64 length)
     return 0;
 }
 
+// The one kernel primitive userland locks need: sleep until someone says the
+// word. Everything else - mutexes, condition variables, semaphores - is built
+// on top of it in libc, which is the point: an uncontended lock never enters
+// the kernel at all, and only a thread that actually has to wait pays for a
+// syscall.
+//
+// The address itself is the wait channel. Threads share an address space, so a
+// virtual address identifies the same word for everyone who can contend on it.
+// (Cross-process futexes over shared memory would need the physical address;
+// there is no shared memory yet, so this is exact rather than merely close.)
+i64 sys_futex(u64 uaddr, u64 op, u64 val)
+{
+    if ((uaddr & 3) != 0 || !user_range_ok(uaddr, sizeof(u32)))
+        return -1;                          // must be an aligned user word
+
+    switch (op) {
+    case kFutexWait: {
+        // Re-check under the syscall's masked interrupts: if the value has
+        // already changed, the wakeup we would have waited for has happened,
+        // and blocking now would miss it forever.
+        if (*reinterpret_cast<volatile u32*>(uaddr) != static_cast<u32>(val))
+            return -1;
+        scheduler::block_on(uaddr);
+        return 0;
+    }
+    case kFutexWake:
+        return static_cast<i64>(
+            scheduler::wake_n(uaddr, val == 0 ? 1u : static_cast<u32>(val)));
+    default:
+        return -1;
+    }
+}
+
 // What a signal handler's frame leaves on the user stack so sigreturn can put
 // everything back. Saving the whole syscall frame is both simplest and exact:
 // the interrupted context is precisely what the syscall was going to restore.
@@ -397,6 +430,11 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
 
     case Gettid:
         frame->rax = scheduler::current_tid();
+        break;
+
+    case Futex:
+        frame->rax = static_cast<u64>(
+            sys_futex(frame->rdi, frame->rsi, frame->rdx));
         break;
 
     case Getuid:

@@ -50,6 +50,7 @@ enum Number : u64 {
     Setgid    = 35,
     Chmod     = 36,
     Chown     = 37,
+    Futex     = 38,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.
@@ -59,6 +60,10 @@ constexpr u64 kProtExec  = 4;
 constexpr u64 kMapPrivate   = 0x02;
 constexpr u64 kMapAnonymous = 0x20;
 constexpr u64 kMapFixed     = 0x10;
+
+// futex operations, mirrored in user/libc/include/thread.h.
+constexpr u64 kFutexWait = 0;
+constexpr u64 kFutexWake = 1;
 
 // The register state a syscall handler sees. Field order is a contract with
 // syscall_entry in syscall_entry.asm - do not reorder without editing both.

@@ -413,6 +413,19 @@ void wake(u64 channel)
     }
 }
 
+u32 wake_n(u64 channel, u32 limit)
+{
+    u32 woken = 0;
+    for (u32 i = 0; i < g_task_count && woken < limit; ++i) {
+        if (g_tasks[i].state == State::Blocked && g_tasks[i].wait_channel == channel) {
+            g_tasks[i].state = State::Ready;
+            g_tasks[i].wait_channel = 0;
+            ++woken;
+        }
+    }
+    return woken;
+}
+
 u32 fork_current(const TrapFrame& parent_user)
 {
     cpu::InterruptGuard guard;

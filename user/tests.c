@@ -113,6 +113,61 @@ static void test_threads(void)
     check("the process survived its threads exiting", getpid() == self);
 }
 
+/* A deliberately racy counter: read, yield, write back. Without a lock the
+ * interleaving loses updates; with one the total is exact. */
+static mutex_t g_lock = MUTEX_INIT;
+static volatile int g_guarded;
+static volatile int g_unguarded;
+
+static void locker(void* arg)
+{
+    (void)arg;
+    for (int i = 0; i < 200; ++i) {
+        mutex_lock(&g_lock);
+        int value = g_guarded;
+        yield();              /* widen the window a real race would need */
+        g_guarded = value + 1;
+        mutex_unlock(&g_lock);
+    }
+}
+
+static void racer(void* arg)
+{
+    (void)arg;
+    for (int i = 0; i < 200; ++i) {
+        int value = g_unguarded;
+        yield();
+        g_unguarded = value + 1;
+    }
+}
+
+static void test_mutex(void)
+{
+    printf("thread synchronisation:\n");
+
+    check("an uncontended lock is taken", mutex_trylock(&g_lock) == 0);
+    check("a held lock refuses trylock", mutex_trylock(&g_lock) == -1);
+    mutex_unlock(&g_lock);
+    check("trylock succeeds again after unlock", mutex_trylock(&g_lock) == 0);
+    mutex_unlock(&g_lock);
+
+    g_guarded = 0;
+    for (int i = 0; i < 4; ++i)
+        thread_create(locker, 0);
+    for (int i = 0; i < 4; ++i)
+        thread_join();
+    check("a mutex serialises 4 threads over a shared counter", g_guarded == 800);
+
+    /* The control: the same code without the lock should lose updates. If this
+     * ever came out exact, the test above would be proving nothing. */
+    g_unguarded = 0;
+    for (int i = 0; i < 4; ++i)
+        thread_create(racer, 0);
+    for (int i = 0; i < 4; ++i)
+        thread_join();
+    check("the same loop without a lock does race", g_unguarded < 800);
+}
+
 static volatile int g_caught;
 static volatile int g_caught_signo;
 
@@ -257,6 +312,7 @@ int main(void)
     printf("\nleahOS self-tests\n\n");
     test_mmap();
     test_threads();
+    test_mutex();
     test_signals();
     test_permissions();
     printf("\n%d failure(s)\n", g_failures);
