@@ -22,6 +22,8 @@ IMG     := $(DIST)/leahos.img
 EXT_IMG := $(DIST)/ext.img
 # A third disk behind an AHCI controller, to exercise the DMA path.
 SATA_IMG := $(DIST)/sata.img
+# A USB disk behind the xHCI controller, for the mass-storage driver.
+USB_IMG  := $(DIST)/usb.img
 DIST_ELF := $(DIST)/leahos.elf
 SERIAL  := $(DIST)/serial.log
 QEMU_LOG := $(DIST)/qemu.log
@@ -103,7 +105,7 @@ STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
 
 .PHONY: all image run headless debug gdb toolchain clean help
-all: $(IMG) $(EXT_IMG) $(SATA_IMG)
+all: $(IMG) $(EXT_IMG) $(SATA_IMG) $(USB_IMG)
 image: $(IMG)
 
 # --- bootloader -------------------------------------------------------------
@@ -212,6 +214,10 @@ $(SATA_IMG): | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=16 status=none
 	@echo "sata:   $@ (16 MiB, blank, for the AHCI DMA test)"
 
+$(USB_IMG): | $(DIST)
+	@dd if=/dev/zero of=$@ bs=1048576 count=8 status=none
+	@echo "usb:    $@ (8 MiB, blank, for the USB mass-storage test)"
+
 $(BUILD):
 	@mkdir -p $(BUILD)
 
@@ -232,6 +238,10 @@ $(DIST):
 QEMUFLAGS := -machine pc,hpet=on \
              -drive format=raw,file=$(IMG),if=ide \
              -drive format=raw,file=$(EXT_IMG),if=ide \
+             -device qemu-xhci,id=xhci0 \
+             -drive format=raw,file=$(USB_IMG),if=none,id=usbdisk \
+             -device usb-storage,drive=usbdisk,bus=xhci0.0 \
+             -device usb-kbd,bus=xhci0.0 \
              -device ahci,id=sata0 \
              -drive format=raw,file=$(SATA_IMG),if=none,id=satadisk \
              -device ide-hd,drive=satadisk,bus=sata0.0 \
@@ -240,16 +250,16 @@ QEMUFLAGS := -machine pc,hpet=on \
              -no-reboot -no-shutdown \
              $(QEMU_EXTRA)
 
-run: $(IMG) $(EXT_IMG) $(SATA_IMG)
+run: $(IMG) $(EXT_IMG) $(SATA_IMG) $(USB_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio
 
 # Boot with no window, give the kernel TIMEOUT seconds, then print COM1.
-headless: $(IMG) $(EXT_IMG) $(SATA_IMG)
+headless: $(IMG) $(EXT_IMG) $(SATA_IMG) $(USB_IMG)
 	@tools/run-headless.sh $(TIMEOUT)
 
 # Halts before the first instruction and waits for `make gdb` on :1234.
 # int,cpu_reset logging is how you find out which vector triple-faulted.
-debug: $(IMG) $(EXT_IMG) $(SATA_IMG)
+debug: $(IMG) $(EXT_IMG) $(SATA_IMG) $(USB_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio -S -s -d int,cpu_reset -D $(QEMU_LOG)
 
 gdb:

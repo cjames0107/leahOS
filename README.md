@@ -633,6 +633,39 @@ The checksum covers a pseudo-header of the source and destination addresses as
 well as the segment, which is what ties a segment to the addresses that carried
 it; one delivered to the wrong host fails the check rather than being accepted.
 
+## USB
+
+xHCI, and only xHCI. USB went through UHCI, OHCI and EHCI, each with its own
+registers and its own idea of how a transfer is described; xHCI replaced all
+three with one model. The driver builds rings of Transfer Request Blocks in
+memory, rings a doorbell, and reads completions off an event ring — control,
+bulk and interrupt transfers are the same mechanism with a different TRB type.
+
+Bring-up is the device context base address array, a command ring, an event ring
+(reached through a segment table rather than directly), then each populated port
+gets reset, a slot, an addressed device context, and a `GET_DESCRIPTOR`. A
+device class of 0 is the normal case and means "look at the interface", so the
+configuration descriptor is read as well — that is also where the endpoint
+addresses come from.
+
+**Mass storage** is the bulk-only transport: a 31-byte Command Block Wrapper out
+on the bulk endpoint, the data, then a 13-byte status wrapper back. Inside is
+ordinary SCSI — the same `INQUIRY` and `READ(10)` a SATA disk answers. Verified
+by a round trip rather than a status check, like AHCI.
+
+**HID** uses the boot protocol. A HID device normally describes its reports with
+a bytecode descriptor that must be parsed to know what any bit means; boot
+protocol exists to avoid exactly that, and a keyboard in it always sends the
+same eight bytes. `SET_PROTOCOL` puts it there.
+
+One structural point worth stating: an interrupt endpoint **cannot be waited
+on**. A keyboard completes its transfer only when a key changes, so a blocking
+read would hang the console until someone typed. Those transfers are posted and
+collected later, and because the event ring is shared, a completion belonging to
+a posted interrupt transfer is filed against it rather than handed to whichever
+control transfer happens to be waiting — without that, a control transfer
+consumes the keyboard's completion and calls it its own.
+
 ## AHCI
 
 The ATA driver moves every sector through the CPU a word at a time — that is
@@ -772,7 +805,6 @@ process still mapped them.
 - [x] a freestanding libc: crt0, syscall wrappers, string/stdio/malloc
 - [x] per-process address spaces (private page tables, CR3 switch)
 - [x] `fork`, `execve`, `wait`, a process table, an init process
-- [ ] USB: xHCI, then the HID and mass-storage class drivers
 - [x] filesystem syscalls (open/read/write/stat/getdents/chdir…), a per-process fd table
 - [x] a shell and coreutils: ls, cat, echo, pwd
 - [x] more coreutils (cp, mv, rm, mkdir, touch, clear), pipes and redirection
@@ -796,5 +828,6 @@ process still mapped them.
 - [x] SMP: application processors brought out of reset into long mode
 - [ ] SMP: a locked scheduler, so those processors can run tasks
 - [x] TCP and sockets, with `fetch` doing an HTTP GET
-- [ ] xHCI, and the HID and mass-storage class drivers
+- [x] xHCI, with the HID and mass-storage class drivers
+- [ ] USB interrupt transfers driven by the controller's own interrupt
 - [ ] a password file, and `su` that actually authenticates

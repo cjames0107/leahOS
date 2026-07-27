@@ -13,6 +13,11 @@ void init();
 // without depending on the emulator's ability to inject key events.
 void inject_scancode(u8 scancode);
 
+// Feed an already-decoded character into the same buffer. USB keyboards report
+// HID usage codes rather than PS/2 scancodes, so their driver translates and
+// hands the result straight here.
+void inject_char(char c);
+
 // Non-blocking: returns 0 when the buffer is empty.
 char read();
 

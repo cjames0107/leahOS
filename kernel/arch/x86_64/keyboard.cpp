@@ -186,6 +186,14 @@ void on_key(interrupts::Frame&)
 
 } // namespace
 
+void inject_char(char c)
+{
+    if (c == 0)
+        return;
+    push(c);
+    scheduler::wake(scheduler::kKeyboardChannel);
+}
+
 void inject_scancode(u8 scancode)
 {
     handle_scancode(scancode);

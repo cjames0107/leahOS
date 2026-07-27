@@ -33,6 +33,9 @@
 #include <leah/string.hpp>
 #include <leah/vfs.hpp>
 #include <leah/vmm.hpp>
+#include <leah/usb_hid.hpp>
+#include <leah/usb_storage.hpp>
+#include <leah/xhci.hpp>
 
 namespace boot {
 
@@ -274,6 +277,36 @@ void self_test_ahci()
 
     kfree(big_back);
     kfree(big);
+}
+
+// The same round-trip check the AHCI disk gets. A storage stack that reports
+// success without moving the right bytes is the failure worth catching, and
+// SCSI over bulk endpoints has plenty of places to lose them.
+void self_test_usb_storage()
+{
+    if (usb::storage::drive_count() == 0)
+        return;
+
+    constexpr u32 kSectors = 4;
+    const usize bytes = kSectors * usb::storage::kSectorSize;
+    auto* out  = static_cast<u8*>(kmalloc(bytes));
+    auto* back = static_cast<u8*>(kmalloc(bytes));
+    if (out == nullptr || back == nullptr)
+        panic("usb: out of memory for the self-test");
+
+    for (usize i = 0; i < bytes; ++i)
+        out[i] = static_cast<u8>(i * 23 + 5);
+
+    if (!usb::storage::write(0, 16, kSectors, out))
+        panic("usb: SCSI write failed");
+    memset(back, 0, bytes);
+    if (!usb::storage::read(0, 16, kSectors, back))
+        panic("usb: SCSI read failed");
+    if (memcmp(out, back, bytes) != 0)
+        panic("usb: what came back is not what was written");
+
+    kfree(back);
+    kfree(out);
 }
 
 block::Device* g_disk = nullptr;
@@ -813,6 +846,34 @@ extern "C" void kernel_main(const boot::Info* boot_info)
         }
         self_test_ahci();
         step("AHCI read/write verified by DMA round trip");
+    }
+
+    if (xhci::init()) {
+        console::printf("  [ ok ] xHCI up, %llu device(s) enumerated\n",
+                        static_cast<u64>(xhci::device_count()));
+        for (usize i = 0; i < xhci::device_count(); ++i) {
+            const xhci::Device& d = xhci::device_at(i);
+            console::printf("    usb%llu  port %u  %04x:%04x  class %02x\n",
+                            static_cast<u64>(i), d.port, d.vendor, d.product,
+                            d.device_class);
+        }
+
+        if (usb::storage::init() > 0) {
+            for (usize i = 0; i < usb::storage::drive_count(); ++i) {
+                console::printf("  [ ok ] USB disk %llu  %llu MiB  %s\n",
+                                static_cast<u64>(i),
+                                usb::storage::sector_count(i) *
+                                    usb::storage::kSectorSize / kMiB,
+                                usb::storage::model(i));
+            }
+            self_test_usb_storage();
+            step("USB mass storage verified by SCSI read/write round trip");
+        }
+
+        if (usb::hid::init() > 0) {
+            console::printf("  [ ok ] USB HID: %llu keyboard(s) in boot protocol\n",
+                            static_cast<u64>(usb::hid::keyboard_count()));
+        }
     }
 
     cpu::sti();
