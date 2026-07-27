@@ -160,10 +160,11 @@ tools/          run-headless.sh, mkfs_fat32.py
 ## Status
 
 Boots to long mode, owns its descriptor tables, handles interrupts, manages
-physical and virtual memory, enumerates PCI, reads and writes ATA disks, and
-mounts a FAT32 filesystem it reads and writes. It loads ELF programs and runs
-them in ring 3 over a `SYSCALL` ABI — as processes in their own private address
-spaces — and time-slices them with a preemptive scheduler. Processes `fork`,
+physical and virtual memory, enumerates PCI, and reads and writes ATA disks. It
+mounts an **ext4 root filesystem** (a unified ext2/3/4 driver, read and write)
+and still reads and writes FAT32. It loads ELF programs and runs them in ring 3
+over a `SYSCALL` ABI — as processes in their own private address spaces — and
+time-slices them with a preemptive scheduler. Processes `fork`,
 `execve` and `wait`, open files through a per-process descriptor table, and run
 an interactive **shell** with real commands (`ls`, `cat`, `echo`, `pwd`, `cp`,
 `mv`, `rm`, and more), pipes and redirection. An **e1000 NIC driver** and a
@@ -278,6 +279,43 @@ The check that matters is external: after the kernel has written to the volume,
 count being maintained from zero instead of seeded from disk — a bug the
 kernel's own read-back tests could never have found, because it read its own
 wrong answer back consistently.
+
+## ext filesystem
+
+`fs::Ext` is a single driver for the whole ext2/3/4 family, which share one
+on-disk format: ext3 is ext2 plus a journal, and ext4 adds extent-mapped files.
+It is the **root filesystem**, on a second disk (whole-disk ext4, no partition
+table); disk 0 stays the bootable/kernel disk and the FAT32 fallback. ext is the
+root because, unlike FAT32, its inodes carry real ownership and mode bits — the
+groundwork for users and permissions.
+
+The **reader** is deliberately broad, verified booting against a volume built
+with every hard feature on: the journal inode is skipped, `dir_index`/HTree
+directories are read by scanning their leaf blocks (the index is just an
+optimisation the linear entries stay valid under), 64-bit group descriptors and
+metadata checksums are handled or ignored as needed, and file blocks are mapped
+both ways — extent trees (ext4) and classic 12-direct-plus-indirect (ext2/3).
+
+The **writer** targets a deliberately tamed feature set, built by
+`tools/mkext.sh` with `-O ^metadata_csum,^64bit,^dir_index,^orphan_file`. Each
+dropped feature is one the writer would otherwise have to maintain on every
+change: crc32c over all metadata, 64-byte descriptors, an HTree index on
+directory insert, and the orphan-inode list. Extents and the journal stay on, so
+it is a genuine ext4 volume; the journal is simply left empty (consistent direct
+metadata updates, no transactions). The writer allocates inodes and blocks from
+the group bitmaps, keeps the group-descriptor and superblock free counts exact,
+grows files by appending to an inline extent, and inserts and removes linear
+directory entries by splitting and coalescing `rec_len`.
+
+One subtlety cost a debugging round: a freed inode has to be left *pristine*
+(the whole slot zeroed, as mke2fs leaves unused inodes), not as a half-cleared
+"deleted" inode with its extent and size intact — otherwise `e2fsck`'s orphan
+recovery collects it as a corrupted orphan.
+
+As with FAT32, the check that matters is external: `tools/fsck-ext.sh` boots
+once with a persistent disk and then runs `e2fsck -fn`, which must report the
+volume clean after the kernel's writes. Building and checking images needs
+`e2fsprogs` (`brew install e2fsprogs`).
 
 ## Disk image
 
@@ -551,7 +589,9 @@ DNS answer needs both. Everything is verified against QEMU's user-mode network
 - [x] VBE mode set in stage 2, linear framebuffer console
 - [ ] APIC + HPET, retiring the PIC and PIT
 - [x] VFS layer and FAT32, read and write, including long filenames
-- [ ] exFAT and ext2/3/4
+- [x] a unified ext2/3/4 driver, read and write, extents and indirect blocks
+- [x] an ext4 root filesystem on a second disk, verified with `e2fsck`
+- [ ] exFAT
 - [ ] AHCI with DMA, replacing PIO
 - [x] relocate the kernel to the higher half
 - [x] ELF64 loading from the filesystem

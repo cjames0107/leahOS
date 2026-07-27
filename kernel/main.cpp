@@ -344,85 +344,93 @@ void self_test_fs()
 }
 
 // Writing is where a filesystem gets to corrupt itself, so this covers the
-// cases that actually allocate: a fresh file, one that outgrows a cluster, a
-// name needing long filename entries, a subdirectory, and deletion.
-[[maybe_unused]] void self_test_fs_write()
+// cases that actually allocate on ext: a fresh inode, a file that spans several
+// blocks (its extent has to grow), a subdirectory with its "." and ".." set up,
+// and deletion returning inodes and blocks to the bitmaps. tools/fsck-ext.sh
+// then has e2fsck confirm the volume is still consistent afterwards.
+void self_test_fs_write()
 {
-    // Be idempotent: a persistent disk (from `make run` or a previous boot) may
-    // still hold this test's directory from last time, and create() of an
-    // existing directory is meant to fail. Files are recreated with
-    // write_entire_file, which already replaces them, so only the directory
-    // needs clearing up front.
+    // Be idempotent: fsck-ext.sh runs on a persistent disk, so a previous boot
+    // may have left these behind and create() of an existing name must fail.
     vfs::Stat leftover{};
     if (vfs::stat("/OUT/nested.txt", leftover))
         vfs::remove("/OUT/nested.txt");
     if (vfs::stat("/OUT", leftover))
         vfs::remove("/OUT");
 
-    // Small file, short name, exercises the lowercase-flag path.
     static const char kSmall[] = "written by leahOS\n";
     if (!vfs::write_entire_file("/wrote.txt", kSmall, sizeof(kSmall) - 1))
-        panic("fat32: could not create /wrote.txt");
+        panic("ext: could not create /wrote.txt");
 
     u64 size = 0;
     char* back = vfs::read_entire_file("/wrote.txt", &size);
     if (back == nullptr || size != sizeof(kSmall) - 1 ||
         memcmp(back, kSmall, size) != 0)
-        panic("fat32: /wrote.txt did not read back as written");
+        panic("ext: /wrote.txt did not read back as written");
     kfree(back);
 
-    // Several clusters, so allocation and chain linking both have to work.
+    // Several 4 KiB blocks, so block allocation and extent growth both run.
     constexpr usize kBigSize = 9000;
     auto* big = static_cast<u8*>(kmalloc(kBigSize));
     if (big == nullptr)
-        panic("fat32: out of memory for the write test");
+        panic("ext: out of memory for the write test");
     for (usize i = 0; i < kBigSize; ++i)
         big[i] = static_cast<u8>(i * 31 + 7);
 
     if (!vfs::write_entire_file("/BIG.BIN", big, kBigSize))
-        panic("fat32: could not write a multi-cluster file");
+        panic("ext: could not write a multi-block file");
 
     auto* big_back = static_cast<u8*>(kmalloc(kBigSize));
     if (big_back == nullptr)
-        panic("fat32: out of memory verifying the write test");
+        panic("ext: out of memory verifying the write test");
     if (vfs::read("/BIG.BIN", 0, big_back, kBigSize) != static_cast<isize>(kBigSize))
-        panic("fat32: short read on a file we just wrote");
+        panic("ext: short read on a file we just wrote");
     if (memcmp(big, big_back, kBigSize) != 0)
-        panic("fat32: multi-cluster write did not round trip");
+        panic("ext: multi-block write did not round trip");
     kfree(big_back);
     kfree(big);
 
-    // A name that cannot be expressed as 8.3, so create() must emit LFN
-    // entries and then find them again.
-    static const char kLongText[] = "long names survive a round trip\n";
-    if (!vfs::write_entire_file("/a-file-written-with-a-long-name.txt",
-                                kLongText, sizeof(kLongText) - 1))
-        panic("fat32: could not create a file with a long name");
-
-    char* long_back = vfs::read_entire_file("/a-file-written-with-a-long-name.txt", &size);
-    if (long_back == nullptr || size != sizeof(kLongText) - 1)
-        panic("fat32: long-named file did not read back");
-    kfree(long_back);
-
-    // Directory creation, including its "." and ".." entries.
+    // Directory creation, including its "." and ".." entries, and a file in it.
     if (!vfs::create("/OUT", vfs::Type::Directory))
-        panic("fat32: could not create a directory");
+        panic("ext: could not create a directory");
     if (!vfs::write_entire_file("/OUT/nested.txt", kSmall, sizeof(kSmall) - 1))
-        panic("fat32: could not write inside a created directory");
+        panic("ext: could not write inside a created directory");
 
-    // Deletion, and the space coming back.
+    char* nested = vfs::read_entire_file("/OUT/nested.txt", &size);
+    if (nested == nullptr || size != sizeof(kSmall) - 1)
+        panic("ext: file in a created directory did not read back");
+    kfree(nested);
+
+    // Deletion, and the inode/blocks coming back to the bitmaps.
     if (!vfs::write_entire_file("/temp.txt", kSmall, sizeof(kSmall) - 1))
-        panic("fat32: could not create the file to be deleted");
+        panic("ext: could not create the file to be deleted");
     if (!vfs::remove("/temp.txt"))
-        panic("fat32: remove failed");
-
+        panic("ext: remove failed");
     vfs::Stat gone{};
     if (vfs::stat("/temp.txt", gone))
-        panic("fat32: a removed file is still there");
+        panic("ext: a removed file is still there");
 
     // A non-empty directory must refuse to disappear and orphan its contents.
     if (vfs::remove("/OUT"))
-        panic("fat32: removed a directory that still had a file in it");
+        panic("ext: removed a directory that still had a file in it");
+
+    // Rename is a re-link, no data copy: move the nested file up a level.
+    if (!vfs::rename("/OUT/nested.txt", "/moved.txt"))
+        panic("ext: rename failed");
+    if (vfs::stat("/OUT/nested.txt", gone))
+        panic("ext: rename left the source behind");
+    char* moved = vfs::read_entire_file("/moved.txt", &size);
+    if (moved == nullptr || size != sizeof(kSmall) - 1 ||
+        memcmp(moved, kSmall, size) != 0)
+        panic("ext: renamed file did not read back");
+    kfree(moved);
+
+    // Clean up so a persistent re-run starts fresh and e2fsck sees no leftovers
+    // beyond a consistent volume.
+    vfs::remove("/moved.txt");
+    vfs::remove("/OUT");
+    vfs::remove("/wrote.txt");
+    vfs::remove("/BIG.BIN");
 }
 
 void print_filesystem()
@@ -668,8 +676,8 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     self_test_fs();
     step("ext4 root mounted, read path verified");
 
-    // The ext write path is not implemented yet; self_test_fs_write() still
-    // targets FAT32 and is re-enabled against ext in the next checkpoint.
+    self_test_fs_write();
+    step("ext4 write path verified (create, extent grow, mkdir, remove, rename)");
 
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");

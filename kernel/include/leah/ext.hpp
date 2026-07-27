@@ -46,6 +46,7 @@ private:
         u16 links;
         u64 size;
         u32 flags;
+        u32 i_blocks;       // 512-byte sectors the file occupies (e2fsck checks it)
         u32 block[15];      // raw i_block: direct/indirect pointers or extents
     };
 
@@ -59,6 +60,9 @@ private:
     bool write_block(u64 block, const void* buffer) const;
 
     bool read_inode(u32 number, Inode& out) const;
+
+    // Where inode `number` sits: its containing block and byte offset within it.
+    bool inode_location(u32 number, u64& block, u32& offset) const;
 
     // Copy a block-group descriptor (m_desc_size bytes) into desc.
     bool read_group_desc(u32 group, u8* desc) const;
@@ -77,6 +81,34 @@ private:
     // missing.
     bool resolve(const char* path, Inode& out) const;
 
+    // --- write path --------------------------------------------------------
+
+    bool write_inode(const Inode& inode) const;    // patch the fields we manage
+
+    // Superblock and group-descriptor free-count bookkeeping. e2fsck's pass 5
+    // recomputes these from the bitmaps, so they must stay exact.
+    bool write_superblock() const;
+    bool write_group_desc(u32 group, const u8* desc) const;
+
+    u64  alloc_block();
+    void free_block(u64 block);
+    u32  alloc_inode(bool is_dir);                 // returns inode number, 0 on fail
+    void free_inode(u32 number, bool was_dir);
+
+    // Append a physical block to an extent-mapped inode's inline extent list.
+    bool add_extent(Inode& inode, u32 logical, u64 phys) const;
+    // Map `logical`, allocating and mapping a block if it is not present yet.
+    u64  ensure_block(Inode& inode, u64 logical);
+    void free_inode_blocks(const Inode& inode);    // free every data block
+
+    // Linear directory maintenance.
+    bool dir_insert(Inode& dir, const char* name, u32 child, u8 type);
+    u32  dir_remove(Inode& dir, const char* name); // returns the removed inode
+    bool dir_is_empty(const Inode& dir) const;
+
+    // Split a path into its parent directory (resolved) and final component.
+    bool resolve_parent(const char* path, Inode& parent, char* name, usize name_cap) const;
+
     block::Device* m_device = nullptr;
     u32  m_block_size = 0;
     u32  m_sectors_per_block = 0;
@@ -86,9 +118,14 @@ private:
     u32  m_first_data_block = 0;
     u32  m_group_count = 0;
     u32  m_desc_size = 0;           // block-group descriptor size (32 or 64)
+    u32  m_first_ino = 0;           // first non-reserved inode
     u32  m_feature_incompat = 0;
     bool m_has_filetype = false;    // dir entries carry a file-type byte
     char m_label[17] = {};
+
+    // The superblock, cached so the free-count fields can be updated and flushed
+    // without a read-modify-write of the on-disk copy each time.
+    u8   m_sb[1024] = {};
 };
 
 } // namespace fs

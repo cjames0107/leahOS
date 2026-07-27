@@ -261,7 +261,8 @@ help:
 	@echo '  make clean'
 	@echo
 	@echo 'Final artifacts land in $(DIST)/:'
-	@echo '  leahos.img   bootable disk (MBR + kernel + FAT32 partition)'
+	@echo '  leahos.img   bootable disk 0 (MBR + kernel + FAT32 partition)'
+	@echo '  ext.img      disk 1, the ext4 root filesystem (needs e2fsprogs)'
 	@echo '  leahos.elf   kernel with symbols, for make gdb'
 	@echo '  serial.log   COM1 capture from the last run'
 	@echo

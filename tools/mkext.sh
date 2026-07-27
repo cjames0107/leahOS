@@ -59,7 +59,7 @@ dd if=/dev/zero of="$OUT" bs=1048576 count="$SIZE_MIB" status=none
 # breadth images that exercise the harder reader paths (64bit descriptors,
 # HTree directories, metadata checksums, 1 KiB blocks). The default is the tamed
 # set the kernel's writer targets.
-MKE2FS_FEATURES="${MKE2FS_FEATURES:-^metadata_csum,^64bit,^dir_index}"
+MKE2FS_FEATURES="${MKE2FS_FEATURES:-^metadata_csum,^64bit,^dir_index,^orphan_file}"
 MKE2FS_BLOCK="${MKE2FS_BLOCK:-4096}"
 MKE2FS_INODE="${MKE2FS_INODE:-256}"
 
