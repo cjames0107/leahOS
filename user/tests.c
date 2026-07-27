@@ -409,6 +409,61 @@ static void test_permissions(void)
     unlink("/perm.txt");
 }
 
+static void test_accounts(void)
+{
+    printf("accounts and authentication:\n");
+
+    char name[32] = {};
+    check("uid 0 resolves to root",
+          username(0, name) == 0 && strcmp(name, "root") == 0);
+    check("uid 1000 resolves to leah",
+          username(1000, name) == 0 && strcmp(name, "leah") == 0);
+    check("an unknown uid has no account", username(4242, name) != 0);
+
+    /* The interesting half has to run in a child: dropping out of root is a
+     * one-way door for the process that does it. */
+    int pid = fork();
+    if (pid == 0) {
+        int fails = 0;
+        char home[128] = {};
+
+        /* Root is not asked for a password, and lands in leah's home. */
+        if (login("leah", 0, home) != 0)              fails |= 1;
+        if (getuid() != 1000)                          fails |= 2;
+        if (strcmp(home, "/home/leah") != 0)           fails |= 4;
+
+        /* Now unprivileged: the shadow file must be unreadable. */
+        if (open("/etc/shadow", O_RDONLY) >= 0)        fails |= 8;
+        /* ...but the public half is fine. */
+        if (open("/etc/passwd", O_RDONLY) < 0)         fails |= 16;
+
+        /* A wrong password fails and changes nothing. */
+        if (login("root", "not-the-password", home) == 0) fails |= 32;
+        if (getuid() != 1000)                          fails |= 64;
+
+        /* An unknown account fails too. */
+        if (login("nosuchuser", "whatever", home) == 0) fails |= 128;
+
+        /* And the right password works. */
+        if (login("root", "toor", home) != 0)          fails |= 256;
+        if (getuid() != 0)                             fails |= 512;
+
+        exit(fails > 255 ? 255 : fails);   /* exit status is a byte */
+    }
+    int status = 0;
+    wait(&status);
+    check("root becomes another user without a password", (status & 1) == 0);
+    check("the new uid takes effect", (status & 2) == 0);
+    check("login reports the home directory", (status & 4) == 0);
+    check("a normal user cannot read the shadow file", (status & 8) == 0);
+    check("but can read the public passwd file", (status & 16) == 0);
+    check("a wrong password is refused", (status & 32) == 0);
+    check("a refused login leaves credentials alone", (status & 64) == 0);
+    check("an unknown account is refused", (status & 128) == 0);
+    /* The last two share the truncated bit, so check the child got that far. */
+    check("the correct password is accepted", status != 255);
+}
+
 static void test_tcp(void)
 {
     printf("tcp:\n");
@@ -468,6 +523,7 @@ int main(void)
     test_cow();
     test_signals();
     test_permissions();
+    test_accounts();
     test_tcp();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;

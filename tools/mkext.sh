@@ -45,6 +45,9 @@ printf 'Notes live in a subdirectory.\n' > "$STAGING/docs/notes.txt"
     printf '\n'
 } > "$STAGING/README.MD"
 
+# Accounts, home directories and the shadow file.
+python3 "$(dirname "$0")/mkaccounts.py" "$STAGING"
+
 # Requested files (the user programs).
 for pair in "$@"; do
     dest="${pair%%=*}"
@@ -67,5 +70,29 @@ MKE2FS_INODE="${MKE2FS_INODE:-256}"
 "$MKE2FS" -q -F -t ext4 -b "$MKE2FS_BLOCK" -I "$MKE2FS_INODE" \
     -O "$MKE2FS_FEATURES" \
     -d "$STAGING" "$OUT" >/dev/null
+
+# mke2fs -d copies the *host* ownership, which is whoever built the image - so
+# fix up the things whose owner is part of the point. debugfs writes inode
+# fields directly; sif is "set inode field".
+DEBUGFS="$E2_DIR/debugfs"
+if [ -x "$DEBUGFS" ]; then
+    {
+        # The shadow file must be unreadable to anyone but root. Nothing in
+        # userland reads it anyway - the kernel does - but a world-readable
+        # hash file would undo the point of hashing.
+        echo "sif /etc/shadow uid 0"
+        echo "sif /etc/shadow gid 0"
+        echo "sif /etc/shadow mode 0100600"
+        echo "sif /etc/passwd mode 0100644"
+        echo "sif /root uid 0"
+        echo "sif /root mode 040700"
+        echo "sif /home/leah uid 1000"
+        echo "sif /home/leah gid 1000"
+        echo "sif /home/leah/readme.txt uid 1000"
+        echo "sif /home/guest uid 1001"
+        echo "sif /home/guest gid 1001"
+        echo "sif /home/guest/readme.txt uid 1001"
+    } | "$DEBUGFS" -w "$OUT" >/dev/null 2>&1
+fi
 
 echo "ext4:   $OUT ($SIZE_MIB MiB, block $MKE2FS_BLOCK), populated from $(($#)) files + fixtures"

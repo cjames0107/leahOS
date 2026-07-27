@@ -733,6 +733,13 @@ bool set_current_gid(u32 gid)
     return true;
 }
 
+void set_credentials(u32 uid, u32 gid)
+{
+    Task* self = current();
+    self->uid = uid;
+    self->gid = gid;
+}
+
 u32 current_tid()  { return current()->pid; }
 u32 current_tgid() { return current()->tgid; }
 

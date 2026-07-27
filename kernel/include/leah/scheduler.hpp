@@ -85,6 +85,12 @@ u32  current_gid();
 bool set_current_uid(u32 uid);
 bool set_current_gid(u32 gid);
 
+// Set both unconditionally, bypassing the rule that only root may change them.
+// The one legitimate caller is the authentication path, which has just proved
+// the caller knows the account's password - that check *is* the authorisation,
+// and applying the ordinary rule on top would make a correct password fail.
+void set_credentials(u32 uid, u32 gid);
+
 // --- signals ----------------------------------------------------------------
 //
 // Delivery happens on the way out of a syscall, which is the one place the

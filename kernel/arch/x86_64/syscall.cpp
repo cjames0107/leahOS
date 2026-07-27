@@ -1,3 +1,4 @@
+#include <leah/accounts.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
@@ -530,6 +531,60 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             files::tcp_connect(static_cast<u32>(frame->rdi),
                                static_cast<u16>(frame->rsi)));
         break;
+
+    case Login: {
+        // The password is copied in and the account file is read here, so the
+        // hash never enters a user process - which is what lets su work without
+        // being setuid and without a world-readable shadow file.
+        if (!user_range_ok(frame->rdi, 1)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        char user[accounts::kMaxName] = {};
+        char password[128] = {};
+        char home[accounts::kMaxHome] = {};
+
+        const char* user_in = reinterpret_cast<const char*>(frame->rdi);
+        usize n = 0;
+        while (n < sizeof(user) - 1 && user_in[n] != '\0') { user[n] = user_in[n]; ++n; }
+
+        if (frame->rsi != 0 && user_range_ok(frame->rsi, 1)) {
+            const char* pw_in = reinterpret_cast<const char*>(frame->rsi);
+            usize m = 0;
+            while (m < sizeof(password) - 1 && pw_in[m] != '\0') {
+                password[m] = pw_in[m];
+                ++m;
+            }
+        }
+
+        const bool ok = accounts::login(user, frame->rsi != 0 ? password : nullptr,
+                                        home, sizeof(home));
+        if (ok && frame->rdx != 0 && user_range_ok(frame->rdx, sizeof(home)))
+            memcpy(reinterpret_cast<void*>(frame->rdx), home, sizeof(home));
+        // Wipe the copy rather than leave a password lying in kernel memory.
+        memset(password, 0, sizeof(password));
+        frame->rax = static_cast<u64>(ok ? 0 : -1);
+        break;
+    }
+
+    case SetEcho:
+        files::set_console_echo(frame->rdi != 0);
+        frame->rax = 0;
+        break;
+
+    case UserName: {
+        if (!user_range_ok(frame->rsi, 1)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        char name[accounts::kMaxName] = {};
+        const bool ok = accounts::lookup_uid(static_cast<u32>(frame->rdi), name,
+                                             sizeof(name));
+        if (ok)
+            memcpy(reinterpret_cast<void*>(frame->rsi), name, sizeof(name));
+        frame->rax = static_cast<u64>(ok ? 0 : -1);
+        break;
+    }
 
     case Getuid:
         frame->rax = scheduler::current_uid();

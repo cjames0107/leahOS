@@ -56,6 +56,9 @@ enum Number : u64 {
     Connect   = 39,   // TCP: open a connection, returns an fd
     SockSend  = 40,
     SockRecv  = 41,
+    Login     = 42,   // authenticate and switch credentials
+    SetEcho   = 43,   // console echo, off while a password is typed
+    UserName  = 44,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

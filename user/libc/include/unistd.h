@@ -31,6 +31,18 @@ unsigned getgid(void);
 int      setuid(unsigned uid);
 int      setgid(unsigned gid);
 
+/* Authenticate as `user` and, on success, become them. The password is checked
+ * inside the kernel against a shadow file no user process can read, so this
+ * needs no setuid bit. Pass a null password as root, which is not asked for one.
+ * `home` receives the account's home directory. Returns 0, or -1. */
+int login(const char* user, const char* password, char* home);
+
+/* Console echo, off while a password is being typed. */
+void setecho(int on);
+
+/* The account name for a uid. Returns 0, or -1 when there is no such account. */
+int username(unsigned uid, char* name_out);
+
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2

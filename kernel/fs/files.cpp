@@ -182,6 +182,8 @@ int alloc_fd()
 // A blocking, echoing read from the keyboard, one line's worth at most. Echoing
 // here is what makes the shell usable: the user sees what they type, and
 // backspace erases on screen.
+bool g_echo = true;
+
 char read_key()
 {
     // Sleep the task (letting others run) until a key is buffered, then take it.
@@ -203,11 +205,13 @@ i64 read_console(void* buffer, usize count)
         if (c == '\b' || c == 0x7F) {       // Backspace, or DEL from some terminals
             if (n > 0) {
                 --n;
-                console::write("\b \b");     // erase: back up, blank, back up
+                if (g_echo)
+                    console::write("\b \b");   // erase: back up, blank, back up
             }
             continue;
         }
-        console::put(c);        // echo
+        if (g_echo)
+            console::put(c);        // echo
         out[n++] = c;
         if (c == '\n')
             break;
@@ -216,6 +220,11 @@ i64 read_console(void* buffer, usize count)
 }
 
 } // namespace
+
+// Echo is suppressed while a password is being typed. It lives here rather
+// than in the console because it is a property of reading the terminal, not of
+// writing to it.
+void set_console_echo(bool on) { g_echo = on; }
 
 void init_table(Table& t)
 {

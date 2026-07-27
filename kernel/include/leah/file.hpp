@@ -68,6 +68,7 @@ i64 getcwd(char* buffer, usize size);
 i64 mkdir(const char* path);
 i64 unlink(const char* path);
 i64 tcp_connect(u32 ip, u16 port);
+void set_console_echo(bool on);
 i64 chmod(const char* path, u16 mode);
 i64 chown(const char* path, u32 uid, u32 gid);
 i64 rename(const char* old_path, const char* new_path);

@@ -758,6 +758,42 @@ hypothetical — QEMU disables the HPET by default, and the first boot after
 masking the PIC hung precisely because calibration had nothing to measure
 against.
 
+## Accounts and authentication
+
+There are real accounts now — `root`, `leah` and `guest` — each with a uid, a
+gid and a home directory, and a password that has to be right.
+
+**The kernel does the checking.** A conventional UNIX keeps hashes in
+`/etc/shadow`, readable only by root, and lets an unprivileged `su` reach them
+by being setuid-root. There is no setuid-on-exec here, and making the hashes
+world-readable to work around that would give away the very thing worth
+protecting. So authentication is a syscall: the kernel reads the shadow file
+with the privileges it already has, checks the password, and switches the
+caller's credentials only if it matches. The password crosses the syscall
+boundary and no further, and no user process ever holds a hash. `su` needs no
+special permissions at all.
+
+`/etc/passwd` stays world-readable and holds only the public half — names, ids,
+home directories.
+
+**Hashing** is salted and stretched: `sha256(salt || password)` re-hashed 4096
+times. SHA-256 is written out in `kernel/lib/sha256.cpp` because there is no
+library to borrow one from, and it is checked at boot against the published
+digest for `"abc"` — a hash that is subtly wrong still looks like a hash, and
+would silently make every stored password unverifiable. The salt stops two users
+with the same password sharing a digest; the repetition is what makes a guess
+cost something. It is not memory-hard, so it is weaker than bcrypt against an
+attacker with hardware — that is the honest limit of what fits here.
+
+Two details that are easy to get wrong and were: the credential switch after a
+successful login has to **bypass** the ordinary "only root may setuid" rule, or
+a correct password is authenticated and then refused; and digests are compared
+in constant time, since returning early on the first differing byte leaks how
+much of a guess was right.
+
+Passwords are in `tools/mkaccounts.py`, written down rather than pretended to be
+secret: `root`/`toor`, `leah`/`leah`, `guest`/`guest`.
+
 ## Copy-on-write
 
 `fork` used to deep-copy every page of the parent's address space. Now both
@@ -836,4 +872,5 @@ process still mapped them.
 - [x] TCP and sockets, with `fetch` doing an HTTP GET
 - [x] xHCI, with the HID and mass-storage class drivers
 - [ ] USB interrupt transfers driven by the controller's own interrupt
-- [ ] a password file, and `su` that actually authenticates
+- [x] a password file, `su` that authenticates, and per-user home directories
+- [ ] `login` at boot, so the shell starts unauthenticated

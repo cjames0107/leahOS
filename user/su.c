@@ -1,45 +1,63 @@
-/* Switch to another uid and run a shell as that user.
+/* su - become another user, after proving you are allowed to.
  *
- * There are no passwords yet - there is no password file to check one against -
- * so this only enforces what the kernel enforces: root may become anyone, and
- * anyone else is refused. */
+ * The password is checked by the kernel, not here: it reads the shadow file
+ * with its own privileges and switches this process's credentials only if the
+ * password matches. That is why su needs no setuid bit and why no user process
+ * ever holds a password hash.
+ *
+ * Root is not asked for a password. It can already become anyone by other
+ * means, so demanding one would be theatre rather than security.
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
-static int parse_uint(const char* text, unsigned* out)
+/* Read a line with the terminal not echoing it. */
+static int read_password(char* out, int max)
 {
-    unsigned value = 0;
-    if (*text == '\0')
+    printf("Password: ");
+    setecho(0);
+    int n = (int)read(0, out, max - 1);
+    setecho(1);
+    printf("\n");                   /* the user's Enter was not echoed either */
+
+    if (n <= 0)
         return -1;
-    for (; *text != '\0'; ++text) {
-        if (*text < '0' || *text > '9')
-            return -1;
-        value = value * 10 + (unsigned)(*text - '0');
-    }
-    *out = value;
-    return 0;
+    if (out[n - 1] == '\n')
+        --n;
+    out[n] = '\0';
+    return n;
 }
 
 int main(int argc, char** argv)
 {
-    unsigned uid = 0;
     if (argc > 2) {
-        printf("usage: su [uid]\n");
+        printf("usage: su [user]\n");
         return 1;
     }
-    if (argc == 2 && parse_uint(argv[1], &uid) < 0) {
-        printf("su: bad uid '%s'\n", argv[1]);
+    const char* user = argc == 2 ? argv[1] : "root";
+
+    char password[128] = {};
+    const int need_password = getuid() != 0;
+    if (need_password && read_password(password, sizeof(password)) < 0) {
+        printf("su: could not read a password\n");
         return 1;
     }
 
-    if (setuid(uid) < 0) {
-        printf("su: permission denied\n");
+    char home[128] = {};
+    if (login(user, need_password ? password : 0, home) < 0) {
+        /* Deliberately vague: saying which of the two was wrong tells an
+         * attacker which usernames exist. */
+        printf("su: authentication failed\n");
         return 1;
     }
+    memset(password, 0, sizeof(password));
 
-    printf("su: now uid %u\n", uid);
+    if (home[0] != '\0' && chdir(home) < 0)
+        printf("su: no home directory %s\n", home);
+
     char* sh[] = { "sh", 0 };
     execve("/BIN/SH.ELF", sh, 0);
     printf("su: could not start a shell\n");
