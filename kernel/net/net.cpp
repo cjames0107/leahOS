@@ -1,6 +1,8 @@
 #include <leah/console.hpp>
+#include <leah/cpu.hpp>
 #include <leah/e1000.hpp>
 #include <leah/net.hpp>
+#include <leah/scheduler.hpp>
 #include <leah/string.hpp>
 
 namespace net {
@@ -13,9 +15,15 @@ constexpr u16 kArpRequest = 1;
 constexpr u16 kArpReply   = 2;
 
 constexpr u8 kProtoIcmp = 1;
+constexpr u8 kProtoUdp  = 17;
 
 constexpr u8 kIcmpEchoReply   = 0;
 constexpr u8 kIcmpEchoRequest = 8;
+
+// QEMU's user-mode network runs a DNS proxy at 10.0.2.3 that forwards to the
+// host resolver.
+constexpr u32 kDnsIp   = 0x0A000203;
+constexpr u16 kDnsPort = 53;
 
 const u8 kBroadcast[kMacLength] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 
@@ -58,6 +66,13 @@ struct [[gnu::packed]] IcmpHeader {
     u16 seq;            // network order
 };
 
+struct [[gnu::packed]] UdpHeader {
+    u16 src_port;       // network order
+    u16 dst_port;
+    u16 length;
+    u16 checksum;
+};
+
 // A tiny ARP cache. A handful of entries is plenty for a gateway plus a peer
 // or two.
 struct ArpEntry {
@@ -79,6 +94,12 @@ u16  g_ping_id   = 0;
 u16  g_ping_seq  = 0;
 bool g_ping_seen = false;
 u8   g_ping_ttl  = 0;
+
+// State for the in-flight DNS query the resolve() loop is waiting on.
+u16  g_dns_id       = 0;
+u16  g_dns_src_port = 0;
+bool g_dns_seen     = false;
+u32  g_dns_result   = 0;
 
 void cache_put(u32 ip, const u8* mac)
 {
@@ -216,6 +237,114 @@ void handle_icmp(u32 src_ip, u8 ttl, const u8* data, u16 length)
     }
 }
 
+// Send a UDP datagram. The checksum is left zero, which IPv4 explicitly permits
+// ("not computed") and every receiver must accept - it saves carrying a
+// pseudo-header here.
+bool send_udp(u32 dst_ip, u16 src_port, u16 dst_port, const void* payload, u16 len)
+{
+    u8 datagram[sizeof(UdpHeader) + 512];
+    if (len > sizeof(datagram) - sizeof(UdpHeader))
+        return false;
+
+    auto* udp = reinterpret_cast<UdpHeader*>(datagram);
+    udp->src_port = hton16(src_port);
+    udp->dst_port = hton16(dst_port);
+    udp->length   = hton16(static_cast<u16>(sizeof(UdpHeader) + len));
+    udp->checksum = 0;
+    memcpy(datagram + sizeof(UdpHeader), payload, len);
+
+    return send_ip(dst_ip, kProtoUdp, datagram, static_cast<u16>(sizeof(UdpHeader) + len));
+}
+
+// Encode "www.example.com" as DNS labels: 3www7example3com0. Returns the length
+// written, or 0 if the name is malformed or too long.
+usize dns_encode_name(const char* host, u8* out)
+{
+    usize pos = 0;
+    const char* label = host;
+    while (*label != '\0') {
+        const char* dot = label;
+        while (*dot != '\0' && *dot != '.')
+            ++dot;
+        const usize label_len = static_cast<usize>(dot - label);
+        if (label_len == 0 || label_len > 63 || pos + 1 + label_len >= 254)
+            return 0;
+        out[pos++] = static_cast<u8>(label_len);
+        for (usize i = 0; i < label_len; ++i)
+            out[pos++] = static_cast<u8>(label[i]);
+        label = (*dot == '.') ? dot + 1 : dot;
+    }
+    out[pos++] = 0;
+    return pos;
+}
+
+// Step over a DNS name at `pos`, following the label lengths and stopping at a
+// compression pointer (which terminates the name). Returns the offset just past
+// the name, or 0 if it runs off the message.
+usize dns_skip_name(const u8* msg, u16 len, usize pos)
+{
+    while (pos < len) {
+        const u8 b = msg[pos];
+        if (b == 0)
+            return pos + 1;
+        if ((b & 0xC0) == 0xC0)
+            return pos + 2;                 // pointer: two bytes, name ends here
+        pos += 1 + b;
+    }
+    return 0;
+}
+
+void handle_dns(const u8* msg, u16 len)
+{
+    if (len < 12)
+        return;
+    const u16 id = static_cast<u16>(msg[0] << 8 | msg[1]);
+    if (id != g_dns_id)
+        return;
+
+    const u16 questions = static_cast<u16>(msg[4] << 8 | msg[5]);
+    const u16 answers   = static_cast<u16>(msg[6] << 8 | msg[7]);
+
+    usize pos = 12;
+    for (u16 q = 0; q < questions; ++q) {
+        pos = dns_skip_name(msg, len, pos);
+        if (pos == 0 || pos + 4 > len)
+            return;
+        pos += 4;                           // QTYPE + QCLASS
+    }
+
+    for (u16 a = 0; a < answers; ++a) {
+        pos = dns_skip_name(msg, len, pos);
+        if (pos == 0 || pos + 10 > len)
+            return;
+        const u16 type   = static_cast<u16>(msg[pos] << 8 | msg[pos + 1]);
+        const u16 rdlen  = static_cast<u16>(msg[pos + 8] << 8 | msg[pos + 9]);
+        pos += 10;
+        if (pos + rdlen > len)
+            return;
+        if (type == 1 && rdlen == 4) {      // an A record: the address we want
+            g_dns_result = static_cast<u32>(msg[pos]) << 24 |
+                           static_cast<u32>(msg[pos + 1]) << 16 |
+                           static_cast<u32>(msg[pos + 2]) << 8 |
+                           static_cast<u32>(msg[pos + 3]);
+            g_dns_seen = true;
+            return;
+        }
+        pos += rdlen;
+    }
+    g_dns_seen = true;                      // a reply arrived, just no A record
+}
+
+void handle_udp(u32 src_ip, const u8* data, u16 length)
+{
+    if (length < sizeof(UdpHeader))
+        return;
+    const auto* udp = reinterpret_cast<const UdpHeader*>(data);
+    if (src_ip == kDnsIp && ntoh16(udp->dst_port) == g_dns_src_port)
+        handle_dns(data + sizeof(UdpHeader),
+                   static_cast<u16>(length - sizeof(UdpHeader)));
+}
+
 void handle_ip(const u8* frame, u16 length)
 {
     if (length < sizeof(EthHeader) + sizeof(IpHeader))
@@ -237,6 +366,8 @@ void handle_ip(const u8* frame, u16 length)
 
     if (ip->protocol == kProtoIcmp)
         handle_icmp(ntoh32(ip->src), ip->ttl, l4, l4_len);
+    else if (ip->protocol == kProtoUdp)
+        handle_udp(ntoh32(ip->src), l4, l4_len);
 }
 
 // Delivered by the NIC's poll loop for every received frame.
@@ -303,6 +434,12 @@ bool arp_resolve(u32 ip, u8* mac_out)
     if (arp_lookup(ip, mac_out))
         return true;
 
+    // Hold the poll loop on this CPU: nothing else drains the NIC, so being
+    // scheduled away mid-wait would strand the reply in the ring. Interrupts are
+    // enabled so the timer can wake the hlt (a syscall enters with them masked).
+    scheduler::NoPreemption no_preempt;
+    cpu::InterruptEnableGuard irq;
+
     // Request, then poll the NIC's receive ring for the reply. Each hlt yields
     // to QEMU's host-side network backend (a busy-poll starves it and nothing is
     // ever delivered); the reply then lands in the ring for the next poll. The
@@ -355,12 +492,58 @@ bool ping(u32 dst, u16 seq, u8* ttl_out)
     if (!send_ip(dst, kProtoIcmp, packet, sizeof(packet)))
         return false;
 
+    scheduler::NoPreemption no_preempt;
+    cpu::InterruptEnableGuard irq;
     // Poll for the reply, yielding to the host between reads (see arp_resolve).
     for (int i = 0; i < 2000; ++i) {
         e1000::poll();
         if (g_ping_seen) {
             if (ttl_out != nullptr)
                 *ttl_out = g_ping_ttl;
+            return true;
+        }
+        asm volatile("hlt");
+    }
+    return false;
+}
+
+bool resolve(const char* host, u32* out_ip)
+{
+    u8 query[300];
+    query[0] = 0x4C; query[1] = 0x4F;       // transaction id
+    query[2] = 0x01; query[3] = 0x00;       // flags: recursion desired
+    query[4] = 0x00; query[5] = 0x01;       // one question
+    query[6] = query[7] = query[8] = query[9] = query[10] = query[11] = 0;
+
+    const usize name_len = dns_encode_name(host, query + 12);
+    if (name_len == 0)
+        return false;
+    usize pos = 12 + name_len;
+    query[pos++] = 0x00; query[pos++] = 0x01;   // QTYPE  = A
+    query[pos++] = 0x00; query[pos++] = 0x01;   // QCLASS = IN
+
+    g_dns_id       = 0x4C4F;
+    g_dns_src_port = 0xC000;                 // any ephemeral port
+    g_dns_seen     = false;
+    g_dns_result   = 0;
+
+    scheduler::NoPreemption no_preempt;
+    cpu::InterruptEnableGuard irq;
+    // Poll for the reply as elsewhere (see arp_resolve), resending periodically
+    // in case a datagram is lost. On success this returns as soon as the reply
+    // lands; the budget only bounds how long an unanswered query waits.
+    for (int i = 0; i < 250; ++i) {
+        if (i % 80 == 0) {
+            if (!send_udp(kDnsIp, g_dns_src_port, kDnsPort, query,
+                          static_cast<u16>(pos)))
+                return false;
+        }
+        e1000::poll();
+        if (g_dns_seen) {
+            if (g_dns_result == 0)
+                return false;               // reply held no A record
+            if (out_ip != nullptr)
+                *out_ip = g_dns_result;
             return true;
         }
         asm volatile("hlt");

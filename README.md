@@ -167,10 +167,11 @@ spaces — and time-slices them with a preemptive scheduler. Processes `fork`,
 `execve` and `wait`, open files through a per-process descriptor table, and run
 an interactive **shell** with real commands (`ls`, `cat`, `echo`, `pwd`, `cp`,
 `mv`, `rm`, and more), pipes and redirection. An **e1000 NIC driver** and a
-small **IPv4 stack** (Ethernet, ARP, ICMP) bring up networking, with `ifconfig`,
-`arp` and `ping` talking to QEMU's virtual network. User programs are C linked
-against leahOS's own libc. Faults produce a register dump instead of a silent
-reset.
+small **IPv4 stack** (Ethernet, ARP, ICMP, UDP, and a minimal DNS resolver)
+bring up networking, with `ifconfig`, `arp`, `ping` and `nslookup` talking to
+QEMU's virtual network — `ping example.com` resolves and reaches the host. User
+programs are C linked against leahOS's own libc. Faults produce a register dump
+instead of a silent reset.
 
 ## Memory management
 
@@ -516,11 +517,23 @@ guest's virtual timer fast-forwards across a `hlt`, so waits are counted in poll
 iterations rather than timer ticks.
 
 On top of the driver sits a small IPv4 stack in `kernel/net/`: Ethernet framing,
-an ARP cache with request/reply, IPv4 with the RFC 1071 checksum, and ICMP echo
-(it answers pings and can send them). Off-subnet destinations are routed via the
-gateway. Three syscalls expose it to userland — `netinfo`, `ping` and `arp` —
-behind the `ifconfig`, `ping` and `arp` commands. Everything is verified against
-QEMU's user-mode network (guest `10.0.2.15`, gateway `10.0.2.2`).
+an ARP cache with request/reply, IPv4 with the RFC 1071 checksum, ICMP echo (it
+answers pings and can send them), and UDP carrying a minimal DNS resolver that
+asks QEMU's DNS proxy for A records. Off-subnet destinations are routed via the
+gateway. Syscalls expose it to userland — `netinfo`, `ping`, `arp` and
+`resolve` — behind the `ifconfig`, `ping`, `arp` and `nslookup` commands; `ping`
+takes a hostname as well as a dotted quad.
+
+One wrinkle is worth calling out, because it cost some debugging. These
+operations block in the kernel, polling the ring until a reply arrives, and a
+`SYSCALL` enters with interrupts masked (the FMASK MSR clears `IF`) — so a naive
+`hlt` in the wait loop would never wake. Each wait therefore both **disables
+preemption** (nothing else drains the NIC, so being scheduled away mid-wait
+would strand the reply) and **re-enables interrupts** (so the timer can wake the
+`hlt`). A synchronous reply such as an ICMP echo hides the problem — QEMU injects
+it during the send, before the loop ever halts — but an asynchronous one like a
+DNS answer needs both. Everything is verified against QEMU's user-mode network
+(guest `10.0.2.15`, gateway `10.0.2.2`, DNS `10.0.2.3`).
 
 ## Roadmap
 
@@ -554,5 +567,6 @@ QEMU's user-mode network (guest `10.0.2.15`, gateway `10.0.2.2`).
 - [x] a wait queue: tasks block on I/O instead of spinning
 - [x] higher-half direct map: the low half is user's, programs link at 0x400000
 - [x] `sbrk`-backed `malloc` that grows, and an atomic `rename`/`mv`
-- [x] an e1000 NIC driver and an IPv4 stack: Ethernet, ARP, ICMP
-- [x] network commands: `ifconfig`, `arp`, `ping`
+- [x] an e1000 NIC driver and an IPv4 stack: Ethernet, ARP, ICMP, UDP
+- [x] a minimal DNS resolver, so `ping` and `nslookup` take hostnames
+- [x] network commands: `ifconfig`, `arp`, `ping`, `nslookup`

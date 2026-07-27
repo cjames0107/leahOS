@@ -28,4 +28,8 @@ int arp(uint32_t ip, uint8_t* mac);
  * the text is not a well-formed IPv4 address. */
 int parse_ip(const char* text, uint32_t* out);
 
+/* Resolve a hostname to a host-order IPv4 address over DNS. Returns 0, or -1 on
+ * failure. */
+int resolve(const char* host, uint32_t* ip);
+
 #endif /* _NET_H */

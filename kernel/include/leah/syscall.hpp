@@ -36,6 +36,7 @@ enum Number : u64 {
     Netinfo = 21,
     Ping    = 22,
     Arp     = 23,
+    Resolve = 24,
 };
 
 // The register state a syscall handler sees. Field order is a contract with

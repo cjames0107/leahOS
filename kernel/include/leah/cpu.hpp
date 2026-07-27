@@ -67,4 +67,20 @@ private:
     bool m_was_enabled;
 };
 
+// The inverse of InterruptGuard: enable interrupts for a scope, restoring the
+// previous state on exit. A syscall handler runs with interrupts masked (the
+// SYSCALL FMASK clears IF), so a kernel routine that must halt to wait for a
+// device interrupt - a NIC poll loop - uses this to let the timer wake its hlt.
+class InterruptEnableGuard {
+public:
+    InterruptEnableGuard() : m_was_enabled(interrupts_enabled()) { sti(); }
+    ~InterruptEnableGuard() { if (!m_was_enabled) cli(); }
+
+    InterruptEnableGuard(const InterruptEnableGuard&) = delete;
+    InterruptEnableGuard& operator=(const InterruptEnableGuard&) = delete;
+
+private:
+    bool m_was_enabled;
+};
+
 } // namespace cpu

@@ -28,6 +28,7 @@
 #define SYS_netinfo  21
 #define SYS_ping     22
 #define SYS_arp      23
+#define SYS_resolve  24
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused

@@ -57,6 +57,20 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
 void start_preemption();
 void yield();
 
+// Turn time-slicing off and back on. A kernel routine that must poll a device to
+// completion - draining the NIC while waiting for a network reply - uses this so
+// a timer tick cannot schedule it away mid-wait, which would leave nothing
+// servicing the device. Interrupts stay enabled; only the task switch is held
+// off. Returns the previous state.
+bool set_preemption(bool enabled);
+
+// RAII form: disables preemption for the current scope, restoring what it found.
+struct NoPreemption {
+    bool previous;
+    NoPreemption() : previous(set_preemption(false)) {}
+    ~NoPreemption() { set_preemption(previous); }
+};
+
 // Ends the calling task with an exit code. Does not return. A user task's
 // address space is torn down here; its record lingers as a zombie until the
 // parent reaps it with wait().

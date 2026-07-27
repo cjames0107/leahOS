@@ -64,4 +64,11 @@ void arp_print_cache();
 // ttl_out. Off-subnet destinations are routed via the gateway.
 bool ping(u32 dst, u16 seq, u8* ttl_out);
 
+// --- DNS --------------------------------------------------------------------
+
+// Resolve a hostname to an IPv4 address via QEMU's DNS proxy, running the poll
+// loop internally. Returns true and writes the address (host order) to out_ip
+// on success.
+bool resolve(const char* host, u32* out_ip);
+
 } // namespace net

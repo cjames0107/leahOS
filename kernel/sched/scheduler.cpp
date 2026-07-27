@@ -242,6 +242,13 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
 
 void start_preemption() { g_preemption = true; }
 
+bool set_preemption(bool enabled)
+{
+    const bool previous = g_preemption;
+    g_preemption = enabled;
+    return previous;
+}
+
 namespace {
 
 [[noreturn]] void idle_entry(void*)

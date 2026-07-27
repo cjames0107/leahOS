@@ -234,6 +234,30 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
     }
 
+    case Resolve: {
+        if (!net::available() || !user_range_ok(frame->rdi, 1) ||
+            !user_range_ok(frame->rsi, sizeof(u32))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        // Copy the hostname into the kernel, bounded, so a missing terminator
+        // cannot walk off the end of the user mapping.
+        char host[256];
+        const char* src = reinterpret_cast<const char*>(frame->rdi);
+        usize n = 0;
+        while (n < sizeof(host) - 1 && src[n] != '\0')
+            ++n;
+        memcpy(host, src, n);
+        host[n] = '\0';
+
+        u32 ip = 0;
+        const bool ok = net::resolve(host, &ip);
+        if (ok)
+            *reinterpret_cast<u32*>(frame->rsi) = ip;
+        frame->rax = ok ? 0 : static_cast<u64>(-1);
+        break;
+    }
+
     case Fork:
         frame->rax = scheduler::fork_current(to_trap_frame(*frame));
         break;

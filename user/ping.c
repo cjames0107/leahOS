@@ -4,17 +4,21 @@
 int main(int argc, char** argv)
 {
     if (argc != 2) {
-        printf("usage: ping <ip>\n");
+        printf("usage: ping <host>\n");
         return 1;
     }
 
+    /* Accept a dotted-quad directly, otherwise resolve the name over DNS. */
     uint32_t ip;
     if (parse_ip(argv[1], &ip) < 0) {
-        printf("ping: bad address '%s'\n", argv[1]);
-        return 1;
+        if (resolve(argv[1], &ip) < 0) {
+            printf("ping: cannot resolve '%s'\n", argv[1]);
+            return 1;
+        }
     }
 
-    printf("PING %s: 32 data bytes\n", argv[1]);
+    printf("PING %s (%u.%u.%u.%u): 32 data bytes\n", argv[1],
+           (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 
     int sent = 0;
     int received = 0;
@@ -29,7 +33,9 @@ int main(int argc, char** argv)
         if (result == 0)
             printf("request timed out: icmp_seq=%u\n", seq);
         else {
-            printf("32 bytes from %s: icmp_seq=%u ttl=%u\n", argv[1], seq, ttl);
+            printf("32 bytes from %u.%u.%u.%u: icmp_seq=%u ttl=%u\n",
+                   (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF,
+                   ip & 0xFF, seq, ttl);
             ++received;
         }
     }
