@@ -19,6 +19,10 @@ enum Flags : u64 {
     Dirty        = 1ull << 6,
     Huge         = 1ull << 7,
     Global       = 1ull << 8,
+    // Bits 9-11 are ignored by the CPU and left to the OS. This one marks a
+    // page that several address spaces share read-only and must be copied
+    // before anyone writes to it.
+    CopyOnWrite  = 1ull << 9,
     NoExecute    = 1ull << 63,
 };
 
@@ -63,6 +67,11 @@ AddressSpace fork_address_space(AddressSpace parent);
 // Frees the space's private (user) page tables, the frames they mapped, and the
 // top-level table itself. The shared kernel mappings are left untouched.
 void destroy_address_space(AddressSpace space);
+
+// Handle a write fault on a copy-on-write page: give the faulting space its own
+// private copy and make it writable again. Returns false if `virt` was not a
+// CoW page, in which case the fault is a real one.
+bool handle_cow_fault(vaddr_t virt);
 
 // Make a space active: load CR3 and record it as current. Cheap to call with
 // the already-active space (skips the reload).

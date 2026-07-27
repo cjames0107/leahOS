@@ -6,6 +6,7 @@
 #include <leah/cpu.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/syscall.hpp>
+#include <leah/vmm.hpp>
 #include <leah/string.hpp>
 
 // Provided by isr.asm: 256 entry points, one per vector.
@@ -122,6 +123,19 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
     using namespace interrupts;
 
     const u64 vector = frame->vector;
+
+    if (vector == 14) {
+        // A page fault is not automatically a bug: a write to a shared
+        // copy-on-write page is the normal way a forked process takes private
+        // ownership of a page. Error-code bit 0 says the page was present and
+        // bit 1 that the access was a write - exactly a CoW fault.
+        u64 fault_address;
+        asm volatile("mov %%cr2, %0" : "=r"(fault_address));
+        constexpr u64 kPresent = 1, kWrite = 2;
+        if ((frame->error_code & kPresent) != 0 && (frame->error_code & kWrite) != 0 &&
+            vmm::handle_cow_fault(fault_address))
+            return;                     // resolved: retry the faulting write
+    }
 
     if (vector < 32)
         panic(exception_name(vector), *frame);

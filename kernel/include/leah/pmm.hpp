@@ -34,6 +34,25 @@ paddr_t alloc_contiguous(usize frames);
 void free(paddr_t frame);
 void free_contiguous(paddr_t base, usize frames);
 
+// --- sharing ----------------------------------------------------------------
+//
+// Copy-on-write needs to know when a frame has more than one owner. The table
+// records only the *extra* references, so an ordinary singly-owned frame costs
+// nothing and needs no initialisation: absent means one owner.
+
+// Bring the reference table up, once the heap exists. Until then every frame is
+// singly owned, which is true during boot.
+void init_refcounts();
+
+// Take another reference on a frame. False if the table is full or absent.
+bool share(paddr_t frame);
+
+// Drop a reference, freeing the frame when the last one goes.
+void release(paddr_t frame);
+
+// True when more than one owner holds this frame.
+bool is_shared(paddr_t frame);
+
 u64 total_bytes();      // highest address E820 described, holes included
 u64 highest_usable();   // end of the topmost usable region
 u64 usable_bytes();

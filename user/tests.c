@@ -168,6 +168,61 @@ static void test_mutex(void)
     check("the same loop without a lock does race", g_unguarded < 800);
 }
 
+static void test_cow(void)
+{
+    printf("copy-on-write fork:\n");
+
+    /* A big writable region, filled with a known pattern. After fork both sides
+     * see it, but neither must see the other's writes. */
+    const size_t len = 64 * 4096;
+    unsigned char* page = mmap(0, len, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+        check("mmap for the fork test", 0);
+        return;
+    }
+    for (size_t i = 0; i < len; ++i)
+        page[i] = (unsigned char)(i * 13 + 5);
+
+    int pid = fork();
+    if (pid == 0) {
+        /* The child must first see exactly what the parent wrote... */
+        int inherited = 1;
+        for (size_t i = 0; i < len; ++i) {
+            if (page[i] != (unsigned char)(i * 13 + 5))
+                inherited = 0;
+        }
+        /* ...then scribble over all of it, forcing a private copy of every
+         * shared page, and read its own values back. */
+        for (size_t i = 0; i < len; ++i)
+            page[i] = 0xAA;
+        int privately = 1;
+        for (size_t i = 0; i < len; ++i) {
+            if (page[i] != 0xAA)
+                privately = 0;
+        }
+        exit(inherited && privately ? 0 : 1);
+    }
+    int status = 0;
+    wait(&status);
+    check("a child inherits and can privately rewrite the whole region",
+          status == 0);
+
+    /* The parent's copy must be untouched by everything the child did. */
+    int intact = 1;
+    for (size_t i = 0; i < len; ++i) {
+        if (page[i] != (unsigned char)(i * 13 + 5))
+            intact = 0;
+    }
+    check("the parent's pages are unaffected by the child", intact);
+
+    /* And the parent can still write its own side afterwards. */
+    page[0] = 0x5A;
+    check("the parent can still write after the child exited", page[0] == 0x5A);
+
+    munmap(page, len);
+}
+
 static volatile int g_caught;
 static volatile int g_caught_signo;
 
@@ -359,6 +414,7 @@ int main(void)
     test_mmap();
     test_threads();
     test_mutex();
+    test_cow();
     test_signals();
     test_permissions();
     printf("\n%d failure(s)\n", g_failures);

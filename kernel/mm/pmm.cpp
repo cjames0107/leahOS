@@ -1,5 +1,6 @@
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
+#include <leah/heap.hpp>
 #include <leah/pmm.hpp>
 #include <leah/string.hpp>
 
@@ -212,6 +213,56 @@ void free(paddr_t frame)
     mark_free(index);
     if (index / 64 < g_search_hint)
         g_search_hint = index / 64;
+}
+
+// --- reference counts -------------------------------------------------------
+//
+// One u16 per frame, holding the number of references *beyond the first*. Zero
+// is the common case - a frame with a single owner - so the table needs no
+// initialisation pass and an ordinary alloc/free costs nothing extra.
+
+u16* g_refs = nullptr;
+u64  g_ref_count = 0;
+
+void init_refcounts()
+{
+    if (g_refs != nullptr)
+        return;
+    g_ref_count = g_highest_usable >> kPageShift;
+    auto* table = static_cast<u16*>(kmalloc(g_ref_count * sizeof(u16)));
+    if (table == nullptr)
+        return;                     // no sharing available; fork stays a copy
+    memset(table, 0, g_ref_count * sizeof(u16));
+    g_refs = table;
+}
+
+bool share(paddr_t frame)
+{
+    const u64 index = frame >> kPageShift;
+    if (g_refs == nullptr || index >= g_ref_count)
+        return false;
+    if (g_refs[index] == 0xFFFF)
+        return false;               // saturated: caller must copy instead
+    ++g_refs[index];
+    return true;
+}
+
+bool is_shared(paddr_t frame)
+{
+    const u64 index = frame >> kPageShift;
+    if (g_refs == nullptr || index >= g_ref_count)
+        return false;
+    return g_refs[index] > 0;
+}
+
+void release(paddr_t frame)
+{
+    const u64 index = frame >> kPageShift;
+    if (g_refs != nullptr && index < g_ref_count && g_refs[index] > 0) {
+        --g_refs[index];            // someone else still holds it
+        return;
+    }
+    free(frame);
 }
 
 void free_contiguous(paddr_t base, usize frames)

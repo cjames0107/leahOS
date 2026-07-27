@@ -107,6 +107,16 @@ void init()
     constexpr u32 kIa32Efer = 0xC0000080;
     cpu::write_msr(kIa32Efer, cpu::read_msr(kIa32Efer) | (1ull << 11));
 
+    // CR0.WP makes read-only pages read-only for the *kernel* too. Without it
+    // ring 0 may write through any mapping regardless of its write bit, which
+    // silently defeats copy-on-write: a kernel routine filling a user buffer
+    // would write straight into the page a forked process still shares, instead
+    // of faulting and being given a private copy first.
+    constexpr u64 kCr0WriteProtect = 1ull << 16;
+    u64 cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    asm volatile("mov %0, %%cr0" : : "r"(cr0 | kCr0WriteProtect) : "memory");
+
     // Built with the direct map not yet active: phys_ptr is still identity, and
     // the stage-2 low identity map that is live right now makes that valid.
     const paddr_t pml4_phys = alloc_table();
@@ -204,6 +214,26 @@ bool unmap_into(u64* pml4, vaddr_t virt)
     return true;
 }
 
+// The address of the leaf entry describing `virt`, or null when the walk runs
+// out of tables or lands on a huge page. Returning the entry itself (rather than
+// its contents) is what lets the CoW fault rewrite it in place.
+u64* walk_to_pte(u64* pml4, vaddr_t virt)
+{
+    u64* pdpt = next_level(pml4, index_of(virt, 4), false);
+    if (pdpt == nullptr)
+        return nullptr;
+    u64* pd = next_level(pdpt, index_of(virt, 3), false);
+    if (pd == nullptr)
+        return nullptr;
+
+    const u64 pd_index = index_of(virt, 2);
+    if ((pd[pd_index] & Present) == 0 || (pd[pd_index] & Huge) != 0)
+        return nullptr;
+
+    u64* pt = table_of(pd[pd_index]);
+    return &pt[index_of(virt, 1)];
+}
+
 paddr_t translate_into(u64* pml4, vaddr_t virt)
 {
     u64* pdpt = next_level(pml4, index_of(virt, 4), false);
@@ -238,11 +268,16 @@ void free_table_tree(u64 table_phys, int level)
             continue;
         const u64 target = entry & kAddressMask;
         if (level == 1 || (entry & Huge) != 0) {
-            pmm::free(target);              // a mapped data frame
+            // A data frame, which another address space may still share after a
+            // copy-on-write fork - so drop a reference rather than freeing it
+            // outright. Handing a frame back to the allocator while a live
+            // process still maps it is exactly how a fork corrupts its parent.
+            pmm::release(target);
         } else {
             free_table_tree(target, level - 1);
         }
     }
+    // The page tables themselves are never shared; this space built its own.
     pmm::free(table_phys);
 }
 
@@ -251,6 +286,40 @@ void free_table_tree(u64 table_phys, int level)
 bool map(vaddr_t virt, paddr_t phys, u64 flags)
 {
     return map_into(current_pml4(), virt, phys, flags);
+}
+
+// The first write to a shared page. If we are the only owner left the page can
+// simply be made writable again; otherwise it is copied and this space keeps the
+// copy, dropping its reference to the original.
+bool handle_cow_fault(vaddr_t virt)
+{
+    u64* pt_entry = walk_to_pte(current_pml4(), virt);
+    if (pt_entry == nullptr)
+        return false;
+
+    const u64 entry = *pt_entry;
+    if ((entry & Present) == 0 || (entry & CopyOnWrite) == 0)
+        return false;
+
+    const paddr_t source = entry & kAddressMask;
+    const u64 flags = (entry & (User | NoExecute)) | Present | Write;
+
+    if (!pmm::is_shared(source)) {
+        // Everyone else has already copied away; reclaim it in place.
+        *pt_entry = source | flags;
+        invalidate(virt);
+        return true;
+    }
+
+    const paddr_t copy = pmm::alloc();
+    if (copy == 0)
+        return false;
+    memcpy(phys_ptr(copy), phys_ptr(source), pmm::kPageSize);
+
+    *pt_entry = copy | flags;
+    invalidate(virt);
+    pmm::release(source);
+    return true;
 }
 
 bool unmap(vaddr_t virt)
@@ -331,13 +400,49 @@ AddressSpace fork_address_space(AddressSpace parent)
 
                     const vaddr_t virt = m << 39 | p << 30 | d << 21 | t << 12;
                     const u64 flags = entry & (Write | User | NoExecute);
+                    const paddr_t source = entry & kAddressMask;
 
+                    // Share the frame instead of copying it: both sides lose
+                    // write permission and gain the CoW mark, so the first write
+                    // from either faults and gets its own private copy.
+                    //
+                    // "Was it writable?" is not the right question on its own. A
+                    // page this process already shares from an earlier fork is
+                    // read-only *and* CoW, and must stay CoW here - forking a
+                    // second time would otherwise hand the new child a plainly
+                    // read-only page whose first write faults with nothing to
+                    // resolve it. Only a page that is read-only and not CoW is
+                    // genuinely read-only, and can be shared as it stands.
+                    const bool needs_cow =
+                        (entry & Write) != 0 || (entry & CopyOnWrite) != 0;
+
+                    if (pmm::share(source)) {
+                        const u64 shared_flags = needs_cow
+                            ? (flags & ~static_cast<u64>(Write)) | CopyOnWrite
+                            : flags;
+                        if (!map_into(child_pml4, virt, source, shared_flags)) {
+                            pmm::release(source);
+                            destroy_address_space(child);
+                            return 0;
+                        }
+                        if (needs_cow) {
+                            // The parent has to fault too, or it would write
+                            // through to a page the child can see.
+                            pt[t] = (entry & ~static_cast<u64>(Write)) | CopyOnWrite;
+                            invalidate(virt);
+                        }
+                        continue;
+                    }
+
+                    // No reference left to hand out (the table is full or
+                    // absent): fall back to an eager copy, which is always
+                    // correct, just slower.
                     const paddr_t frame = pmm::alloc();
                     if (frame == 0) {
                         destroy_address_space(child);
                         return 0;
                     }
-                    memcpy(phys_ptr(frame), phys_ptr(entry & kAddressMask), kPageSize);
+                    memcpy(phys_ptr(frame), phys_ptr(source), kPageSize);
 
                     if (!map_into(child_pml4, virt, frame, flags)) {
                         pmm::free(frame);

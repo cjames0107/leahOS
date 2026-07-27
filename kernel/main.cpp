@@ -639,6 +639,7 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     step("page tables rebuilt, kernel in the higher half, low half is user's");
 
     heap::init();
+    pmm::init_refcounts();
     self_test_heap();
     step("kernel heap online, self-test passed");
 

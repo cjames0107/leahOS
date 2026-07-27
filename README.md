@@ -608,6 +608,33 @@ only root may `chown`, and dropping root is one-way. `id`, `chmod`, `chown` and
 `su` expose it; there is no password file yet, so `su` enforces exactly what the
 kernel does and no more.
 
+## Copy-on-write
+
+`fork` used to deep-copy every page of the parent's address space. Now both
+sides keep the same frames, mapped read-only with an OS-reserved bit (9) marking
+them copy-on-write; the first write from either faults, and the fault handler
+hands the writer a private copy. The physical allocator carries a small table of
+reference counts holding only the *extra* references, so a singly-owned frame
+costs nothing and needs no initialisation pass - absent means one owner.
+
+Three details are what actually make it work, and each one broke something
+first:
+
+**CR0.WP has to be on.** Without it ring 0 may write through any mapping
+regardless of its write bit, so a kernel routine filling a user buffer writes
+straight into a page the child still shares instead of faulting. The symptom was
+not a crash but forked processes quietly corrupting each other's stacks.
+
+**"Was it writable?" is the wrong test when re-forking.** A page inherited from
+an earlier fork is already read-only *and* CoW, so a second fork that only looks
+at the write bit hands the new child a plainly read-only page whose first write
+faults with nothing to resolve it. Only read-only *and* not-CoW is genuinely
+read-only.
+
+**Teardown has to drop a reference, not free.** `free_table_tree` freed data
+frames outright, which handed shared frames back to the allocator while a live
+process still mapped them.
+
 ## Roadmap
 
 - [x] stage 1/2 bootloader, real → protected → long mode
@@ -649,4 +676,11 @@ kernel does and no more.
 - [x] threads within a process: `clone`, a shared address space and fd table
 - [x] signals: handlers, `kill`, `sigreturn`, default and ignored dispositions
 - [x] users and permissions: uid/gid, `setuid`, `chmod`/`chown`, mode checks
+- [x] futex-backed mutexes, so threads can synchronise
+- [x] signal delivery on the interrupt return path, not just at syscalls
+- [x] copy-on-write fork with reference-counted frames
+- [ ] demand paging: anonymous pages allocated on first touch
+- [ ] ACPI, the local APIC and HPET, retiring the PIC and PIT
+- [ ] SMP: AP startup and a locked scheduler
+- [ ] AHCI with DMA, TCP and sockets, xHCI
 - [ ] a password file, and `su` that actually authenticates
