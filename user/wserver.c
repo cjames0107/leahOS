@@ -498,7 +498,14 @@ static void reconcile(void)
                 continue;
             }
 
-            const int id = shm_open(WS_PIXEL_KEY_BASE + (unsigned)slot, 0, 0);
+            /* The generation matters even for a window's first appearance.
+             * The key carries one so that a resize can replace the segment
+             * without the two colliding, and a server that ignores it here
+             * looks for a key no client ever created - which is silent, and
+             * looks exactly like a window that refuses to appear until
+             * something else forces a redraw. */
+            const uint32_t gen = __atomic_load_n(&w->pixels_gen, __ATOMIC_ACQUIRE);
+            const int id = shm_open(WS_PIXEL_KEY(slot, gen), 0, 0);
             if (id < 0)
                 continue;               /* not ready yet; try again next pass */
             const unsigned long bytes = shm_size(id);
@@ -522,7 +529,7 @@ static void reconcile(void)
                 g_order[i] = g_order[i - 1];
             g_order[0] = slot;
             ++g_count;
-            g_pixel_gen[slot] = 0;
+            g_pixel_gen[slot] = gen;
             damage_window(slot);
         } else if (state != WS_SLOT_LIVE && known) {
             damage_window(slot);        /* while its geometry is still known */
@@ -843,32 +850,10 @@ int main(void)
             break;                      /* every window has gone */
         }
 
-        /* The band is on the screen, not in the backbuffer, so it has to come
-         * off before anything reads the screen back or composes over it. */
-        if (g_band_shown) {
-            erase_band(&g_band);
-            g_band_shown = 0;
-        }
+        const int cursor_moved = (g_cursor_x != g_last_cursor_x ||
+                                  g_cursor_y != g_last_cursor_y);
 
-        if (g_damage_count > 0) {
-            for (int i = 0; i < g_damage_count; ++i) {
-                compose_rect(&g_damage[i]);
-                present_region(g_damage[i].x, g_damage[i].y,
-                               (unsigned)g_damage[i].w, (unsigned)g_damage[i].h);
-                /* The cursor may have been inside what was just repainted, in
-                 * which case what it was covering is no longer what is saved. */
-                if (g_last_cursor_x >= 0) {
-                    struct rect c;
-                    c.x = g_last_cursor_x; c.y = g_last_cursor_y;
-                    c.w = CURSOR_W; c.h = CURSOR_H;
-                    if (rects_overlap(&c, &g_damage[i]))
-                        g_last_cursor_x = -1;
-                }
-            }
-            g_damage_count = 0;
-        } else if (g_cursor_x != g_last_cursor_x || g_cursor_y != g_last_cursor_y) {
-            erase_cursor();
-        } else if (g_resizing < 0) {
+        if (g_damage_count == 0 && !cursor_moved && g_resizing < 0) {
             /* Nothing changed. Sleep rather than spin: this loop polls input
              * and client state, and polling flat out means a syscall per pass
              * on a CPU that never blocks - which is enough to keep another
@@ -876,6 +861,29 @@ int main(void)
             msleep(kIdleSleepMs);
             continue;
         }
+
+        /* The cursor and the rubber band live on the screen rather than in the
+         * backbuffer, so both have to come off before anything reads the screen
+         * back or composes over it.
+         *
+         * Unconditionally, and before the damage pass. Erasing the cursor only
+         * when nothing else had changed left the old one on screen whenever a
+         * window happened to be redrawn in the same frame the pointer moved -
+         * which is most frames while dragging, and is what painted a trail of
+         * cursors across the desktop. */
+        if (g_band_shown) {
+            erase_band(&g_band);
+            g_band_shown = 0;
+        }
+        erase_cursor();
+        g_last_cursor_x = -1;
+
+        for (int i = 0; i < g_damage_count; ++i) {
+            compose_rect(&g_damage[i]);
+            present_region(g_damage[i].x, g_damage[i].y,
+                           (unsigned)g_damage[i].w, (unsigned)g_damage[i].h);
+        }
+        g_damage_count = 0;
 
         if (g_resizing >= 0) {
             struct ws_window* w = &g_control->windows[g_resizing];

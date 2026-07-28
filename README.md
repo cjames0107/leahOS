@@ -712,6 +712,33 @@ is gone. Only the *leader's*: holding back an ordinary thread's slot makes
 `thread_join` wait for a process that is still running, which is a hang rather
 than a leak.
 
+Two bugs came out of running the damage work in anger, both of which look like
+graphics faults and are neither.
+
+A window's pixels are found by a key that carries a **generation** as well as a
+slot, so that a resize can replace the segment without the old and new
+colliding. The path that maps a window for the *first* time still used the old
+flat key, which agrees with the generational one only for slot zero - so the
+first window worked and every one after it silently never mapped. The symptom
+was not "no window": it was a window that appeared the moment something else
+was moved or resized, because the resize path used the right key. A key nobody
+created reads exactly like a client that has not finished starting, which is
+why it waited quietly instead of failing.
+
+The cursor is drawn straight to the screen and rubbed out of the backbuffer,
+which means it has to come off before anything else is painted. It was being
+erased only when *nothing else* had changed - so any frame that both moved the
+pointer and repainted a window left the old cursor behind. While dragging that
+is most frames, and the result was a trail of arrows across the desktop. The
+erase is now unconditional and happens first.
+
+`uitest` exists to make this kind of thing visible: one window holding raised
+and sunken bevels, buttons that depress under the pointer, a checkbox, radio
+buttons, a colour bar, and a live readout of the last event and the current
+size. There is no widget toolkit behind it - a client owns a rectangle of
+pixels and draws it itself - and showing that plainly is more useful than
+hiding it.
+
 The compositor **sleeps** between passes rather than spinning. That is not a
 politeness: a polling loop that only ever yields stays runnable, holds the kernel
 lock over and over, and on a multiprocessor can keep another CPU out of the kernel
@@ -1159,4 +1186,5 @@ process still mapped them.
 - [ ] per-client channels, so the rendezvous block need not be world-writable
 - [x] window resizing, and damage rectangles instead of a full recompose
 - [x] a terminal window, so the shell and the desktop need not take turns
+- [x] `uitest`, a window of every element the desktop draws
 - [ ] reflowing a terminal's scrollback when it is resized

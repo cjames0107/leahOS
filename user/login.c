@@ -52,12 +52,14 @@ static void session(void)
 {
     if (win_server_running()) {
         printf("starting the desktop - the terminal window is your shell.\n");
-        char* term[]  = { "term", "40", "40", 0 };
-        char* clock[] = { "clock", "700", "60", 0 };
-        const char* which[] = { "/BIN/TERM.ELF", "/BIN/CLOCK.ELF" };
-        char** argv[] = { term, clock };
+        char* term[]   = { "term", "40", "40", 0 };
+        char* uitest[] = { "uitest", "700", "60", 0 };
+        char* clock[]  = { "clock", "700", "400", 0 };
+        const char* which[] = { "/BIN/TERM.ELF", "/BIN/UITEST.ELF",
+                                "/BIN/CLOCK.ELF" };
+        char** argv[] = { term, uitest, clock };
         int started = 0;
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < 3; ++i) {
             const int pid = fork();
             if (pid == 0) {
                 execve(which[i], argv[i], 0);
