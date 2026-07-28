@@ -20,6 +20,7 @@
  */
 
 #include <display.h>
+#include <image.h>
 #include <shm.h>
 #include <sys/mman.h>
 #include <signal.h>
@@ -34,14 +35,17 @@
  * Two shades either side of the face colour is all a bevel needs: light above
  * and left, dark below and right, and the eye reads it as raised. It is the
  * whole visual language of this era of interface. */
-#define DESKTOP      0x008080
-#define FACE         0xC0C0C0
-#define LIGHT        0xFFFFFF
-#define SHADOW       0x606060
+/* The palette is no longer fixed: it is read from the control block so that
+ * settings can change it. These are only the defaults the server starts with. */
 #define OUTLINE      0x000000
-#define TITLE_ACTIVE 0x000080
-#define TITLE_IDLE   0x808080
-#define TITLE_TEXT   0xFFFFFF
+#define DESKTOP      (g_control->theme.desktop)
+#define FACE         (g_control->theme.face)
+#define LIGHT        (g_control->theme.light)
+#define SHADOW       (g_control->theme.shadow)
+#define TITLE_ACTIVE (g_control->theme.title_active)
+#define TITLE_IDLE   (g_control->theme.title_idle)
+#define TITLE_TEXT   (g_control->theme.title_text)
+#define CURSOR_FILL  (g_control->theme.cursor)
 
 #define TITLE_HEIGHT 18
 #define BORDER       3
@@ -346,6 +350,30 @@ static void draw_window(int slot, int focused)
     }
 }
 
+/* The wallpaper, when there is one. Held at its own size and sampled rather
+ * than scaled properly: a nearest-neighbour stretch is what this can afford,
+ * and it is honest about being a stretch. */
+static uint32_t* g_paper;
+static unsigned  g_paper_w, g_paper_h;
+static uint32_t  g_theme_seen = 0xFFFFFFFFu;
+
+static void reload_theme(void)
+{
+    const uint32_t gen = __atomic_load_n(&g_control->theme.generation,
+                                         __ATOMIC_ACQUIRE);
+    if (gen == g_theme_seen)
+        return;
+    g_theme_seen = gen;
+    if (g_paper != 0) {
+        free(g_paper);
+        g_paper = 0;
+        g_paper_w = g_paper_h = 0;
+    }
+    if (g_control->theme.wallpaper[0] != '\0')
+        g_paper = img_read_png(g_control->theme.wallpaper, &g_paper_w, &g_paper_h);
+    damage_all();
+}
+
 /* Desktop, then windows back to front so the topmost is drawn last and wins -
  * within one rectangle, and skipping the windows that do not touch it. */
 static void compose_rect(const struct rect* r)
@@ -353,8 +381,15 @@ static void compose_rect(const struct rect* r)
     g_clip = *r;
     for (int y = r->y; y < r->y + r->h; ++y) {
         uint32_t* row = &g_back[(unsigned)y * g_fb.width + (unsigned)r->x];
-        for (int x = 0; x < r->w; ++x)
-            row[x] = DESKTOP;
+        if (g_paper != 0) {
+            const unsigned sy = (unsigned)y * g_paper_h / g_fb.height;
+            const uint32_t* src = &g_paper[(unsigned long)sy * g_paper_w];
+            for (int x = 0; x < r->w; ++x)
+                row[x] = src[(unsigned)(r->x + x) * g_paper_w / g_fb.width];
+        } else {
+            for (int x = 0; x < r->w; ++x)
+                row[x] = DESKTOP;
+        }
     }
     for (int i = g_count - 1; i >= 0; --i) {
         const struct rect f = frame_rect(g_order[i]);
@@ -397,7 +432,7 @@ static void draw_cursor(void)
                 continue;
             uint32_t* p = (uint32_t*)(g_screen + (unsigned long)y * g_fb.pitch
                                       + (unsigned long)x * 4);
-            *p = (v == 1) ? OUTLINE : LIGHT;
+            *p = (v == 1) ? OUTLINE : CURSOR_FILL;
         }
     }
 }
@@ -838,6 +873,17 @@ int main(void)
     }
     memset(g_control, 0, sizeof(struct ws_shared));
     g_control->server_pid = (uint32_t)getpid();
+
+    /* The palette the desktop starts with; settings may change any of it. */
+    g_control->theme.desktop      = 0x008080;
+    g_control->theme.face         = 0xC0C0C0;
+    g_control->theme.light        = 0xFFFFFF;
+    g_control->theme.shadow       = 0x606060;
+    g_control->theme.title_active = 0x000080;
+    g_control->theme.title_idle   = 0x808080;
+    g_control->theme.title_text   = 0xFFFFFF;
+    g_control->theme.cursor       = 0xFFFFFF;
+    g_control->theme.generation   = 1;
     for (int i = 0; i < WS_MAX_WINDOWS; ++i)
         g_order[i] = -1;
 
@@ -863,6 +909,7 @@ int main(void)
     unsigned long empty_passes = 0;
 
     for (;;) {
+        reload_theme();
         reconcile();
         handle_input();
 

@@ -848,6 +848,33 @@ the session only: there is no per-user settings store to write it to, and
 inventing a file format for three associations would be worse than being clear
 that they do not outlive a logout.
 
+### Appearance
+
+The desktop's palette is no longer fixed in the server's source. It lives in the
+control block, alongside the window table, because the server is the only thing
+that can act on it and a setting nothing acts on is decoration. Settings writes
+a colour and bumps a generation; the server notices on its next pass, reloads
+the wallpaper if that is what moved, and damages the whole screen.
+
+A wallpaper is a PNG, decoded by the same `img_read_png` the image viewer uses -
+the reader was moved into the libc when the server needed it, rather than
+copied. It is sampled nearest-neighbour to the screen size, which is a stretch
+and is described as one.
+
+None of it is persisted. There is no per-user settings store, so the palette
+lasts as long as the desktop session and the About page says so rather than
+implying otherwise.
+
+### Users and groups
+
+Creating an account, setting a password and changing a home directory's mode
+all go through the account syscalls, so the kernel decides who may do what: only
+root creates accounts, and a new one gets the next free uid rather than a
+supplied one - which is what stops a new account silently becoming an existing
+user. "Permissions" here means the mode of the home directory, because that is
+what this system actually has to offer; it is labelled as such rather than as
+something grander.
+
 The compositor **sleeps** between passes rather than spinning. That is not a
 politeness: a polling loop that only ever yields stays runnable, holds the kernel
 lock over and over, and on a multiprocessor can keep another CPU out of the kernel
@@ -1304,6 +1331,8 @@ process still mapped them.
 - [x] `taskman`, with a resource monitor
 - [x] right-click context menus, and an "always open with" that is remembered
 - [ ] per-task CPU time, so the monitor can show a duty cycle not a share
-- [ ] a settings store, so an "always open with" survives a logout
+- [x] settings with categories: general, appearance, network, users, about
+- [x] the desktop's palette and wallpaper, changeable while it runs
+- [ ] a settings store, so appearance and associations survive a logout
 - [ ] a real type for a file, so opening one need not guess from its name
 - [ ] reflowing a terminal's scrollback when it is resized

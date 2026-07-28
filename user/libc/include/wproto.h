@@ -108,11 +108,33 @@ struct ws_window {
     struct win_event events[WS_EVENT_SLOTS];
 };
 
+/* The desktop's appearance, owned by whoever is allowed to change it and read
+ * by the server every pass.
+ *
+ * It lives in the control block rather than in a file because the server is the
+ * only thing that can act on it, and a setting nothing acts on is decoration.
+ * `generation` is bumped by the writer; the server reloads the wallpaper when
+ * it moves, so a colour change costs a repaint and a wallpaper change costs a
+ * decode - and only when one actually happened. */
+struct ws_theme {
+    volatile uint32_t desktop;
+    volatile uint32_t face;
+    volatile uint32_t light;
+    volatile uint32_t shadow;
+    volatile uint32_t title_active;
+    volatile uint32_t title_idle;
+    volatile uint32_t title_text;
+    volatile uint32_t cursor;       /* the arrow's fill; its outline stays black */
+    volatile uint32_t generation;
+    char wallpaper[128];            /* a PNG to show behind the windows, or "" */
+};
+
 struct ws_shared {
     volatile uint32_t magic;
     volatile uint32_t server_pid;
     volatile uint32_t quit;         /* set by the server as it exits */
     volatile uint32_t reserved;
+    struct ws_theme theme;
     struct ws_window windows[WS_MAX_WINDOWS];
 };
 

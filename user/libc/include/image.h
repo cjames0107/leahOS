@@ -27,4 +27,11 @@ int img_write_png(const char* path, const uint32_t* px,
 int img_write_gif(const char* path, const uint32_t* px,
                   unsigned width, unsigned height);
 
+/* Read a PNG back. Returns a malloc'd buffer of `width * height` pixels, or 0.
+ *
+ * It reads what this system writes: 8-bit truecolour, no interlacing, stored
+ * deflate blocks. A compressed one needs an inflate that does not exist here
+ * yet, and this says so by failing rather than by showing noise. */
+uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height);
+
 #endif /* _IMAGE_H */

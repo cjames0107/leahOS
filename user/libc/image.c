@@ -1,5 +1,6 @@
 #include <fcntl.h>
 #include <image.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -257,4 +258,112 @@ int img_write_gif(const char* path, const uint32_t* px,
     put(0);                 /* block terminator */
     put(0x3B);              /* trailer */
     return flush(path);
+}
+
+/* --- reading a PNG back --------------------------------------------------- */
+
+static uint32_t be32_of(const unsigned char* p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8) | p[3];
+}
+
+uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height)
+{
+    const int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 0;
+    const long len = (long)read(fd, g_out, IMG_MAX);
+    close(fd);
+    if (len < 8)
+        return 0;
+
+    static const unsigned char sig[8] = { 137, 'P', 'N', 'G', 13, 10, 26, 10 };
+    if (memcmp(g_out, sig, 8) != 0)
+        return 0;
+
+    unsigned long i = 8;
+    unsigned char* idat = 0;
+    unsigned long idat_len = 0;
+    unsigned w = 0, h = 0, depth = 0, colour = 0, interlace = 0;
+    while (i + 12 <= (unsigned long)len) {
+        const uint32_t clen = be32_of(&g_out[i]);
+        const unsigned char* type = &g_out[i + 4];
+        unsigned char* data = &g_out[i + 8];
+        if (i + 12 + clen > (unsigned long)len)
+            break;
+        if (memcmp(type, "IHDR", 4) == 0) {
+            w = be32_of(data); h = be32_of(data + 4);
+            depth = data[8]; colour = data[9]; interlace = data[12];
+        } else if (memcmp(type, "IDAT", 4) == 0) {
+            if (idat == 0) idat = data;
+            idat_len += clen;
+        }
+        i += 12 + clen;
+    }
+    if (w == 0 || h == 0 || depth != 8 || colour != 2 || interlace != 0)
+        return 0;
+    if ((unsigned long)w * h > 4u * 1024u * 1024u || idat == 0 || idat_len < 2)
+        return 0;
+
+    uint32_t* out = (uint32_t*)malloc((unsigned long)w * h * 4);
+    if (out == 0)
+        return 0;
+
+    /* Walk the stored blocks straight into the pixel array, keeping the
+     * position in explicit counters for the same reason the writer does: a
+     * block boundary does not fall on a row boundary. */
+    unsigned long p = 2;                        /* past the zlib header */
+    unsigned row = 0, col = 0, ch = 0;
+    int want_filter = 1;
+    for (;;) {
+        if (p + 5 > idat_len)
+            break;
+        const unsigned char header = idat[p];
+        const int final = header & 1;
+        if (((header >> 1) & 3) != 0) {         /* compressed: no inflate here */
+            free(out);
+            return 0;
+        }
+        const unsigned blen = (unsigned)idat[p + 1] | ((unsigned)idat[p + 2] << 8);
+        p += 5;
+        if (p + blen > idat_len)
+            break;
+        for (unsigned k = 0; k < blen; ++k) {
+            const unsigned char byte = idat[p + k];
+            if (want_filter) {
+                if (byte != 0) {                /* only "none" is understood */
+                    free(out);
+                    return 0;
+                }
+                want_filter = 0;
+                ch = 0;
+                continue;
+            }
+            uint32_t* px = &out[(unsigned long)row * w + col];
+            if (ch == 0)      *px = (uint32_t)byte << 16;
+            else if (ch == 1) *px |= (uint32_t)byte << 8;
+            else              *px |= byte;
+            if (++ch == 3) {
+                ch = 0;
+                if (++col == w) {
+                    col = 0;
+                    if (++row == h)
+                        goto done;
+                    want_filter = 1;
+                }
+            }
+        }
+        p += blen;
+        if (final)
+            break;
+    }
+done:
+    if (row < h) {          /* truncated */
+        free(out);
+        return 0;
+    }
+    *width = w;
+    *height = h;
+    return out;
 }
