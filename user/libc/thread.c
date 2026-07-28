@@ -58,7 +58,7 @@ tid_t gettid(void)
 
 void thread_exit(void)
 {
-    /* SYS_exit ends the calling task, which for a thread means just this
-     * thread; the process lives on until its last thread is gone. */
-    __syscall(SYS_exit, 0, 0, 0, 0, 0);
+    /* Only this thread. SYS_exit is the other one - it ends the process and
+     * every thread in it, which is what returning from main has to mean. */
+    __syscall(SYS_threadexit, 0, 0, 0, 0, 0);
 }

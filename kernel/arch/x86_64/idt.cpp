@@ -138,6 +138,24 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
         return;
     }
 
+    // Another CPU has panicked. Stop, without taking any lock on the way - the
+    // panicking CPU may well be holding it.
+    if (frame->vector == kHaltVector) {
+        apic::eoi();
+        for (;;)
+            asm volatile("cli; hlt");
+    }
+
+    // Capture what the page tables said *at the moment of the fault*. Waiting
+    // for the kernel lock below can block, and blocking can switch tasks - so by
+    // the time a report is printed CR3 may describe an entirely different
+    // address space, and a walk done then would quote the wrong mapping.
+    if (frame->vector == 14) {
+        u64 address;
+        asm volatile("mov %%cr2, %0" : "=r"(address));
+        vmm::note_fault_mapping(address, vmm::entry_for(address));
+    }
+
     // The same lock as the syscall path, and recursive for the same reason: a
     // syscall that enabled interrupts may already hold it on this CPU.
     sync::bkl::acquire();
@@ -156,6 +174,24 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
         if ((frame->error_code & kPresent) != 0 && (frame->error_code & kWrite) != 0 &&
             vmm::handle_cow_fault(fault_address))
             return;                     // resolved: retry the faulting write
+
+        // A ring-3 fault that cannot be resolved is the program's bug, not the
+        // kernel's, and killing the kernel over it is a category error: a
+        // process that dereferences a bad pointer should die on its own. The
+        // report says which one and where, which is the thing actually worth
+        // knowing.
+        constexpr u64 kUserMode = 4;
+        if ((frame->error_code & kUserMode) != 0) {
+            console::printf("\n  %s[%u] faulted: %s at %p, %s %p%s\n",
+                            scheduler::current_name(), scheduler::current_pid(),
+                            (frame->error_code & 1) ? "protection violation"
+                                                    : "unmapped address",
+                            reinterpret_cast<void*>(fault_address),
+                            (frame->error_code & 2) ? "writing from" : "reading from",
+                            reinterpret_cast<void*>(frame->rip),
+                            (frame->error_code & 0x10) ? " (instruction fetch)" : "");
+            scheduler::exit_current(139);      // 128 + SIGSEGV
+        }
     }
 
     if (vector < 32)

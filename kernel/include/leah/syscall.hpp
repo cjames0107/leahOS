@@ -75,6 +75,10 @@ enum Number : u64 {
     FbFont     = 53,   // the 8x16 BIOS font, so a server can draw its own text
     Sleep      = 54,   // block for a number of milliseconds
     ShmDestroy = 55,
+    // End the calling thread only. Exit ends the whole process, which is the
+    // distinction POSIX draws between exit and exit_group - and without it a
+    // process cannot end while one of its threads is blocked in a syscall.
+    ThreadExit = 56,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

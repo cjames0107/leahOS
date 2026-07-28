@@ -169,8 +169,13 @@ Task* group_leader(Task* task)
 {
     if (task->tgid != 0 && task->tgid != task->pid) {
         Task* leader = find(task->tgid);
-        if (leader != nullptr && leader->state != State::Unused &&
-            leader->state != State::Zombie && leader->state != State::Dead)
+        // A zombie leader still owns the group's open files. Excluding it here
+        // sent every surviving thread to its own empty table copy instead: file
+        // operations went nowhere, and the real table was never closed, so its
+        // pipes were never released and the other end never saw an end-of-file.
+        // The leader's slot stays reserved until the whole group is gone - see
+        // wait_child - so this reference cannot dangle.
+        if (leader != nullptr && leader->state != State::Unused)
             return leader;
     }
     return task;
@@ -654,6 +659,38 @@ u32 fork_current(const TrapFrame& parent_user)
     return child;
 }
 
+[[noreturn]] void exit_group(i32 code)
+{
+    // SIGKILL rather than retiring them here. A thread blocked inside a syscall
+    // is sitting on a kernel stack halfway through something, and marking it
+    // dead abandons that stack mid-call - whatever it had allocated is leaked,
+    // and whatever it was about to free gets freed twice. Killing it instead
+    // lets it unwind through its own exit path, which is the only code that
+    // knows what it was holding.
+    {
+        sync::bkl::acquire();
+        cpu::InterruptGuard guard;
+        Task* self = current();
+        for (u32 i = 0; i < g_task_count; ++i) {
+            Task& t = g_tasks[i];
+            if (&t == self || t.tgid != self->tgid || !t.is_user)
+                continue;
+            if (t.state == State::Unused || t.state == State::Dead ||
+                t.state == State::Zombie)
+                continue;
+            t.sig_pending |= 1u << signals::kSigKill;
+            // A signal is a reason to run: one parked on a channel has to come
+            // back so that the blocking call it is inside notices.
+            if (t.state == State::Blocked) {
+                t.state = State::Ready;
+                t.wait_channel = 0;
+            }
+        }
+        sync::bkl::release();
+    }
+    exit_current(code);
+}
+
 void exit_current(i32 code)
 {
     // Acquired and never released here: the task is going away, and the lock
@@ -710,6 +747,15 @@ i64 wait_child(i32* status)
             if (t.parent_pid != current()->pid || t.state == State::Unused)
                 continue;
             any_child = true;
+
+            // The group *leader's* slot has to outlive its threads: it holds
+            // the open files they all share, and reusing it now would pull
+            // those out from under the survivors. An ordinary thread's slot has
+            // no such tenant and is reaped straight away - holding those back
+            // would make thread_join wait for a process that is still running.
+            if (t.state == State::Zombie && t.tgid == t.pid &&
+                group_still_alive(&t))
+                continue;
 
             if (t.state == State::Zombie) {
                 const i64 pid = t.pid;
@@ -899,6 +945,19 @@ void on_irq_return()
         return;
     g_need_resched = false;
     switch_to(pick_next());
+}
+
+
+const char* current_name()
+{
+    const Task* task = current();
+    return task != nullptr && task->name != nullptr ? task->name : "?";
+}
+
+bool current_is_user()
+{
+    const Task* task = current();
+    return task != nullptr && task->is_user;
 }
 
 } // namespace scheduler

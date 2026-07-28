@@ -1,3 +1,4 @@
+#include <leah/framebuffer.hpp>
 #include <leah/interrupts.hpp>
 #include <leah/io.hpp>
 #include <leah/mouse.hpp>
@@ -71,6 +72,20 @@ u8 send_to_mouse(u8 value)
 State g_state{};
 u64   g_packets = 0;
 
+void clamp_to_screen(i32& x, i32& y)
+{
+    // Before the framebuffer is up there is nothing to clamp against; leaving
+    // the position alone is better than inventing a bound.
+    if (!framebuffer::available())
+        return;
+    const i32 max_x = static_cast<i32>(framebuffer::width()) - 1;
+    const i32 max_y = static_cast<i32>(framebuffer::height()) - 1;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x > max_x) x = max_x;
+    if (y > max_y) y = max_y;
+}
+
 u8 g_packet[3]{};
 u8 g_index = 0;
 
@@ -108,6 +123,12 @@ void on_packet(interrupts::Frame&)
 
     g_state.x += dx;
     g_state.y -= dy;            // the mouse reports up as positive; screens do not
+
+    // Clamp to the screen. Without this the position keeps accumulating past
+    // the edge, and a pointer pushed into a corner has to be dragged all the
+    // way back before it appears to move again - it looks stuck, and the
+    // distance it is stuck for is however far it was pushed.
+    clamp_to_screen(g_state.x, g_state.y);
     g_state.left   = (flags & 0x01) != 0;
     g_state.right  = (flags & 0x02) != 0;
     g_state.middle = (flags & 0x04) != 0;

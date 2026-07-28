@@ -62,6 +62,10 @@ i64 pipe_read(Pipe* p, void* buffer, usize count)
         if (p->writers == 0)
             return 0;                               // end of file
         scheduler::block_on(read_channel(p));
+        // Woken with a signal waiting - being killed, most likely. Going back
+        // to sleep here is how a process ends up impossible to kill.
+        if (scheduler::signal_pending())
+            return -1;
     }
 }
 
@@ -74,6 +78,8 @@ i64 pipe_write(Pipe* p, const void* buffer, usize count)
             return written > 0 ? static_cast<i64>(written) : -1;   // broken pipe
         if (p->count == Pipe::kSize) {
             scheduler::block_on(write_channel(p));
+            if (scheduler::signal_pending())
+                return written > 0 ? static_cast<i64>(written) : -1;
             continue;
         }
         while (written < count && p->count < Pipe::kSize) {

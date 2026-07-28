@@ -20,6 +20,10 @@ static struct ws_shared* g_mapped = 0;
 static uint32_t*    g_pixels[WS_MAX_WINDOWS];
 static int          g_pixel_id[WS_MAX_WINDOWS];
 static unsigned long g_pixel_bytes[WS_MAX_WINDOWS];
+static uint32_t     g_pixel_gen[WS_MAX_WINDOWS];
+static uint32_t     g_seen_resize[WS_MAX_WINDOWS];
+/* Whether this window has been told the server is gone, so it is told once. */
+static int          g_server_lost[WS_MAX_WINDOWS];
 
 /* Map the control block, once. It is created by the server, so failing to find
  * it simply means the desktop is not running. */
@@ -34,8 +38,9 @@ static struct ws_shared* control(void)
             return 0;
     }
     /* Mapped is not the same as ready: the server zeroes the block and only
-     * then writes the magic. */
-    return g_mapped->magic == WS_MAGIC ? g_mapped : 0;
+     * then writes the magic - and clears it again on the way out. */
+    return __atomic_load_n(&g_mapped->magic, __ATOMIC_ACQUIRE) == WS_MAGIC
+         ? g_mapped : 0;
 }
 
 int win_server_running(void) { return control() != 0; }
@@ -68,7 +73,7 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
      * knows where to find them. Owned by this user, so another user cannot map
      * them even though the control block is public. */
     const unsigned long bytes = (unsigned long)width * height * 4;
-    const int pixel_id = shm_open(WS_PIXEL_KEY_BASE + (unsigned)slot, bytes, 0);
+    const int pixel_id = shm_open(WS_PIXEL_KEY(slot, 0), bytes, 0);
     if (pixel_id < 0) {
         __atomic_store_n(&w->state, WS_SLOT_FREE, __ATOMIC_RELEASE);
         return -1;
@@ -83,6 +88,8 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
     g_pixels[slot] = pixels;
     g_pixel_id[slot] = pixel_id;
     g_pixel_bytes[slot] = bytes;
+    g_pixel_gen[slot] = 0;
+    g_seen_resize[slot] = 0;
 
     w->owner_pid = (uint32_t)getpid();
     w->x = x;
@@ -93,6 +100,12 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
     w->tail = 0;
     w->present = 0;
     w->drawn = 0;
+    w->req_width = width;
+    w->req_height = height;
+    w->resize_seq = 0;
+    w->pixels_gen = 0;
+    w->min_width = 64;
+    w->min_height = 32;
     unsigned n = 0;
     while (title != 0 && title[n] != '\0' && n < WS_TITLE_LEN - 1) {
         w->title[n] = title[n];
@@ -121,12 +134,100 @@ void win_present(int id)
     __atomic_add_fetch(&block->windows[id].present, 1, __ATOMIC_RELEASE);
 }
 
+/* Answer a resize the server asked for.
+ *
+ * Shared memory has no realloc, so this is an allocate-and-swap: a fresh
+ * segment under the next generation's key, published only once it is in place,
+ * and the old one released afterwards. The server keeps drawing from the old
+ * pages throughout - it is holding its own reference to them - and switches
+ * over when it notices the generation move.
+ *
+ * The new buffer starts blank rather than carrying the old contents across.
+ * Rescaling is the client's business, and every client this system has would
+ * rather redraw than have the server guess. */
+static int apply_resize(int id, struct ws_window* w, struct win_event* out)
+{
+    unsigned width = w->req_width, height = w->req_height;
+    if (width < w->min_width)   width = w->min_width;
+    if (height < w->min_height) height = w->min_height;
+    if (width == 0 || height == 0)
+        return 0;
+
+    const uint32_t gen = g_pixel_gen[id] + 1;
+    const unsigned long bytes = (unsigned long)width * height * 4;
+    const int fresh_id = shm_open(WS_PIXEL_KEY(id, gen), bytes, 0);
+    if (fresh_id < 0)
+        return 0;                       /* keep the old one; try again later */
+    uint32_t* fresh = (uint32_t*)shm_map(fresh_id);
+    if (fresh == 0) {
+        shm_destroy(fresh_id);
+        return 0;
+    }
+    for (unsigned long i = 0; i < (unsigned long)width * height; ++i)
+        fresh[i] = 0xFFFFFF;
+
+    /* Dimensions before the generation: the server reads them the other way
+     * round, so it can never see a new generation described by an old size. */
+    w->width = width;
+    w->height = height;
+    __atomic_store_n(&w->pixels_gen, gen, __ATOMIC_RELEASE);
+
+    uint32_t* old = g_pixels[id];
+    const unsigned long old_bytes = g_pixel_bytes[id];
+    const int old_id = g_pixel_id[id];
+
+    g_pixels[id] = fresh;
+    g_pixel_id[id] = fresh_id;
+    g_pixel_bytes[id] = bytes;
+    g_pixel_gen[id] = gen;
+
+    if (old != 0) {
+        munmap(old, old_bytes);
+        shm_destroy(old_id);            /* the server's reference keeps it alive */
+    }
+
+    out->type = WIN_EVENT_RESIZE;
+    out->window = (uint32_t)id;
+    out->x = (int32_t)width;
+    out->y = (int32_t)height;
+    out->button = 0;
+    out->key = 0;
+    return 1;
+}
+
 int win_poll(int id, struct win_event* out)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    if (id < 0 || id >= WS_MAX_WINDOWS)
         return 0;
+
+    struct ws_shared* block = control();
+    if (block == 0) {
+        /* The server has gone - it clears the magic on its way out, and a
+         * server that crashed leaves a block that never had it. Either way this
+         * window can never be drawn or clicked again, so say so once rather
+         * than leaving the client polling an empty queue for ever. Without this
+         * a desktop shutting down leaves its clients spinning, alive, and
+         * unreachable: nothing is left to send them a close. */
+        if (g_pixels[id] != 0 && !g_server_lost[id]) {
+            g_server_lost[id] = 1;
+            out->type = WIN_EVENT_CLOSE;
+            out->window = (uint32_t)id;
+            out->x = 0; out->y = 0;
+            out->button = 0; out->key = 0;
+            return 1;
+        }
+        return 0;
+    }
     struct ws_window* w = &block->windows[id];
+
+    /* Ahead of the queue: a client that is told it grew before it is told
+     * anything else cannot draw into the old buffer by mistake. */
+    const uint32_t resize_seq = __atomic_load_n(&w->resize_seq, __ATOMIC_ACQUIRE);
+    if (resize_seq != g_seen_resize[id]) {
+        g_seen_resize[id] = resize_seq;
+        if (apply_resize(id, w, out))
+            return 1;
+    }
 
     const uint32_t head = __atomic_load_n(&w->head, __ATOMIC_ACQUIRE);
     const uint32_t tail = w->tail;
@@ -157,5 +258,25 @@ void win_destroy(int id)
         g_pixels[id] = 0;
         g_pixel_id[id] = -1;
         g_pixel_bytes[id] = 0;
+        g_pixel_gen[id] = 0;
+        g_server_lost[id] = 0;
     }
+}
+
+void win_size(int id, unsigned* width, unsigned* height)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+        return;
+    if (width != 0)  *width = block->windows[id].width;
+    if (height != 0) *height = block->windows[id].height;
+}
+
+void win_set_min_size(int id, unsigned width, unsigned height)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+        return;
+    block->windows[id].min_width = width;
+    block->windows[id].min_height = height;
 }

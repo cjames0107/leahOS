@@ -25,7 +25,17 @@
 #include <stdint.h>
 
 #define WS_CONTROL_KEY    1u          /* shm key of the control block      */
-#define WS_PIXEL_KEY_BASE 0x1000u     /* + slot: shm key of a window's pixels */
+#define WS_PIXEL_KEY_BASE 0x1000u     /* base of the per-window pixel keys  */
+
+/* The key of a window's pixels. It carries a generation as well as a slot,
+ * because a resize replaces the segment rather than growing it - there is no
+ * realloc for shared memory - and the old and the new have to be able to exist
+ * at the same time. If both used one key the server would be unable to tell
+ * which of the two it had just opened, and would read the old segment's pages
+ * through the new segment's dimensions. */
+#define WS_PIXEL_GENS 64u
+#define WS_PIXEL_KEY(slot, gen) \
+    (WS_PIXEL_KEY_BASE + (unsigned)(slot) * WS_PIXEL_GENS + ((gen) % WS_PIXEL_GENS))
 #define WS_MAGIC          0x5734454cu /* "L4Ws" - the server is up          */
 
 #define WS_MAX_WINDOWS 16
@@ -44,6 +54,10 @@
 #define WIN_EVENT_MOUSE_MOVE 3
 #define WIN_EVENT_KEY        4
 #define WIN_EVENT_CLOSE      5   /* the close box was clicked */
+/* The window has been resized. x and y carry the new content width and height;
+ * the pixel buffer has already been replaced, so re-fetch it with win_map and
+ * redraw everything - the new one starts blank. */
+#define WIN_EVENT_RESIZE     6
 
 struct win_event {
     uint32_t type;
@@ -62,6 +76,16 @@ struct ws_window {
     volatile uint32_t present;      /* client bumps it after drawing           */
     volatile uint32_t drawn;        /* server copies present here once shown   */
     char title[WS_TITLE_LEN];
+
+    /* Resizing. The server asks and the client answers, because the pixels are
+     * the client's to allocate: the server writes a requested size and bumps
+     * resize_seq, and the client replaces its segment and bumps pixels_gen.
+     * Neither side ever changes the other's fields, so no lock is needed - only
+     * the ordering, which is why each generation counter is stored last. */
+    volatile uint32_t req_width, req_height;
+    volatile uint32_t resize_seq;   /* server bumps to request a size          */
+    volatile uint32_t pixels_gen;   /* client bumps once the new segment is up  */
+    volatile uint32_t min_width, min_height;  /* the client's floor            */
 
     /* Event ring. The server writes at head, the client reads at tail. One
      * writer and one reader, so no lock is needed - only the ordering of the

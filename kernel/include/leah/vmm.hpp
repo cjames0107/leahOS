@@ -23,6 +23,12 @@ enum Flags : u64 {
     // page that several address spaces share read-only and must be copied
     // before anyone writes to it.
     CopyOnWrite  = 1ull << 9,
+    // A genuinely shared mapping - shared memory, not a fork artefact. fork
+    // must hand it to the child as it stands rather than making it
+    // copy-on-write: the whole point of the segment is that writes are seen by
+    // everyone mapping it, and copying it on the first write would quietly turn
+    // one shared page into two private ones.
+    Shared       = 1ull << 10,
     NoExecute    = 1ull << 63,
 };
 
@@ -77,6 +83,16 @@ void destroy_address_space(AddressSpace space);
 // private copy and make it writable again. Returns false if `virt` was not a
 // CoW page, in which case the fault is a real one.
 bool handle_cow_fault(vaddr_t virt);
+
+// The page table entry behind an address, so a fault report can say whether the
+// page was missing, read-only, or something else again. Zero when unmapped.
+u64 entry_for(vaddr_t virt);
+
+// Remember what the tables said when a fault was taken, and read it back. The
+// walk has to happen before anything that could switch address spaces, or the
+// report describes whichever process happens to be loaded when it prints.
+void note_fault_mapping(vaddr_t virt, u64 entry);
+bool recorded_fault_mapping(vaddr_t virt, u64& entry);
 
 // Drop every mapping in the kernel's low half and free the tables describing
 // them, leaving the frames themselves untouched. The AP trampoline's identity

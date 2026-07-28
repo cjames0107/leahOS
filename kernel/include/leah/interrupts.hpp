@@ -42,6 +42,13 @@ constexpr u8 kIrqKeyboard = 1;
 // an acknowledgement while holding that very lock.
 constexpr u8 kTlbShootdownVector = 0xFD;
 
+// Sent by a panicking CPU to every other one. A machine that has given up must
+// actually stop: leaving the other processors running means they carry on
+// writing to the console over the register dump - which is how a panic report
+// ends up full of another CPU's stack - and means whatever went wrong keeps
+// going on hardware nobody is watching.
+constexpr u8 kHaltVector = 0xFC;
+
 void init();
 
 // Point this CPU at the IDT init() built; application processors share it.

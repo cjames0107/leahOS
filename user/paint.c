@@ -2,6 +2,11 @@
  *
  * Small on purpose: it exists to show that a client owns its own pixels, gets
  * its own input events in its own coordinates, and never sees the screen.
+ *
+ * It is also the simplest thing that has to cope with being resized. The buffer
+ * is replaced rather than grown - there is no realloc for shared memory - so
+ * the width, the height and the pointer are all re-read after a resize, and
+ * nothing is cached across one.
  */
 
 #include <stdio.h>
@@ -9,31 +14,37 @@
 #include <unistd.h>
 #include <window.h>
 
-#define W 260
-#define H 160
+static uint32_t* g_px;
+static unsigned  g_w, g_h;
 
-static void fill(uint32_t* px, unsigned w, unsigned h, uint32_t colour)
+static void fill(uint32_t colour)
 {
-    for (unsigned i = 0; i < w * h; ++i)
-        px[i] = colour;
+    for (unsigned i = 0; i < g_w * g_h; ++i)
+        g_px[i] = colour;
 }
 
-static void blot(uint32_t* px, int cx, int cy, uint32_t colour)
+/* A border, so the content area is visibly the client's and not the frame's. */
+static void border(void)
+{
+    for (unsigned i = 0; i < g_w; ++i) {
+        g_px[i] = 0xA0A0A0;
+        g_px[(g_h - 1) * g_w + i] = 0xA0A0A0;
+    }
+    for (unsigned i = 0; i < g_h; ++i) {
+        g_px[i * g_w] = 0xA0A0A0;
+        g_px[i * g_w + g_w - 1] = 0xA0A0A0;
+    }
+}
+
+static void blot(int cx, int cy, uint32_t colour)
 {
     for (int dy = -2; dy <= 2; ++dy) {
         for (int dx = -2; dx <= 2; ++dx) {
             const int x = cx + dx, y = cy + dy;
-            if (x >= 0 && y >= 0 && x < W && y < H)
-                px[y * W + x] = colour;
+            if (x >= 0 && y >= 0 && x < (int)g_w && y < (int)g_h)
+                g_px[y * (int)g_w + x] = colour;
         }
     }
-}
-
-/* A border, so the content area is visibly the client's and not the frame's. */
-static void border(uint32_t* px)
-{
-    for (int i = 0; i < W; ++i) { px[i] = 0xA0A0A0; px[(H - 1) * W + i] = 0xA0A0A0; }
-    for (int i = 0; i < H; ++i) { px[i * W] = 0xA0A0A0; px[i * W + W - 1] = 0xA0A0A0; }
 }
 
 int main(int argc, char** argv)
@@ -41,19 +52,21 @@ int main(int argc, char** argv)
     const int x = argc > 1 ? atoi_simple(argv[1]) : 120;
     const int y = argc > 2 ? atoi_simple(argv[2]) : 90;
 
-    const int id = win_create(x, y, W, H, "Paint");
+    g_w = 260;
+    g_h = 160;
+    const int id = win_create(x, y, g_w, g_h, "Paint");
     if (id < 0) {
         printf("paint: no window server\n");
         return 1;
     }
-    uint32_t* px = win_map(id);
-    if (px == 0) {
+    g_px = win_map(id);
+    if (g_px == 0) {
         printf("paint: could not map the window\n");
         return 1;
     }
 
-    fill(px, W, H, 0xFFFFFF);
-    border(px);
+    fill(0xFFFFFF);
+    border();
     win_present(id);
 
     int drawing = 0;
@@ -61,17 +74,31 @@ int main(int argc, char** argv)
     for (;;) {
         struct win_event event;
         while (win_poll(id, &event)) {
+            if (event.type == WIN_EVENT_RESIZE) {
+                /* The buffer is a new one and starts blank; the old pointer is
+                 * gone. Everything that described the old size is re-read. */
+                g_w = (unsigned)event.x;
+                g_h = (unsigned)event.y;
+                g_px = win_map(id);
+                if (g_px == 0)
+                    return 1;
+                fill(0xFFFFFF);
+                border();
+                win_present(id);
+                drawing = 0;
+                continue;
+            }
             if (event.type == WIN_EVENT_CLOSE) {
                 win_destroy(id);
                 return 0;
             }
             if (event.type == WIN_EVENT_MOUSE_DOWN) {
                 drawing = 1;
-                blot(px, event.x, event.y, colour);
+                blot(event.x, event.y, colour);
                 win_present(id);
             }
             if (event.type == WIN_EVENT_MOUSE_MOVE && drawing) {
-                blot(px, event.x, event.y, colour);
+                blot(event.x, event.y, colour);
                 win_present(id);
             }
             if (event.type == WIN_EVENT_MOUSE_UP)
@@ -83,8 +110,8 @@ int main(int argc, char** argv)
                     return 0;
                 }
                 if (event.key == 'c') {
-                    fill(px, W, H, 0xFFFFFF);
-                    border(px);
+                    fill(0xFFFFFF);
+                    border();
                     win_present(id);
                 }
                 if (event.key >= '1' && event.key <= '4') {
@@ -95,6 +122,6 @@ int main(int argc, char** argv)
                 }
             }
         }
-        yield();
+        msleep(10);
     }
 }

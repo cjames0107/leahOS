@@ -35,26 +35,29 @@ static int read_line(const char* prompt, char* out, int max, int echo)
     return n;
 }
 
-/* What an authenticated user gets: the desktop first, then a text shell.
+/* What an authenticated user gets: a desktop with a shell already on it.
  *
- * They cannot both be on screen - there is one framebuffer and no way to switch
- * between virtual consoles - so they take turns. Closing the last window ends
- * the desktop, the console comes back, and the shell starts on it. Leaving the
- * shell logs out.
+ * The desktop opens a terminal, so the shell is a window rather than something
+ * waiting for the desktop to finish. Anything else - paint, another terminal -
+ * is launched from there like any other program.
+ *
+ * The text console is still underneath, because there is one framebuffer and no
+ * way to switch between virtual consoles. Closing every window ends the desktop
+ * and hands the screen back, and the shell that starts on it is what `exit`
+ * logs out of. That is also the path taken when there is no desktop at all.
  *
  * By the time this runs the server is already up: login waits for it, so there
  * is nothing to poll for here. */
 static void session(void)
 {
     if (win_server_running()) {
-        printf("starting the desktop - close every window to reach a shell.\n");
-        char* paint1[] = { "paint", "80", "90", 0 };
-        char* paint2[] = { "paint", "430", "150", 0 };
-        char* clock[]  = { "clock", 0 };
-        const char* which[] = { "/BIN/PAINT.ELF", "/BIN/PAINT.ELF", "/BIN/CLOCK.ELF" };
-        char** argv[] = { paint1, paint2, clock };
+        printf("starting the desktop - the terminal window is your shell.\n");
+        char* term[]  = { "term", "40", "40", 0 };
+        char* clock[] = { "clock", "700", "60", 0 };
+        const char* which[] = { "/BIN/TERM.ELF", "/BIN/CLOCK.ELF" };
+        char** argv[] = { term, clock };
         int started = 0;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 2; ++i) {
             const int pid = fork();
             if (pid == 0) {
                 execve(which[i], argv[i], 0);

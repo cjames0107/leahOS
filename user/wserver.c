@@ -46,6 +46,12 @@
 #define TITLE_HEIGHT 18
 #define BORDER       3
 #define CLOSE_SIZE   12
+/* The grip bar along the bottom, and the grow box sitting at its right end.
+ * A strip of its own rather than a corner overlapping the content, so a click
+ * near the bottom-right of a window is unambiguously a resize and never a
+ * stroke the client was expecting. */
+#define GRIP_H       14
+#define GRIP_W       16
 
 /* Polling rates. Fast enough that the pointer does not feel detached, slow
  * enough that the server is not a busy-wait. */
@@ -89,6 +95,7 @@ static unsigned char     g_font[256 * 16];
  * only the server needs to know. */
 static uint32_t* g_pixels[WS_MAX_WINDOWS];   /* the client's pixels, mapped here */
 static uint32_t  g_mapped_gen[WS_MAX_WINDOWS];
+static uint32_t  g_pixel_gen[WS_MAX_WINDOWS];  /* which segment generation is mapped */
 static unsigned long g_pixel_bytes[WS_MAX_WINDOWS];
 /* The server's own copy of each window's size, taken once and checked. The
  * client's fields stay writable by the client; these do not. */
@@ -97,27 +104,119 @@ static unsigned  g_height[WS_MAX_WINDOWS];
 static int       g_order[WS_MAX_WINDOWS];    /* front to back; [0] is focused */
 static int       g_count;
 
-static int g_damaged = 1;
+/* --- damage ---------------------------------------------------------------
+ *
+ * Recomposing the whole screen to show a blinking cursor or a moved window is
+ * most of a megabyte of work for a few hundred pixels of change. Instead each
+ * thing that changes says which rectangle it changed, and a pass recomposes and
+ * blits only those - the rest of the backbuffer is still correct from last
+ * time, which is also what lets the cursor be erased by copying back out of it.
+ *
+ * The list is short and merges greedily. Being imprecise here costs a few
+ * redundant pixels; being wrong costs a stale screen, so overlapping rectangles
+ * are unioned rather than tracked separately. */
+struct rect { int x, y, w, h; };
+
+#define WS_MAX_DAMAGE 12
+static struct rect g_damage[WS_MAX_DAMAGE];
+static int         g_damage_count;
+
+/* The rectangle currently being composed. Drawing outside it is not merely
+ * wasted - it would write parts of the backbuffer this pass is not going to
+ * blit, so what is on screen and what is in the buffer would drift apart. */
+static struct rect g_clip;
+
 static int g_cursor_x, g_cursor_y;
 static int g_last_cursor_x = -1, g_last_cursor_y = -1;
 static int g_dragging = -1, g_drag_dx, g_drag_dy;
+/* Resizing draws a rubber-band outline and commits on release, rather than
+ * reallocating the client's segment on every pixel of pointer movement. */
+static int g_resizing = -1;
+static int g_resize_w, g_resize_h;
+static int g_resize_start_w, g_resize_start_h;
+static int g_resize_from_x, g_resize_from_y;
+static struct rect g_band;
+static int g_band_shown;
 static int g_mouse_grab = -1;
 static int g_last_left;
+
+static int imax(int a, int b) { return a > b ? a : b; }
+static int imin(int a, int b) { return a < b ? a : b; }
+
+static int rects_overlap(const struct rect* a, const struct rect* b)
+{
+    return a->x < b->x + b->w && b->x < a->x + a->w &&
+           a->y < b->y + b->h && b->y < a->y + a->h;
+}
+
+static void damage_rect(int x, int y, int w, int h)
+{
+    /* Clip to the screen first, so nothing downstream has to think about it. */
+    const int x0 = imax(x, 0), y0 = imax(y, 0);
+    const int x1 = imin(x + w, (int)g_fb.width), y1 = imin(y + h, (int)g_fb.height);
+    if (x1 <= x0 || y1 <= y0)
+        return;
+
+    struct rect r;
+    r.x = x0; r.y = y0; r.w = x1 - x0; r.h = y1 - y0;
+
+    for (int i = 0; i < g_damage_count; ++i) {
+        if (!rects_overlap(&r, &g_damage[i]))
+            continue;
+        const int nx = imin(r.x, g_damage[i].x), ny = imin(r.y, g_damage[i].y);
+        const int mx = imax(r.x + r.w, g_damage[i].x + g_damage[i].w);
+        const int my = imax(r.y + r.h, g_damage[i].y + g_damage[i].h);
+        g_damage[i].x = nx; g_damage[i].y = ny;
+        g_damage[i].w = mx - nx; g_damage[i].h = my - ny;
+        return;
+    }
+
+    if (g_damage_count < WS_MAX_DAMAGE) {
+        g_damage[g_damage_count++] = r;
+        return;
+    }
+    /* Out of room: collapse everything into one bounding rectangle rather than
+     * dropping a region and leaving the screen stale. */
+    for (int i = 1; i < g_damage_count; ++i) {
+        const int nx = imin(g_damage[0].x, g_damage[i].x);
+        const int ny = imin(g_damage[0].y, g_damage[i].y);
+        const int mx = imax(g_damage[0].x + g_damage[0].w,
+                            g_damage[i].x + g_damage[i].w);
+        const int my = imax(g_damage[0].y + g_damage[0].h,
+                            g_damage[i].y + g_damage[i].h);
+        g_damage[0].x = nx; g_damage[0].y = ny;
+        g_damage[0].w = mx - nx; g_damage[0].h = my - ny;
+    }
+    g_damage_count = 1;
+    damage_rect(r.x, r.y, r.w, r.h);
+}
+
+static void damage_all(void)
+{
+    g_damage_count = 0;
+    damage_rect(0, 0, (int)g_fb.width, (int)g_fb.height);
+}
 
 /* --- drawing into the backbuffer ---------------------------------------- */
 
 static void back_plot(int x, int y, uint32_t colour)
 {
-    if (x < 0 || y < 0 || (unsigned)x >= g_fb.width || (unsigned)y >= g_fb.height)
+    if (x < g_clip.x || y < g_clip.y ||
+        x >= g_clip.x + g_clip.w || y >= g_clip.y + g_clip.h)
         return;
     g_back[(unsigned)y * g_fb.width + (unsigned)x] = colour;
 }
 
+/* Clipped up front rather than per pixel: a window's face is most of its area,
+ * and a pass that only has to repaint a title bar should not walk the rest. */
 static void fill(int x, int y, unsigned w, unsigned h, uint32_t colour)
 {
-    for (unsigned row = 0; row < h; ++row)
-        for (unsigned col = 0; col < w; ++col)
-            back_plot(x + (int)col, y + (int)row, colour);
+    const int x0 = imax(x, g_clip.x), y0 = imax(y, g_clip.y);
+    const int x1 = imin(x + (int)w, g_clip.x + g_clip.w);
+    const int y1 = imin(y + (int)h, g_clip.y + g_clip.h);
+    for (int row = y0; row < y1; ++row)
+        for (int col = x0; col < x1; ++col)
+            g_back[(unsigned)row * g_fb.width + (unsigned)col] = colour;
 }
 
 /* Raised (or, inverted, sunken): light on the top and left edges, shadow on the
@@ -153,7 +252,32 @@ static void draw_text(int x, int y, const char* text, uint32_t colour)
 static unsigned frame_width(int slot)  { return g_width[slot] + BORDER * 2; }
 static unsigned frame_height(int slot)
 {
-    return g_height[slot] + BORDER * 2 + TITLE_HEIGHT;
+    return g_height[slot] + BORDER * 2 + TITLE_HEIGHT + GRIP_H;
+}
+
+/* The whole window, frame included, as a rectangle - which is what damage is
+ * expressed in. */
+static struct rect frame_rect(int slot)
+{
+    struct ws_window* w = &g_control->windows[slot];
+    struct rect r;
+    r.x = w->x; r.y = w->y;
+    r.w = (int)frame_width(slot); r.h = (int)frame_height(slot);
+    return r;
+}
+
+static void damage_window(int slot)
+{
+    const struct rect r = frame_rect(slot);
+    damage_rect(r.x, r.y, r.w, r.h);
+}
+
+/* The grow box, bottom-right, inside the grip bar. */
+static void grow_box(int slot, int* x, int* y)
+{
+    struct ws_window* w = &g_control->windows[slot];
+    *x = w->x + (int)frame_width(slot) - BORDER - GRIP_W;
+    *y = w->y + (int)frame_height(slot) - BORDER - GRIP_H;
 }
 
 /* Where the close box sits, in screen coordinates. On the left, as this era of
@@ -190,24 +314,52 @@ static void draw_window(int slot, int focused)
     draw_text(cx + CLOSE_SIZE + 6, ty + (TITLE_HEIGHT - 16) / 2 + 1,
               title, TITLE_TEXT);
 
-    /* The client's own pixels. */
+    /* The grip bar, and the grow box at its right end: three diagonal lines,
+     * which is the whole of the idiom. */
+    const int gy = w->y + (int)frame_height(slot) - BORDER - GRIP_H;
+    fill(tx, gy, fw - BORDER * 2, GRIP_H, FACE);
+    int bx, by;
+    grow_box(slot, &bx, &by);
+    bevel(bx, by, GRIP_W, GRIP_H, 1);
+    for (int line = 0; line < 3; ++line) {
+        const int off = 3 + line * 4;
+        for (int i = 0; i < GRIP_W - 4 - off; ++i)
+            back_plot(bx + GRIP_W - 2 - i, by + GRIP_H - 2 - (GRIP_W - 4 - off) + i,
+                      SHADOW);
+    }
+
+    /* The client's own pixels. Bounded by the clip rather than the window, so
+     * a pass repainting one corner copies one corner. */
     const uint32_t* px = g_pixels[slot];
     if (px == 0)
         return;
     const int content_x = w->x + BORDER, content_y = ty + TITLE_HEIGHT;
-    for (unsigned row = 0; row < g_height[slot]; ++row)
-        for (unsigned col = 0; col < g_width[slot]; ++col)
-            back_plot(content_x + (int)col, content_y + (int)row,
-                      px[(unsigned long)row * g_width[slot] + col]);
+    const int x0 = imax(content_x, g_clip.x), y0 = imax(content_y, g_clip.y);
+    const int x1 = imin(content_x + (int)g_width[slot], g_clip.x + g_clip.w);
+    const int y1 = imin(content_y + (int)g_height[slot], g_clip.y + g_clip.h);
+    for (int y = y0; y < y1; ++y) {
+        const uint32_t* row = &px[(unsigned long)(y - content_y) * g_width[slot]];
+        uint32_t* dst = &g_back[(unsigned)y * g_fb.width + (unsigned)x0];
+        for (int x = x0; x < x1; ++x)
+            *dst++ = row[x - content_x];
+    }
 }
 
-/* Desktop, then windows back to front so the topmost is drawn last and wins. */
-static void compose(void)
+/* Desktop, then windows back to front so the topmost is drawn last and wins -
+ * within one rectangle, and skipping the windows that do not touch it. */
+static void compose_rect(const struct rect* r)
 {
-    for (unsigned long i = 0; i < (unsigned long)g_fb.width * g_fb.height; ++i)
-        g_back[i] = DESKTOP;
-    for (int i = g_count - 1; i >= 0; --i)
-        draw_window(g_order[i], i == 0);
+    g_clip = *r;
+    for (int y = r->y; y < r->y + r->h; ++y) {
+        uint32_t* row = &g_back[(unsigned)y * g_fb.width + (unsigned)r->x];
+        for (int x = 0; x < r->w; ++x)
+            row[x] = DESKTOP;
+    }
+    for (int i = g_count - 1; i >= 0; --i) {
+        const struct rect f = frame_rect(g_order[i]);
+        if (rects_overlap(&f, r))
+            draw_window(g_order[i], i == 0);
+    }
 }
 
 /* --- getting it onto the screen ----------------------------------------- */
@@ -296,10 +448,14 @@ static void raise_window(int slot)
         ++at;
     if (at >= g_count || at == 0)
         return;
+    const int was_focused = g_order[0];
     for (int i = at; i > 0; --i)
         g_order[i] = g_order[i - 1];
     g_order[0] = slot;
-    g_damaged = 1;
+    /* Both change: the raised window comes forward, and the one it displaced
+     * loses its active title bar. */
+    damage_window(slot);
+    damage_window(was_focused);
 }
 
 /* --- following what the clients are doing -------------------------------- */
@@ -366,8 +522,10 @@ static void reconcile(void)
                 g_order[i] = g_order[i - 1];
             g_order[0] = slot;
             ++g_count;
-            g_damaged = 1;
+            g_pixel_gen[slot] = 0;
+            damage_window(slot);
         } else if (state != WS_SLOT_LIVE && known) {
+            damage_window(slot);        /* while its geometry is still known */
             for (int i = 0; i < g_count; ++i) {
                 if (g_order[i] != slot)
                     continue;
@@ -384,16 +542,48 @@ static void reconcile(void)
                 munmap(g_pixels[slot], g_pixel_bytes[slot]);
             g_pixels[slot] = 0;
             g_pixel_bytes[slot] = 0;
+            g_pixel_gen[slot] = 0xFFFFFFFFu;
             if (g_dragging == slot)   g_dragging = -1;
             if (g_mouse_grab == slot) g_mouse_grab = -1;
-            g_damaged = 1;
+            if (g_resizing == slot)   g_resizing = -1;
         } else if (state == WS_SLOT_LIVE && known) {
-            /* Redraw only when the client says it drew something. */
+            /* A resize replaces the segment rather than growing it, so the
+             * client publishes a new generation and the server swaps over. The
+             * old pages stay alive until this unmaps them, which is what lets
+             * the two overlap instead of needing a handshake. */
+            const uint32_t gen = __atomic_load_n(&w->pixels_gen, __ATOMIC_ACQUIRE);
+            if (gen != g_pixel_gen[slot]) {
+                const unsigned width = w->width, height = w->height;
+                const int fresh = (width != 0 && height != 0 &&
+                                   width <= g_fb.width && height <= g_fb.height)
+                                ? shm_open(WS_PIXEL_KEY(slot, gen), 0, 0) : -1;
+                if (fresh >= 0) {
+                    const unsigned long bytes = shm_size(fresh);
+                    uint32_t* px = (bytes >= (unsigned long)width * height * 4)
+                                 ? (uint32_t*)shm_map(fresh) : 0;
+                    if (px != 0) {
+                        damage_window(slot);    /* where it was */
+                        if (g_pixels[slot] != 0 && g_pixel_bytes[slot] != 0)
+                            munmap(g_pixels[slot], g_pixel_bytes[slot]);
+                        g_pixels[slot] = px;
+                        g_pixel_bytes[slot] = bytes;
+                        g_width[slot] = width;
+                        g_height[slot] = height;
+                        g_pixel_gen[slot] = gen;
+                        g_mapped_gen[slot] = w->present;
+                        damage_window(slot);    /* and where it now is */
+                    }
+                }
+            }
+
+            /* Redraw only when the client says it drew something, and only the
+             * content - the frame around it has not changed. */
             const uint32_t present = __atomic_load_n(&w->present, __ATOMIC_ACQUIRE);
             if (present != g_mapped_gen[slot]) {
                 g_mapped_gen[slot] = present;
                 w->drawn = present;
-                g_damaged = 1;
+                damage_rect(w->x + BORDER, w->y + BORDER + TITLE_HEIGHT,
+                            (int)g_width[slot], (int)g_height[slot]);
             }
         }
     }
@@ -435,7 +625,20 @@ static void handle_input(void)
                                  x < cx + CLOSE_SIZE && y < cy + CLOSE_SIZE;
             const int on_title = y < w->y + BORDER + TITLE_HEIGHT;
 
-            if (on_close) {
+            int gx, gy;
+            grow_box(slot, &gx, &gy);
+            const int on_grip = x >= gx && y >= gy &&
+                                x < gx + GRIP_W && y < gy + GRIP_H;
+
+            if (on_grip) {
+                g_resizing = slot;
+                g_resize_start_w = (int)g_width[slot];
+                g_resize_start_h = (int)g_height[slot];
+                g_resize_from_x = x;
+                g_resize_from_y = y;
+                g_resize_w = g_resize_start_w;
+                g_resize_h = g_resize_start_h;
+            } else if (on_close) {
                 push_event(slot, WIN_EVENT_CLOSE, 0, 0, 1, 0);
             } else if (on_title) {
                 g_dragging = slot;
@@ -458,6 +661,23 @@ static void handle_input(void)
         push_event(g_mouse_grab, WIN_EVENT_MOUSE_MOVE,
                    x - (w->x + BORDER),
                    y - (w->y + BORDER + TITLE_HEIGHT), 1, 0);
+    }
+
+    if (released && g_resizing >= 0) {
+        /* Ask the client for the size the band ended at. It answers by
+         * replacing its segment, which reconcile picks up. */
+        struct ws_window* w = &g_control->windows[g_resizing];
+        if (g_resize_w != (int)g_width[g_resizing] ||
+            g_resize_h != (int)g_height[g_resizing]) {
+            w->req_width = (uint32_t)g_resize_w;
+            w->req_height = (uint32_t)g_resize_h;
+            __atomic_add_fetch(&w->resize_seq, 1, __ATOMIC_RELEASE);
+        }
+        g_resizing = -1;
+        g_mouse_grab = -1;
+        g_dragging = -1;
+        g_last_left = left;
+        return;
     }
 
     if (released) {
@@ -487,13 +707,68 @@ static void handle_input(void)
         if (ny > max_y) ny = max_y;
 
         if (nx != w->x || ny != w->y) {
+            damage_window(g_dragging);      /* vacated */
             w->x = nx;
             w->y = ny;
-            g_damaged = 1;
+            damage_window(g_dragging);      /* occupied */
         }
     }
 
+    if (g_resizing >= 0) {
+        struct ws_window* w = &g_control->windows[g_resizing];
+        int nw = g_resize_start_w + (x - g_resize_from_x);
+        int nh = g_resize_start_h + (y - g_resize_from_y);
+        const int min_w = (int)(w->min_width  != 0 ? w->min_width  : 64u);
+        const int min_h = (int)(w->min_height != 0 ? w->min_height : 32u);
+        if (nw < min_w) nw = min_w;
+        if (nh < min_h) nh = min_h;
+        /* Bounded by the screen: a window bigger than the framebuffer is one
+         * the server would refuse to map anyway. */
+        const int max_w = (int)g_fb.width  - BORDER * 2;
+        const int max_h = (int)g_fb.height - (BORDER * 2 + TITLE_HEIGHT + GRIP_H);
+        if (nw > max_w) nw = max_w;
+        if (nh > max_h) nh = max_h;
+        g_resize_w = nw;
+        g_resize_h = nh;
+    }
+
     g_last_left = left;
+}
+
+/* --- the rubber band ------------------------------------------------------
+ *
+ * Drawn straight to the screen while a resize is in progress and rubbed out
+ * from the backbuffer afterwards, exactly as the cursor is. Committing the size
+ * on every pixel of movement would mean the client allocating and the server
+ * mapping a new segment per frame, which is a great deal of work to show
+ * something that is not final yet. */
+static void band_plot(int x, int y)
+{
+    if (x < 0 || y < 0 || (unsigned)x >= g_fb.width || (unsigned)y >= g_fb.height)
+        return;
+    uint32_t* p = (uint32_t*)(g_screen + (unsigned long)y * g_fb.pitch
+                              + (unsigned long)x * 4);
+    *p = OUTLINE;
+}
+
+static void draw_band(const struct rect* r)
+{
+    for (int i = 0; i < r->w; ++i) {
+        band_plot(r->x + i, r->y);
+        band_plot(r->x + i, r->y + r->h - 1);
+    }
+    for (int i = 0; i < r->h; ++i) {
+        band_plot(r->x, r->y + i);
+        band_plot(r->x + r->w - 1, r->y + i);
+    }
+}
+
+static void erase_band(const struct rect* r)
+{
+    present_region(r->x, r->y, (unsigned)r->w, 1);
+    present_region(r->x, r->y + r->h - 1, (unsigned)r->w, 1);
+    present_region(r->x, r->y, 1, (unsigned)r->h);
+    present_region(r->x + r->w - 1, r->y, 1, (unsigned)r->h);
 }
 
 int main(void)
@@ -538,6 +813,11 @@ int main(void)
 
     g_cursor_x = (int)g_fb.width / 2;
     g_cursor_y = (int)g_fb.height / 2;
+    for (int i = 0; i < WS_MAX_WINDOWS; ++i)
+        g_pixel_gen[i] = 0xFFFFFFFFu;
+    g_clip.x = 0; g_clip.y = 0;
+    g_clip.w = (int)g_fb.width; g_clip.h = (int)g_fb.height;
+    damage_all();               /* the desktop has to be painted once */
 
     /* Published last: a client that sees the magic can rely on everything else
      * already being in place. */
@@ -563,20 +843,48 @@ int main(void)
             break;                      /* every window has gone */
         }
 
-        if (g_damaged) {
-            compose();
-            present_region(0, 0, g_fb.width, g_fb.height);
-            g_last_cursor_x = -1;       /* the whole screen was repainted */
-            g_damaged = 0;
+        /* The band is on the screen, not in the backbuffer, so it has to come
+         * off before anything reads the screen back or composes over it. */
+        if (g_band_shown) {
+            erase_band(&g_band);
+            g_band_shown = 0;
+        }
+
+        if (g_damage_count > 0) {
+            for (int i = 0; i < g_damage_count; ++i) {
+                compose_rect(&g_damage[i]);
+                present_region(g_damage[i].x, g_damage[i].y,
+                               (unsigned)g_damage[i].w, (unsigned)g_damage[i].h);
+                /* The cursor may have been inside what was just repainted, in
+                 * which case what it was covering is no longer what is saved. */
+                if (g_last_cursor_x >= 0) {
+                    struct rect c;
+                    c.x = g_last_cursor_x; c.y = g_last_cursor_y;
+                    c.w = CURSOR_W; c.h = CURSOR_H;
+                    if (rects_overlap(&c, &g_damage[i]))
+                        g_last_cursor_x = -1;
+                }
+            }
+            g_damage_count = 0;
         } else if (g_cursor_x != g_last_cursor_x || g_cursor_y != g_last_cursor_y) {
             erase_cursor();
-        } else {
+        } else if (g_resizing < 0) {
             /* Nothing changed. Sleep rather than spin: this loop polls input
              * and client state, and polling flat out means a syscall per pass
              * on a CPU that never blocks - which is enough to keep another
              * processor out of the kernel entirely. */
             msleep(kIdleSleepMs);
             continue;
+        }
+
+        if (g_resizing >= 0) {
+            struct ws_window* w = &g_control->windows[g_resizing];
+            g_band.x = w->x;
+            g_band.y = w->y;
+            g_band.w = g_resize_w + BORDER * 2;
+            g_band.h = g_resize_h + BORDER * 2 + TITLE_HEIGHT + GRIP_H;
+            draw_band(&g_band);
+            g_band_shown = 1;
         }
 
         draw_cursor();

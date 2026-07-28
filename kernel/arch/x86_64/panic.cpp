@@ -1,4 +1,7 @@
+#include <leah/apic.hpp>
+#include <leah/smp.hpp>
 #include <leah/console.hpp>
+#include <leah/vmm.hpp>
 #include <leah/cpu.hpp>
 #include <leah/panic.hpp>
 
@@ -18,6 +21,23 @@ void describe_page_fault(const interrupts::Frame& frame)
                     code & 0x4 ? "user" : "kernel");
     if (code & 0x10)
         console::write("  during an instruction fetch\n");
+
+    // What the mapping actually says. "Protection violation" alone does not
+    // distinguish a page that is read-only on purpose from one that is
+    // copy-on-write and should have been resolved, and that is usually the
+    // question being asked.
+    u64 entry = 0;
+    if (!vmm::recorded_fault_mapping(cpu::read_cr2(), entry))
+        entry = vmm::entry_for(cpu::read_cr2());
+    if (entry == 0) {
+        console::write("  mapping          : none\n");
+    } else {
+        console::printf("  mapping          : %016llx  %s%s%s%s\n", entry,
+                        (entry & vmm::Present) ? "present " : "absent ",
+                        (entry & vmm::Write) ? "write " : "read-only ",
+                        (entry & vmm::User) ? "user " : "kernel ",
+                        (entry & vmm::CopyOnWrite) ? "copy-on-write" : "");
+    }
     console::write("\n");
 }
 
@@ -57,9 +77,20 @@ void print_registers(const interrupts::Frame& frame)
 
 } // namespace
 
+// Bring the machine to a stop before saying anything. Other processors still
+// running would interleave their console output with the report - which is what
+// turns a register dump into nonsense - and would carry on executing on a
+// machine that has already declared itself broken.
+void stop_other_cpus()
+{
+    if (smp::multiprocessor())
+        apic::send_ipi_all_but_self(interrupts::kHaltVector);
+}
+
 [[noreturn]] void panic(const char* message)
 {
     cpu::cli();
+    stop_other_cpus();
     print_header(message);
     console::set_color(console::Color::DarkGray);
     console::write("\n  halted.\n");
@@ -69,6 +100,7 @@ void print_registers(const interrupts::Frame& frame)
 [[noreturn]] void panic(const char* message, const interrupts::Frame& frame)
 {
     cpu::cli();
+    stop_other_cpus();
     print_header(message);
     if (frame.vector == 14)
         describe_page_fault(frame);

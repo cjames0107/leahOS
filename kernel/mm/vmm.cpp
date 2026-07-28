@@ -1,5 +1,6 @@
 #include <leah/cpu.hpp>
 #include <leah/memory.hpp>
+#include <leah/console.hpp>
 #include <leah/panic.hpp>
 #include <leah/percpu.hpp>
 #include <leah/apic.hpp>
@@ -425,6 +426,40 @@ void release_low_half()
     asm volatile("mov %0, %%cr3" : : "r"(loaded) : "memory");
 }
 
+namespace {
+// The last fault seen on each CPU, recorded before anything that could switch
+// address spaces. Per CPU because two processors can fault at once.
+constexpr usize kMaxCpuSlots = 32;
+vaddr_t g_fault_address[kMaxCpuSlots];
+u64     g_fault_entry[kMaxCpuSlots];
+} // namespace
+
+void note_fault_mapping(vaddr_t virt, u64 entry)
+{
+    const u32 slot = percpu::active();
+    if (slot >= kMaxCpuSlots)
+        return;
+    g_fault_address[slot] = virt;
+    g_fault_entry[slot] = entry;
+}
+
+bool recorded_fault_mapping(vaddr_t virt, u64& entry)
+{
+    const u32 slot = percpu::active();
+    if (slot >= kMaxCpuSlots || g_fault_address[slot] != virt)
+        return false;
+    entry = g_fault_entry[slot];
+    return true;
+}
+
+// The page table entry behind an address, for a fault report to quote. Zero
+// when nothing is mapped there.
+u64 entry_for(vaddr_t virt)
+{
+    u64* pt_entry = walk_to_pte(current_pml4(), virt);
+    return pt_entry != nullptr ? *pt_entry : 0;
+}
+
 bool handle_cow_fault(vaddr_t virt)
 {
     u64* pt_entry = walk_to_pte(current_pml4(), virt);
@@ -539,6 +574,25 @@ AddressSpace fork_address_space(AddressSpace parent)
                     const u64 flags = entry & (Write | User | NoExecute);
                     const paddr_t source = entry & kAddressMask;
 
+                    // A genuinely shared mapping is handed over exactly as it
+                    // stands - writable, still shared, still the same pages.
+                    // Being seen by everyone who maps it is the whole point, so
+                    // there is nothing here to copy and nothing to defer.
+                    //
+                    // The reference is taken where there is one to take. Device
+                    // memory - a mapped framebuffer - is outside the allocator's
+                    // range and has no reference count, and must still be passed
+                    // through rather than copied into a private screen.
+                    if ((entry & Shared) != 0) {
+                        pmm::share(source);
+                        if (!map_into(child_pml4, virt, source, flags | Shared)) {
+                            pmm::release(source);
+                            destroy_address_space(child);
+                            return 0;
+                        }
+                        continue;
+                    }
+
                     // Share the frame instead of copying it: both sides lose
                     // write permission and gain the CoW mark, so the first write
                     // from either faults and gets its own private copy.
@@ -550,6 +604,7 @@ AddressSpace fork_address_space(AddressSpace parent)
                     // read-only page whose first write faults with nothing to
                     // resolve it. Only a page that is read-only and not CoW is
                     // genuinely read-only, and can be shared as it stands.
+                    //
                     const bool needs_cow =
                         (entry & Write) != 0 || (entry & CopyOnWrite) != 0;
 

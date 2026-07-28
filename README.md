@@ -642,6 +642,76 @@ Dragging clamps so the title bar — and with it the close box — can never lea
 screen, or a window could be dragged somewhere it can never be closed. Closing is
 a request the client can act on, not an eviction.
 
+### Resizing, and only redrawing what changed
+
+Recomposing the whole screen to move a window is most of a megabyte of work for
+a few hundred pixels of change, so each thing that changes now says which
+rectangle it changed and a pass recomposes and blits only those. The rest of the
+backbuffer stays correct from last time - which is also what lets the cursor be
+erased by copying back out of it. The list merges greedily and collapses to a
+bounding box when it fills: being imprecise costs a few redundant pixels, being
+wrong costs a stale screen.
+
+Resizing is a **grow box** in a bottom grip bar, a strip of its own rather than a
+corner overlapping the content, so a click near the bottom-right of a window is
+unambiguously a resize and never a stroke the client was expecting. Dragging it
+draws a rubber-band outline and commits on release; committing every pixel of
+movement would mean the client allocating and the server mapping a new segment
+per frame.
+
+The pixels belong to the client, so the server cannot resize them - it asks. The
+server writes a requested size and bumps a sequence number; the client replaces
+its segment under the next generation's key and bumps *that*. Shared memory has
+no `realloc`, so this is allocate-and-swap, and the two generations have to be
+able to exist at once: the server keeps drawing from the old pages until it
+notices the new ones, which is why the key carries a generation as well as a
+slot. Each side writes only its own fields, so there is no lock - only the
+ordering, which is why each counter is stored last.
+
+### A terminal
+
+The desktop and the console no longer take turns. `login` opens a terminal
+window, so the shell is one of the windows rather than something waiting for the
+desktop to finish; anything else is launched from there.
+
+Two pipes stand in for a terminal device - the shell's stdin on one, its stdout
+and stderr on the other. The awkward part is that a pipe read blocks, and polling
+the window and waiting for shell output both have to happen, so the read lives on
+a **thread** of its own and they share a character grid under a mutex. There is
+no line discipline on a pipe, so the terminal does the editing: keys are echoed
+there and a line only reaches the shell on Enter. That is also why backspace
+works, because nothing else in the path knows what one means.
+
+Building it turned up five bugs that nothing before had been shaped to find,
+because the terminal is the first program to combine threads, `fork` and shared
+memory:
+
+- **`fork` made shared memory copy-on-write.** A client that forked after opening
+  a window carried on drawing into a private copy while the server composited the
+  pages it had stopped writing to. Shared mappings now carry a bit that `fork`
+  hands over intact - device memory too, or a forked child would get a private
+  framebuffer.
+- **The mouse never clamped to the screen.** The position kept accumulating past
+  the edge, so a pointer pushed into a corner had to be dragged all the way back
+  before it appeared to move again.
+- **A user segfault panicked the kernel.** A ring-3 fault that cannot be resolved
+  is the program's bug; it now dies on its own and the report says which one and
+  where.
+- **`exit` did not end a process's threads**, so anything threaded that returned
+  from `main` left a process nothing could reap. It signals them instead of
+  retiring them: a thread blocked inside a syscall is halfway through something,
+  and marking it dead abandons that stack mid-call.
+- **`pipe_read` was uninterruptible**, so a killed process blocked on a pipe could
+  never die - going back to sleep on a wake is how a process becomes unkillable.
+
+A sixth was hiding behind those: a thread group's open files live in the leader's
+slot, and `group_leader` skipped a leader that had become a zombie - sending every
+surviving thread to its own empty table copy, so the real table was never closed
+and its pipes never released. The leader's slot is now held until the whole group
+is gone. Only the *leader's*: holding back an ordinary thread's slot makes
+`thread_join` wait for a process that is still running, which is a hang rather
+than a leak.
+
 The compositor **sleeps** between passes rather than spinning. That is not a
 politeness: a polling loop that only ever yields stays runnable, holds the kernel
 lock over and over, and on a multiprocessor can keep another CPU out of the kernel
@@ -1087,5 +1157,6 @@ process still mapped them.
 - [x] the window server moved out of the kernel, onto shared memory
 - [x] `login` starts the desktop; closing every window returns a shell
 - [ ] per-client channels, so the rendezvous block need not be world-writable
-- [ ] window resizing, overlapping-region damage instead of a full recompose
-- [ ] a terminal window, so the shell and the desktop need not take turns
+- [x] window resizing, and damage rectangles instead of a full recompose
+- [x] a terminal window, so the shell and the desktop need not take turns
+- [ ] reflowing a terminal's scrollback when it is resized

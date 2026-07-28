@@ -58,6 +58,7 @@
 #define SYS_fbfont     53
 #define SYS_sleep      54
 #define SYS_shmdestroy 55
+#define SYS_threadexit 56
 
 /* shm_open flags */
 #define SHM_PUBLIC     1

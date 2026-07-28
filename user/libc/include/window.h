@@ -18,8 +18,17 @@
  * its slot in the server's table), or -1 when there is no server or no room. */
 int win_create(int x, int y, unsigned width, unsigned height, const char* title);
 
-/* The window's pixel buffer, `width * height` packed as 0x00RRGGBB. */
+/* The window's pixel buffer, `width * height` packed as 0x00RRGGBB.
+ *
+ * Not stable across a resize: WIN_EVENT_RESIZE means this buffer has been
+ * replaced, so call it again rather than holding the old pointer. */
 uint32_t* win_map(int id);
+
+/* The window's current content size. */
+void win_size(int id, unsigned* width, unsigned* height);
+
+/* Refuse to be resized below this. Defaults to 64x32. */
+void win_set_min_size(int id, unsigned width, unsigned height);
 
 /* Show what has been drawn. */
 void win_present(int id);

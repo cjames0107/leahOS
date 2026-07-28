@@ -147,6 +147,12 @@ struct NoPreemption {
 // parent reaps it with wait().
 [[noreturn]] void exit_current(i32 code);
 
+// End every thread of the calling process, then the caller. This is what a
+// program returning from main means: a thread still blocked in a syscall would
+// otherwise keep the process alive with nobody left to finish it, and nothing
+// could ever reap it.
+[[noreturn]] void exit_group(i32 code);
+
 // Reap a finished child. Returns the child's pid and writes its exit code
 // through `status` (if non-null), or -1 when the caller has no children.
 // Blocks until a child exits if one is still running.
@@ -161,6 +167,10 @@ i64 wait_child(i32* status);
 u32 fork_current(const TrapFrame& parent_user);
 
 u32 current_pid();
+
+// For a fault report: which program was running, and whether it was in ring 3.
+const char* current_name();
+bool current_is_user();
 u32 alive_count();
 
 // The running task's address space, and a setter execve uses to swap in a

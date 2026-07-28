@@ -454,6 +454,10 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
 
     switch (frame->rax) {
     case Exit:
+        // The whole process: a program returning from main ends its threads too.
+        scheduler::exit_group(static_cast<i32>(frame->rdi));     // never returns
+
+    case ThreadExit:
         scheduler::exit_current(static_cast<i32>(frame->rdi));   // never returns
 
     case Write:
@@ -693,10 +697,15 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             break;
         }
 
+        // Shared, not merely writable: a fork must hand these pages to the
+        // child as they are. Without the mark they would be made
+        // copy-on-write like anything else, and a client that forked after
+        // opening a window would carry on drawing into a private copy while
+        // the server composited the pages it had stopped writing to.
         bool ok = true;
         for (usize i = 0; i < pages && ok; ++i) {
             ok = vmm::map(base + i * vmm::kPageSize, shm::frame_of(id, i),
-                          vmm::Write | vmm::User | vmm::NoExecute);
+                          vmm::Write | vmm::User | vmm::NoExecute | vmm::Shared);
         }
         if (!ok) {
             frame->rax = static_cast<u64>(-1);
@@ -739,10 +748,12 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             frame->rax = static_cast<u64>(-1);
             break;
         }
+        // The framebuffer is device memory, shared by definition: copying it
+        // on write would give a forked child a private screen.
         bool ok = true;
         for (u64 offset = 0; offset < bytes && ok; offset += vmm::kPageSize) {
             ok = vmm::map(base + offset, phys + offset,
-                          vmm::Write | vmm::User | vmm::NoExecute);
+                          vmm::Write | vmm::User | vmm::NoExecute | vmm::Shared);
         }
         if (ok) {
             scheduler::set_current_mmap_next(base + bytes);
