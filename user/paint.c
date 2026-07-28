@@ -10,6 +10,7 @@
  * will open.
  */
 
+#include <dialog.h>
 #include <image.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -152,10 +153,11 @@ static void clear_canvas(void)
     wg_fill(0, canvas_top(), (int)g_w, canvas_h(), WG_PAPER);
 }
 
-static void save(int png)
+static int g_pending_png = 1;   /* which format the open dialogue is for */
+
+/* Only the canvas, not the chrome: the toolbar is not part of the picture. */
+static void save_to(const char* path, int png)
 {
-    /* Only the canvas, not the chrome: the toolbar is not part of the picture. */
-    const char* path = png ? "/PAINT.PNG" : "/PAINT.GIF";
     const unsigned h = (unsigned)canvas_h();
     const uint32_t* start = &g_px[(unsigned long)canvas_top() * g_w];
     const int rc = png ? img_write_png(path, start, g_w, h)
@@ -164,6 +166,14 @@ static void save(int png)
         snprintf(g_note, sizeof(g_note), "saved %s (%ux%u)", path, g_w, h);
     else
         snprintf(g_note, sizeof(g_note), "could not write %s", path);
+}
+
+/* Ask where, rather than choosing for the user. */
+static void save(int png)
+{
+    g_pending_png = png;
+    dlg_save("/", png ? "picture.png" : "picture.gif");
+    snprintf(g_note, sizeof(g_note), "choose where to save");
 }
 
 static void draw_chrome(void)
@@ -217,6 +227,17 @@ int main(int argc, char** argv)
         while (win_poll(id, &e)) {
             if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
 
+            /* While a dialogue is up it takes the input; the drawing tools must
+             * not also act on a click meant for it. */
+            if (dlg_active() && e.type != WIN_EVENT_RESIZE) {
+                if (dlg_event(&e) == DLG_ACCEPT)
+                    save_to(dlg_path(), g_pending_png);
+                draw_chrome();
+                dlg_draw((int)g_w, (int)g_h);
+                win_present(id);
+                continue;
+            }
+
             if (e.type == WIN_EVENT_RESIZE) {
                 g_w = (unsigned)e.x; g_h = (unsigned)e.y;
                 g_px = win_map(id);
@@ -269,6 +290,7 @@ int main(int argc, char** argv)
                 continue;
             }
             draw_chrome();
+            dlg_draw((int)g_w, (int)g_h);
             win_present(id);
         }
         msleep(15);

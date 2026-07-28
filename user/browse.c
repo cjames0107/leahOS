@@ -13,6 +13,7 @@
  * the filesystem that records a type.
  */
 
+#include <dialog.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -391,25 +392,24 @@ static void draw(void)
 
 /* --- opening things ------------------------------------------------------ */
 
-static void launch(const char* path, int program)
+/* Run `app`, handing it `document` when there is one.
+ *
+ * Detached: the browser is not a shell and has no reason to wait. The desktop
+ * is what the new window belongs to. */
+static void launch(const char* app, const char* document)
 {
-    /* Detached: the browser is not its parent's shell and has no reason to wait
-     * for it. The desktop is what the new window belongs to. */
     if (fork() != 0)
         return;
     char* argv[3];
-    if (program) {
-        argv[0] = (char*)path;
-        argv[1] = 0;
-        execve(path, argv, 0);
-    } else {
-        argv[0] = "edit";
-        argv[1] = (char*)path;
-        argv[2] = 0;
-        execve("/BIN/EDIT.ELF", argv, 0);
-    }
+    argv[0] = (char*)app;
+    argv[1] = (char*)document;      /* null when the program takes none */
+    argv[2] = 0;
+    execve(app, argv, 0);
     exit(127);
 }
+
+/* What the open-with dialogue is deciding about. */
+static char g_opening[256];
 
 static void open_path(const char* path, int is_dir)
 {
@@ -425,8 +425,13 @@ static void open_path(const char* path, int is_dir)
             rebuild_tree();
         return;
     }
-    launch(path, ends_with(path, ".ELF"));
-    snprintf(g_status, sizeof(g_status), "opened %s", path);
+    /* Ask rather than assume. The name is the only hint this system has about
+     * what a file is, and a hint is not good enough to decide for someone. */
+    int n = 0;
+    while (path[n] != '\0' && n < 255) { g_opening[n] = path[n]; ++n; }
+    g_opening[n] = '\0';
+    dlg_open_with(g_opening);
+    snprintf(g_status, sizeof(g_status), "choose an application");
 }
 
 static void open_selected(void)
@@ -521,6 +526,20 @@ int main(int argc, char** argv)
                 win_destroy(id);
                 return 0;
             }
+            if (dlg_active() && event.type != WIN_EVENT_RESIZE) {
+                if (dlg_event(&event) == DLG_ACCEPT) {
+                    const char* app = dlg_path();
+                    /* "Run it" hands back the file itself: then it is the
+                     * program, not an argument to one. */
+                    const int itself = (strcmp(app, g_opening) == 0);
+                    launch(app, itself ? 0 : g_opening);
+                    snprintf(g_status, sizeof(g_status), "opened with %s", app);
+                }
+                draw();
+                dlg_draw((int)g_w, (int)g_h);
+                win_present(id);
+                continue;
+            }
             if (event.type == WIN_EVENT_RESIZE) {
                 g_w = (unsigned)event.x;
                 g_h = (unsigned)event.y;
@@ -570,6 +589,7 @@ int main(int argc, char** argv)
                 continue;       /* nothing else changes what is on screen */
             }
             draw();
+            dlg_draw((int)g_w, (int)g_h);
             win_present(id);
         }
         msleep(15);

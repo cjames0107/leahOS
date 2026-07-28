@@ -9,6 +9,7 @@
  * Ctrl+S saves. Ctrl+Q is the window manager's and never arrives here.
  */
 
+#include <dialog.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,8 +94,11 @@ static void load(const char* path)
     relines();
 }
 
-static void save(void)
+static void save_to(const char* path)
 {
+    int k = 0;
+    while (path[k] != '\0' && k < 255) { g_file[k] = path[k]; ++k; }
+    g_file[k] = '\0';
     const int fd = open(g_file, O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0) {
         snprintf(g_status, sizeof(g_status), "cannot write %s", g_file);
@@ -108,6 +112,14 @@ static void save(void)
     } else {
         snprintf(g_status, sizeof(g_status), "short write (%d of %d)", n, g_len);
     }
+}
+
+/* Always ask. An editor that silently overwrites whatever it was handed is a
+ * good way to lose a file you only meant to look at. */
+static void save(void)
+{
+    dlg_save("/", g_file[0] == '/' ? g_file + 1 : g_file);
+    snprintf(g_status, sizeof(g_status), "choose where to save");
 }
 
 static void insert(char c)
@@ -239,6 +251,14 @@ int main(int argc, char** argv)
                 win_destroy(id);
                 return 0;
             }
+            if (dlg_active() && event.type != WIN_EVENT_RESIZE) {
+                if (dlg_event(&event) == DLG_ACCEPT)
+                    save_to(dlg_path());
+                draw();
+                dlg_draw((int)g_w, (int)g_h);
+                win_present(id);
+                continue;
+            }
             if (event.type == WIN_EVENT_RESIZE) {
                 g_w = (unsigned)event.x;
                 g_h = (unsigned)event.y;
@@ -285,6 +305,7 @@ int main(int argc, char** argv)
                 continue;
             }
             draw();
+            dlg_draw((int)g_w, (int)g_h);
             win_present(id);
         }
         msleep(15);

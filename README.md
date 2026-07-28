@@ -802,6 +802,25 @@ not something to claim without writing and testing it.
 truecolour, no interlacing, stored deflate blocks. It says so plainly when a
 file falls outside that rather than showing noise.
 
+### Dialogues
+
+There are no child windows - the server knows about top-level windows and
+nothing else - so a dialogue is an overlay an application paints over its own
+content, and modality is a rule the application keeps rather than one the system
+enforces. It is a state machine rather than a function that runs its own loop,
+because a client still has to answer the server about a resize or a close while
+one is open.
+
+Saving asks **where**. Nothing writes to a path it chose for itself any more:
+paint and the editor both open a save dialogue with a directory list and a name
+field. The editor asks every time rather than silently overwriting whatever it
+was handed, which is a good way to lose a file you only meant to look at.
+
+Opening asks **what with**. The file's name is the only hint this system has
+about its type, and a hint is not good enough to decide for someone, so the
+browser offers the editor, the image viewer, paint, and - when the file is a
+program - running it directly.
+
 The compositor **sleeps** between passes rather than spinning. That is not a
 politeness: a polling loop that only ever yields stays runnable, holds the kernel
 lock over and over, and on a multiprocessor can keep another CPU out of the kernel
