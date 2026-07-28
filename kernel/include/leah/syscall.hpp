@@ -61,6 +61,11 @@ enum Number : u64 {
     UserName  = 44,
     UserAdd   = 45,
     SetPasswd = 46,
+    WinCreate  = 47,
+    WinMap     = 48,   // map the window's pixels into this process
+    WinPresent = 49,
+    WinPoll    = 50,
+    WinDestroy = 51,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

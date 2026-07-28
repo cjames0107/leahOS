@@ -84,6 +84,43 @@ u32 rows()    { return g_rows; }
 u32 width()   { return g_width; }
 u32 height()  { return g_height; }
 
+void plot(u32 x, u32 y, u32 colour)
+{
+    if (g_pixels == nullptr || x >= g_width || y >= g_height)
+        return;
+    put_pixel(x, y, colour);
+}
+
+void blit(const u32* source, u32 stride, u32 x, u32 y, u32 width, u32 height)
+{
+    if (g_pixels == nullptr || source == nullptr)
+        return;
+    for (u32 row = 0; row < height; ++row) {
+        const u32 screen_y = y + row;
+        if (screen_y >= g_height)
+            break;
+        const u32* in = source + static_cast<u64>(row) * stride;
+        // 32bpp is the common case and copies a scanline at a time; anything
+        // else goes pixel by pixel through the packer.
+        if (g_bytes_per_pixel == 4 && x + width <= g_width) {
+            auto* out = reinterpret_cast<u32*>(pixel_at(x, screen_y));
+            memcpy(out, in, static_cast<usize>(width) * sizeof(u32));
+        } else {
+            for (u32 column = 0; column < width; ++column) {
+                if (x + column < g_width)
+                    put_pixel(x + column, screen_y, in[column]);
+            }
+        }
+    }
+}
+
+u8 glyph_row(char c, u32 row)
+{
+    if (g_font == nullptr || row >= kGlyphHeight)
+        return 0;
+    return g_font[static_cast<u8>(c) * kGlyphHeight + row];
+}
+
 u32 rgb(u8 r, u8 g, u8 b)
 {
     return static_cast<u32>(r) << 16 | static_cast<u32>(g) << 8 | b;

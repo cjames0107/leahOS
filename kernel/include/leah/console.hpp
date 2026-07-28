@@ -23,6 +23,12 @@ u32 rows();
 void clear();
 void set_color(Color fg, Color bg = Color::Black);
 
+// Stop (or resume) drawing to the framebuffer, without touching the serial
+// output. The window server takes the screen when it starts, and text written
+// over a composed desktop would simply corrupt it - but the boot log and any
+// panic still need somewhere to go, and the serial port is unaffected.
+void suspend_display(bool suspended);
+
 void put(char c);
 void write(const char* str);
 

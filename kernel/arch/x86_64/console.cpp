@@ -33,6 +33,9 @@ u32  g_rows    = kVgaHeight;
 // panicking cores is how the first SMP bug here announced itself.
 sync::Spinlock g_console_lock;
 
+// True while the window server owns the framebuffer.
+bool g_display_suspended = false;
+
 u32 g_row    = 0;
 u32 g_column = 0;
 u8  g_attr   = static_cast<u8>(Color::LightGray);
@@ -215,7 +218,8 @@ void serial_put(char c)
 // plain spinlock has no notion of already owning it.
 void put_locked(char c)
 {
-    display_put(c);
+    if (!g_display_suspended)
+        display_put(c);
     if (c == '\n')
         serial_put('\r');
     serial_put(c);
@@ -279,7 +283,7 @@ u32 rows() { return g_rows; }
 
 void clear()
 {
-    sync::ScopedLock guard(g_console_lock);
+    sync::IrqScopedLock guard(g_console_lock);
     if (g_graphical) {
         framebuffer::clear(background_rgb());
     } else {
@@ -291,28 +295,34 @@ void clear()
     update_cursor();
 }
 
+void suspend_display(bool suspended)
+{
+    sync::IrqScopedLock guard(g_console_lock);
+    g_display_suspended = suspended;
+}
+
 void set_color(Color fg, Color bg)
 {
-    sync::ScopedLock guard(g_console_lock);
+    sync::IrqScopedLock guard(g_console_lock);
     g_attr = static_cast<u8>(static_cast<u8>(fg) | static_cast<u8>(bg) << 4);
 }
 
 void put(char c)
 {
-    sync::ScopedLock guard(g_console_lock);
+    sync::IrqScopedLock guard(g_console_lock);
     put_locked(c);
 }
 
 void write(const char* str)
 {
-    sync::ScopedLock guard(g_console_lock);
+    sync::IrqScopedLock guard(g_console_lock);
     write_locked(str);
     update_cursor();
 }
 
 void printf(const char* fmt, ...)
 {
-    sync::ScopedLock guard(g_console_lock);
+    sync::IrqScopedLock guard(g_console_lock);
     va_list args;
     va_start(args, fmt);
 

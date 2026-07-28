@@ -49,6 +49,11 @@
 #define SYS_username 44
 #define SYS_useradd  45
 #define SYS_passwd   46
+#define SYS_wincreate  47
+#define SYS_winmap     48
+#define SYS_winpresent 49
+#define SYS_winpoll    50
+#define SYS_windestroy 51
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused

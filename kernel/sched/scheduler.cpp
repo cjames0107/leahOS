@@ -1,6 +1,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/gdt.hpp>
+#include <leah/gui.hpp>
 #include <leah/heap.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
@@ -582,8 +583,12 @@ void exit_current(i32 code)
     // Release open files - notably pipe ends, so the other side sees EOF. The
     // table is shared across a thread group, so only the last thread out closes
     // it; otherwise a thread exiting would pull the fds from under its siblings.
-    if (!group_still_alive(self))
+    if (!group_still_alive(self)) {
         files::close_all(group_leader(self)->files);
+        // Same reasoning for windows: the last thread out takes the process's
+        // windows with it, however it happened to die.
+        gui::close_windows_of(self->tgid);
+    }
 
     // Drop the user address space now; the kernel stack (in the shared heap)
     // stays until a parent reaps it. Threads share one space, so it is freed

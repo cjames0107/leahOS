@@ -1,5 +1,6 @@
 #pragma once
 
+#include <leah/cpu.hpp>
 #include <leah/types.hpp>
 
 // Mutual exclusion between processors.
@@ -47,6 +48,29 @@ public:
     ScopedLock& operator=(const ScopedLock&) = delete;
 
 private:
+    Spinlock& m_lock;
+};
+
+// RAII, and masks interrupts for as long as the lock is held.
+//
+// A plain ScopedLock is not enough for a lock whose critical section is long or
+// which is taken from interrupt context. If the holder is preempted part-way
+// through, anyone spinning for that lock with interrupts already masked - a
+// syscall, or a task on its way out through exit - can never be preempted back,
+// and on a single processor the two wedge it permanently. Masking while held
+// makes the section atomic with respect to this CPU, so the holder always runs
+// to the release.
+class IrqScopedLock {
+public:
+    explicit IrqScopedLock(Spinlock& lock) : m_lock(lock) { m_lock.acquire(); }
+    ~IrqScopedLock() { m_lock.release(); }
+    IrqScopedLock(const IrqScopedLock&) = delete;
+    IrqScopedLock& operator=(const IrqScopedLock&) = delete;
+
+private:
+    // Declared first so it is constructed first (interrupts off before the
+    // lock is taken) and destroyed last (restored after the release).
+    cpu::InterruptGuard m_guard;
     Spinlock& m_lock;
 };
 

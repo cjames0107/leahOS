@@ -173,9 +173,11 @@ and run under **users and permissions** enforced against the ext inode's own
 mode and owner bits. An **e1000 NIC driver** and a
 small **IPv4 stack** (Ethernet, ARP, ICMP, UDP, and a minimal DNS resolver)
 bring up networking, with `ifconfig`, `arp`, `ping` and `nslookup` talking to
-QEMU's virtual network — `ping example.com` resolves and reaches the host. User
-programs are C linked against leahOS's own libc. Faults produce a register dump
-instead of a silent reset.
+QEMU's virtual network — `ping example.com` resolves and reaches the host. A **window server** composites a Windows 3.1 / Mac OS 7 style desktop over the
+linear framebuffer, driven by a **PS/2 mouse**: windows have bevelled chrome, a
+title bar to drag and a close box, and clients draw into their own pixel buffer
+without ever seeing the screen. User programs are C linked against leahOS's own
+libc. Faults produce a register dump instead of a silent reset.
 
 ## Memory management
 
@@ -541,6 +543,55 @@ A failed mapping falls back silently to the text buffer, which in graphics mode
 means a black screen with a perfectly healthy serial log. Worth remembering as
 a symptom.
 
+## The window server
+
+`gui` starts the desktop; it comes down on its own when the last window closes.
+The text console and the desktop cannot both own the framebuffer, so they take
+turns: starting the server suspends console *drawing* (serial output carries on
+regardless, which is what keeps the boot log and any panic readable behind a
+desktop), and tearing it down clears the screen and hands it back. Nothing is
+composited until a program actually asks for a window, so `login` still gets a
+plain text console.
+
+The server lives in the kernel. That is not where it belongs — a real system
+puts it in a userland process — but a userland server needs shared memory and a
+message transport between processes, and there is neither yet. The split that
+actually matters is still enforced: a client never touches the framebuffer,
+only the pixels of its own window, and every window syscall checks the caller
+owns the window it names.
+
+A window's pixels are one run of physically contiguous frames, mapped into the
+client with `WinMap`. The client draws into them directly and calls
+`WinPresent`; the compositor paints the desktop, then the windows back to front
+into an off-screen buffer, and blits the result in one pass. The cursor is
+drawn straight to the framebuffer afterwards and erased from the backbuffer
+before the next move, so pointer motion does not cost a recompose.
+
+Input follows the same shape as any window system:
+
+- The topmost window is the focused one, and gets the keyboard.
+- Pressing inside a window's content **grabs** the pointer, so a stroke that
+  runs off the edge stops there instead of continuing into whatever is
+  underneath.
+- Dragging a title bar moves the window, clamped so the bar — and with it the
+  close box — can never leave the screen. Without the clamp a window can be
+  dragged somewhere it can no longer be closed.
+- Closing is a request, not an eviction: the server queues a `Close` event and
+  the client decides what to do with it.
+
+Windows are owned by a thread group and released when it dies, however it died,
+so a client that is killed rather than closed does not leave a window on the
+desktop with nobody behind it.
+
+Bringing this up turned a latent bug into a reproducible hang. The console
+spinlock did not mask interrupts, and `console::clear()` writes three megabytes
+of framebuffer — long enough for the timer to preempt the holder. Anything then
+spinning for that lock with interrupts already masked (a syscall, or a task on
+its way out through `exit`) could never be preempted back, and on one processor
+the two wedged it permanently: RIP pinned inside `console::put` with `IF`
+clear. `sync::IrqScopedLock` masks interrupts for as long as the lock is held,
+which is what a lock reachable from interrupt context needed all along.
+
 ## Networking
 
 The NIC is QEMU's Intel 82540EM ("e1000"), found by PCI class. The driver maps
@@ -900,3 +951,7 @@ process still mapped them.
 - [x] a password file, `su` that authenticates, and per-user home directories
 - [x] `login` at boot, `useradd`, `passwd`, `logout`
 - [x] `ls -l` and `stat` for permissions and metadata
+- [x] a window server and window manager: bevelled chrome, dragging, focus, a close box
+- [x] window syscalls and a client library, with `paint` and `clock`
+- [ ] a userland window server, once there is shared memory between processes
+- [ ] window resizing, overlapping-region damage instead of a full recompose

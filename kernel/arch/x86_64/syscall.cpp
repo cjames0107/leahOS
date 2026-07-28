@@ -3,6 +3,7 @@
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
 #include <leah/gdt.hpp>
+#include <leah/gui.hpp>
 #include <leah/interrupts.hpp>
 #include <leah/memory.hpp>
 #include <leah/net.hpp>
@@ -624,6 +625,84 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         frame->rax = static_cast<u64>(ok ? 0 : -1);
         break;
     }
+
+    case WinCreate: {
+        // Lazily: the console keeps the screen until something actually asks
+        // for a window, which is what makes the text console and the desktop
+        // able to coexist at all.
+        if (!gui::active() && !gui::init()) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        char title[gui::kTitleLength] = {};
+        copy_user_string(frame->r8, title, sizeof(title));
+        frame->rax = static_cast<u64>(gui::create_window(
+            static_cast<i32>(frame->rdi), static_cast<i32>(frame->rsi),
+            static_cast<u32>(frame->rdx), static_cast<u32>(frame->r10), title));
+        break;
+    }
+
+    case WinMap: {
+        // Map the window's pixels into the client so it can draw into them
+        // directly. The frames are contiguous, which is why one run of pages
+        // covers the whole buffer.
+        const i32 id = static_cast<i32>(frame->rdi);
+        if (gui::owner_of(id) != scheduler::current_tgid()) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const paddr_t phys = gui::buffer_phys(id);
+        const u32 bytes = gui::buffer_bytes(id);
+        if (phys == 0 || bytes == 0) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+
+        const u64 base = scheduler::current_mmap_next();
+        if (base + bytes > memory::kUserMmapEnd) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        bool ok = true;
+        for (u32 offset = 0; offset < bytes && ok; offset += vmm::kPageSize) {
+            ok = vmm::map(base + offset, phys + offset,
+                          vmm::Write | vmm::User | vmm::NoExecute);
+        }
+        if (!ok) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        scheduler::set_current_mmap_next(base + bytes);
+        frame->rax = base;
+        break;
+    }
+
+    case WinPresent:
+        if (gui::owner_of(static_cast<i32>(frame->rdi)) == scheduler::current_tgid())
+            gui::present(static_cast<i32>(frame->rdi));
+        frame->rax = 0;
+        break;
+
+    case WinPoll: {
+        const i32 id = static_cast<i32>(frame->rdi);
+        if (gui::owner_of(id) != scheduler::current_tgid() ||
+            !user_range_ok(frame->rsi, sizeof(gui::Event))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        gui::Event event{};
+        const bool have = gui::poll_event(id, event);
+        if (have)
+            memcpy(reinterpret_cast<void*>(frame->rsi), &event, sizeof(event));
+        frame->rax = static_cast<u64>(have ? 1 : 0);
+        break;
+    }
+
+    case WinDestroy:
+        if (gui::owner_of(static_cast<i32>(frame->rdi)) == scheduler::current_tgid())
+            gui::destroy_window(static_cast<i32>(frame->rdi));
+        frame->rax = 0;
+        break;
 
     case SetEcho:
         files::set_console_echo(frame->rdi != 0);

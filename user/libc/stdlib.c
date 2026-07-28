@@ -53,3 +53,11 @@ void* calloc(size_t count, size_t size)
         memset(block, 0, total);
     return block;
 }
+
+int atoi_simple(const char* text)
+{
+    int value = 0;
+    for (; *text >= '0' && *text <= '9'; ++text)
+        value = value * 10 + (*text - '0');
+    return value;
+}
