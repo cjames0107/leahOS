@@ -54,10 +54,10 @@ static void session(void)
         printf("starting the desktop - the terminal window is your shell.\n");
         char* browse[] = { "browse", "40", "40", 0 };
         char* term[]   = { "term", "60", "300", 0 };
-        char* clock[]  = { "clock", "700", "60", 0 };
+        char* calc[]   = { "calc", "700", "60", 0 };
         const char* which[] = { "/BIN/BROWSE.ELF", "/BIN/TERM.ELF",
-                                "/BIN/CLOCK.ELF" };
-        char** argv[] = { browse, term, clock };
+                                "/BIN/CALC.ELF" };
+        char** argv[] = { browse, term, calc };
         int started = 0;
         for (int i = 0; i < 3; ++i) {
             const int pid = fork();

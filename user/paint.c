@@ -1,125 +1,276 @@
-/* paint - a window you can scribble in.
+/* paint - a drawing program.
  *
- * Small on purpose: it exists to show that a client owns its own pixels, gets
- * its own input events in its own coordinates, and never sees the screen.
+ * Tools, a palette, brush sizes, and saving to PNG or GIF. The canvas is the
+ * window's own pixel buffer below the toolbar, so what is saved is exactly what
+ * is on screen - there is no second copy to keep in step.
  *
- * It is also the simplest thing that has to cope with being resized. The buffer
- * is replaced rather than grown - there is no realloc for shared memory - so
- * the width, the height and the pointer are all re-read after a resize, and
- * nothing is cached across one.
+ * Saving is real: see user/libc/image.c. Neither format is compressed - PNG
+ * uses stored deflate blocks and GIF clears its LZW table before it fills -
+ * because this system has no compressor. Both are valid files that any reader
+ * will open.
  */
 
+#include <image.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <widget.h>
 #include <window.h>
 
+#define TOOLBAR_H 56
+#define STATUS_H  18
+
+#define T_PENCIL 0
+#define T_LINE   1
+#define T_RECT   2
+#define T_FILL   3
+#define T_ERASE  4
+#define TOOLS    5
+
 static uint32_t* g_px;
-static unsigned  g_w, g_h;
+static unsigned  g_w = 460, g_h = 360;
 
-static void fill(uint32_t colour)
+static int g_tool = T_PENCIL;
+static uint32_t g_colour = 0x000080;
+static int g_size = 2;
+static char g_note[96] = "click a tool, drag on the canvas";
+
+static int g_drawing, g_ax, g_ay, g_lx, g_ly;
+
+static const uint32_t kPalette[12] = {
+    0x000000, 0xFFFFFF, 0x808080, 0xC0C0C0,
+    0x800000, 0xFF0000, 0x808000, 0xFFFF00,
+    0x008000, 0x00FF00, 0x000080, 0x0000FF,
+};
+static const char* kToolName[TOOLS] = { "Pencil", "Line", "Rect", "Fill", "Eraser" };
+
+struct box { int x, y, w, h; };
+static struct box g_tool_box[TOOLS];
+static struct box g_pal[12];
+static struct box g_size_box[3];
+static struct box g_png = { 300, 30, 64, 20 };
+static struct box g_gif = { 368, 30, 64, 20 };
+static struct box g_clr = { 240, 30, 56, 20 };
+
+static int inside(const struct box* b, int x, int y)
 {
-    for (unsigned i = 0; i < g_w * g_h; ++i)
-        g_px[i] = colour;
+    return x >= b->x && y >= b->y && x < b->x + b->w && y < b->y + b->h;
 }
 
-/* A border, so the content area is visibly the client's and not the frame's. */
-static void border(void)
+static void layout(void)
 {
-    for (unsigned i = 0; i < g_w; ++i) {
-        g_px[i] = 0xA0A0A0;
-        g_px[(g_h - 1) * g_w + i] = 0xA0A0A0;
+    for (int i = 0; i < TOOLS; ++i) {
+        g_tool_box[i].x = 6 + i * 58; g_tool_box[i].y = 5;
+        g_tool_box[i].w = 56; g_tool_box[i].h = 20;
     }
-    for (unsigned i = 0; i < g_h; ++i) {
-        g_px[i * g_w] = 0xA0A0A0;
-        g_px[i * g_w + g_w - 1] = 0xA0A0A0;
+    for (int i = 0; i < 12; ++i) {
+        g_pal[i].x = 6 + i * 18; g_pal[i].y = 30;
+        g_pal[i].w = 16; g_pal[i].h = 20;
+    }
+    for (int i = 0; i < 3; ++i) {
+        g_size_box[i].x = 300 + i * 26; g_size_box[i].y = 5;
+        g_size_box[i].w = 24; g_size_box[i].h = 20;
     }
 }
 
-static void blot(int cx, int cy, uint32_t colour)
+/* The canvas is the window buffer below the toolbar - so saving is just a crop
+ * of what the compositor already shows. */
+static int canvas_top(void)    { return TOOLBAR_H; }
+static int canvas_h(void)      { return (int)g_h - TOOLBAR_H - STATUS_H; }
+
+static void dot(int x, int y, uint32_t colour)
 {
-    for (int dy = -2; dy <= 2; ++dy) {
-        for (int dx = -2; dx <= 2; ++dx) {
-            const int x = cx + dx, y = cy + dy;
-            if (x >= 0 && y >= 0 && x < (int)g_w && y < (int)g_h)
-                g_px[y * (int)g_w + x] = colour;
+    const int r = g_size;
+    for (int dy = -r; dy <= r; ++dy)
+        for (int dx = -r; dx <= r; ++dx) {
+            const int px = x + dx, py = y + dy;
+            if (py >= canvas_top() && py < canvas_top() + canvas_h() &&
+                px >= 0 && px < (int)g_w)
+                wg_plot(px, py, colour);
         }
+}
+
+/* Bresenham, so a fast drag leaves a line rather than a dotted trail. */
+static void line(int x0, int y0, int x1, int y1, uint32_t colour)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    const int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    for (;;) {
+        dot(x0, y0, colour);
+        if (x0 == x1 && y0 == y1) break;
+        const int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 < dx)  { err += dx; y0 += sy; }
     }
+}
+
+static void rect_outline(int x0, int y0, int x1, int y1, uint32_t colour)
+{
+    line(x0, y0, x1, y0, colour);
+    line(x1, y0, x1, y1, colour);
+    line(x1, y1, x0, y1, colour);
+    line(x0, y1, x0, y0, colour);
+}
+
+/* Flood fill, iteratively over an explicit stack: the recursive version needs a
+ * frame per pixel and overruns the stack on any real area. */
+#define FILL_MAX 65536
+static int g_stack[FILL_MAX];
+static void flood(int x, int y, uint32_t to)
+{
+    const int top = canvas_top(), bottom = top + canvas_h();
+    if (x < 0 || y < top || x >= (int)g_w || y >= bottom)
+        return;
+    const uint32_t from = g_px[(unsigned)y * g_w + (unsigned)x];
+    if (from == to)
+        return;
+    int sp = 0;
+    g_stack[sp++] = y * (int)g_w + x;
+    while (sp > 0) {
+        const int at = g_stack[--sp];
+        const int cx = at % (int)g_w, cy = at / (int)g_w;
+        if (cx < 0 || cy < top || cx >= (int)g_w || cy >= bottom)
+            continue;
+        if (g_px[(unsigned)cy * g_w + (unsigned)cx] != from)
+            continue;
+        g_px[(unsigned)cy * g_w + (unsigned)cx] = to;
+        if (sp + 4 >= FILL_MAX)
+            continue;               /* give up neatly rather than overrun */
+        g_stack[sp++] = at - 1;
+        g_stack[sp++] = at + 1;
+        g_stack[sp++] = at - (int)g_w;
+        g_stack[sp++] = at + (int)g_w;
+    }
+}
+
+static void clear_canvas(void)
+{
+    wg_fill(0, canvas_top(), (int)g_w, canvas_h(), WG_PAPER);
+}
+
+static void save(int png)
+{
+    /* Only the canvas, not the chrome: the toolbar is not part of the picture. */
+    const char* path = png ? "/PAINT.PNG" : "/PAINT.GIF";
+    const unsigned h = (unsigned)canvas_h();
+    const uint32_t* start = &g_px[(unsigned long)canvas_top() * g_w];
+    const int rc = png ? img_write_png(path, start, g_w, h)
+                       : img_write_gif(path, start, g_w, h);
+    if (rc == 0)
+        snprintf(g_note, sizeof(g_note), "saved %s (%ux%u)", path, g_w, h);
+    else
+        snprintf(g_note, sizeof(g_note), "could not write %s", path);
+}
+
+static void draw_chrome(void)
+{
+    wg_fill(0, 0, (int)g_w, TOOLBAR_H, WG_FACE);
+    for (int i = 0; i < TOOLS; ++i)
+        wg_button(g_tool_box[i].x, g_tool_box[i].y, g_tool_box[i].w,
+                  g_tool_box[i].h, kToolName[i], g_tool == i);
+    for (int i = 0; i < 12; ++i) {
+        wg_fill(g_pal[i].x, g_pal[i].y, g_pal[i].w, g_pal[i].h, kPalette[i]);
+        wg_bevel(g_pal[i].x, g_pal[i].y, g_pal[i].w, g_pal[i].h,
+                 kPalette[i] != g_colour);
+    }
+    for (int i = 0; i < 3; ++i) {
+        char s[4] = { (char)('1' + i), 0 };
+        wg_button(g_size_box[i].x, g_size_box[i].y, g_size_box[i].w,
+                  g_size_box[i].h, s, g_size == i + 1);
+    }
+    wg_button(g_clr.x, g_clr.y, g_clr.w, g_clr.h, "Clear", 0);
+    wg_button(g_png.x, g_png.y, g_png.w, g_png.h, "PNG", 0);
+    wg_button(g_gif.x, g_gif.y, g_gif.w, g_gif.h, "GIF", 0);
+
+    wg_fill(0, (int)g_h - STATUS_H, (int)g_w, STATUS_H, WG_FACE);
+    wg_text_clipped(6, (int)g_h - STATUS_H + 1, g_note, WG_INK, (int)g_w - 12);
 }
 
 int main(int argc, char** argv)
 {
-    const int x = argc > 1 ? atoi_simple(argv[1]) : 120;
-    const int y = argc > 2 ? atoi_simple(argv[2]) : 90;
-
-    g_w = 260;
-    g_h = 160;
-    const int id = win_create(x, y, g_w, g_h, "Paint");
+    const int wx = argc > 1 ? atoi_simple(argv[1]) : 120;
+    const int wy = argc > 2 ? atoi_simple(argv[2]) : 90;
+    if (wg_font() != 0)
+        return 1;
+    const int id = win_create(wx, wy, g_w, g_h, "Paint");
     if (id < 0) {
         printf("paint: no window server\n");
         return 1;
     }
     g_px = win_map(id);
-    if (g_px == 0) {
-        printf("paint: could not map the window\n");
+    if (g_px == 0)
         return 1;
-    }
+    win_set_min_size(id, 440, 240);
+    wg_target(g_px, g_w, g_h);
 
-    fill(0xFFFFFF);
-    border();
+    layout();
+    clear_canvas();
+    draw_chrome();
     win_present(id);
 
-    int drawing = 0;
-    uint32_t colour = 0x000080;
     for (;;) {
-        struct win_event event;
-        while (win_poll(id, &event)) {
-            if (event.type == WIN_EVENT_RESIZE) {
-                /* The buffer is a new one and starts blank; the old pointer is
-                 * gone. Everything that described the old size is re-read. */
-                g_w = (unsigned)event.x;
-                g_h = (unsigned)event.y;
+        struct win_event e;
+        while (win_poll(id, &e)) {
+            if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
+
+            if (e.type == WIN_EVENT_RESIZE) {
+                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
                 g_px = win_map(id);
-                if (g_px == 0)
-                    return 1;
-                fill(0xFFFFFF);
-                border();
-                win_present(id);
-                drawing = 0;
+                if (g_px == 0) return 1;
+                wg_target(g_px, g_w, g_h);
+                layout();
+                clear_canvas();     /* the buffer is new and starts blank */
+            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
+                int handled = 0;
+                for (int i = 0; i < TOOLS; ++i)
+                    if (inside(&g_tool_box[i], e.x, e.y)) { g_tool = i; handled = 1; }
+                for (int i = 0; i < 12; ++i)
+                    if (inside(&g_pal[i], e.x, e.y)) { g_colour = kPalette[i]; handled = 1; }
+                for (int i = 0; i < 3; ++i)
+                    if (inside(&g_size_box[i], e.x, e.y)) { g_size = i + 1; handled = 1; }
+                if (inside(&g_clr, e.x, e.y)) { clear_canvas(); handled = 1; }
+                else if (inside(&g_png, e.x, e.y)) { save(1); handled = 1; }
+                else if (inside(&g_gif, e.x, e.y)) { save(0); handled = 1; }
+
+                if (!handled && e.y >= canvas_top()) {
+                    const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
+                    g_ax = g_lx = e.x; g_ay = g_ly = e.y;
+                    if (g_tool == T_FILL) {
+                        flood(e.x, e.y, ink);
+                    } else if (g_tool == T_PENCIL || g_tool == T_ERASE) {
+                        dot(e.x, e.y, ink);
+                        g_drawing = 1;
+                    } else {
+                        g_drawing = 1;      /* line and rect commit on release */
+                    }
+                }
+            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_drawing) {
+                if (g_tool == T_PENCIL || g_tool == T_ERASE) {
+                    const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
+                    line(g_lx, g_ly, e.x, e.y, ink);
+                    g_lx = e.x; g_ly = e.y;
+                }
+            } else if (e.type == WIN_EVENT_MOUSE_UP) {
+                if (g_drawing && g_tool == T_LINE)
+                    line(g_ax, g_ay, e.x, e.y, g_colour);
+                else if (g_drawing && g_tool == T_RECT)
+                    rect_outline(g_ax, g_ay, e.x, e.y, g_colour);
+                g_drawing = 0;
+            } else if (e.type == WIN_EVENT_KEY) {
+                if (e.key == 'c') clear_canvas();
+                else if (e.key == 'p') save(1);
+                else if (e.key == 'g') save(0);
+                else if (e.key >= '1' && e.key <= '3') g_size = (int)e.key - '0';
+            } else {
                 continue;
             }
-            if (event.type == WIN_EVENT_CLOSE) {
-                win_destroy(id);
-                return 0;
-            }
-            if (event.type == WIN_EVENT_MOUSE_DOWN) {
-                drawing = 1;
-                blot(event.x, event.y, colour);
-                win_present(id);
-            }
-            if (event.type == WIN_EVENT_MOUSE_MOVE && drawing) {
-                blot(event.x, event.y, colour);
-                win_present(id);
-            }
-            if (event.type == WIN_EVENT_MOUSE_UP)
-                drawing = 0;
-            if (event.type == WIN_EVENT_KEY) {
-                /* c clears and the digits pick a colour. Closing is the window
-                 * manager's business - the close box, or Ctrl+Q - so no plain
-                 * letter is spoken for here. */
-                if (event.key == 'c') {
-                    fill(0xFFFFFF);
-                    border();
-                    win_present(id);
-                }
-                if (event.key >= '1' && event.key <= '4') {
-                    static const uint32_t palette[] = {
-                        0x000080, 0x800000, 0x008000, 0x000000
-                    };
-                    colour = palette[event.key - '1'];
-                }
-            }
+            draw_chrome();
+            win_present(id);
         }
-        msleep(10);
+        msleep(15);
     }
 }

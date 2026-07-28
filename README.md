@@ -774,6 +774,34 @@ toolkit: a client still owns a rectangle of pixels and draws it itself. It
 exists because four programs were otherwise going to carry four copies of the
 same bevel routine.
 
+### Writing images
+
+`paint` saves real PNG and GIF files, and neither is compressed. PNG's deflate
+stream is emitted as **stored blocks**, which the format explicitly allows, and
+GIF's LZW clears its table before it ever fills - the standard way to produce
+valid LZW without implementing a dictionary. Both are larger than they need to
+be and correct, which is the right trade for a system with no compressor: a
+small wrong file is worth nothing.
+
+Both encoders are pure C with no dependency on the OS, which means they can be
+compiled on the host and checked against a real decoder. That is how the one
+genuine bug in them was found: the colour channel was derived from the index
+*within the deflate block*, and a block boundary does not fall on a row
+boundary, so everything after the first row was shifted. Structurally the file
+was perfect - signature, CRCs, adler-32 all correct - and it decoded to
+nonsense. It is now checked end to end: `zlib.decompress` validates the stream
+and the checksum, and every pixel is compared against what was encoded,
+including a 400x200 image spanning several stored blocks, and the GIF's LZW is
+decoded back to indices.
+
+JPEG is **not** implemented. It needs a discrete cosine transform, quantisation
+tables and Huffman coding - a different order of work from the two above, and
+not something to claim without writing and testing it.
+
+`imgview` reads back what paint writes, which is the same subset: 8-bit
+truecolour, no interlacing, stored deflate blocks. It says so plainly when a
+file falls outside that rather than showing noise.
+
 The compositor **sleeps** between passes rather than spinning. That is not a
 politeness: a polling loop that only ever yields stays runnable, holds the kernel
 lock over and over, and on a multiprocessor can keep another CPU out of the kernel
@@ -1224,5 +1252,8 @@ process still mapped them.
 - [x] `uitest`, a window of every element the desktop draws
 - [x] `browse`, a file browser with icon, list and tree views
 - [x] `edit`, a text editor, and what a document opens into
+- [x] `calc`, `settings`, `imgview`, and a paint that saves PNG and GIF
+- [ ] a deflate compressor, so PNG need not be written as stored blocks
+- [ ] a JPEG encoder - it needs a DCT and Huffman tables, and is not written
 - [ ] a real type for a file, so opening one need not guess from its name
 - [ ] reflowing a terminal's scrollback when it is resized
