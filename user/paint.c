@@ -104,11 +104,9 @@ int main(int argc, char** argv)
             if (event.type == WIN_EVENT_MOUSE_UP)
                 drawing = 0;
             if (event.type == WIN_EVENT_KEY) {
-                /* c clears, q quits, and the digits pick a colour. */
-                if (event.key == 'q') {
-                    win_destroy(id);
-                    return 0;
-                }
+                /* c clears and the digits pick a colour. Closing is the window
+                 * manager's business - the close box, or Ctrl+Q - so no plain
+                 * letter is spoken for here. */
                 if (event.key == 'c') {
                     fill(0xFFFFFF);
                     border();

@@ -639,8 +639,12 @@ Input works the way a window system has to. The topmost window is focused and
 gets the keyboard. Pressing inside a window **grabs** the pointer, so a stroke
 that runs off the edge stops rather than continuing into whatever is underneath.
 Dragging clamps so the title bar — and with it the close box — can never leave the
-screen, or a window could be dragged somewhere it can never be closed. Closing is
-a request the client can act on, not an eviction.
+screen, or a window could be dragged somewhere it can never be closed. Closing is a request the client can act on, not an eviction - whether it came
+from the close box or from **Ctrl+Q**, which the window manager keeps for
+itself and turns into exactly the same event. Keeping it there rather than in
+each client matters twice over: a plain letter cannot be a quit key, because a
+terminal or a text field has every right to it, and a shortcut invented
+separately by each program would mean no two windows closed the same way.
 
 ### Resizing, and only redrawing what changed
 

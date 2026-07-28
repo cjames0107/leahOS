@@ -612,9 +612,15 @@ static void handle_input(void)
     g_cursor_x = x;
     g_cursor_y = y;
 
-    /* Whoever is on top has the keyboard. */
-    if (in.key != 0 && g_count > 0)
-        push_event(g_order[0], WIN_EVENT_KEY, 0, 0, 0, (uint32_t)in.key);
+    /* Whoever is on top has the keyboard - except for the one chord the window
+     * manager keeps for itself, which becomes a close request rather than a
+     * keystroke the client has to know about. */
+    if (in.key != 0 && g_count > 0) {
+        if (in.key == WIN_KEY_CLOSE)
+            push_event(g_order[0], WIN_EVENT_CLOSE, 0, 0, 0, 0);
+        else
+            push_event(g_order[0], WIN_EVENT_KEY, 0, 0, 0, (uint32_t)in.key);
+    }
 
     const int left = (in.buttons & 1) != 0;
     const int pressed = left && !g_last_left;

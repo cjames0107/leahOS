@@ -54,6 +54,17 @@
 #define WIN_EVENT_MOUSE_MOVE 3
 #define WIN_EVENT_KEY        4
 #define WIN_EVENT_CLOSE      5   /* the close box was clicked */
+/* Close the focused window: Ctrl+Q, which the console driver delivers as the
+ * control character 0x11.
+ *
+ * The *server* owns this, not its clients. A plain letter cannot be a quit key
+ * - a terminal or a text field has every right to it - and having each client
+ * invent its own shortcut would mean no two windows closed the same way. So the
+ * window manager translates the chord into the same WIN_EVENT_CLOSE the close
+ * box sends, and a client needs no quit handling at all beyond the one it
+ * already has. */
+#define WIN_KEY_CLOSE 0x11
+
 /* The window has been resized. x and y carry the new content width and height;
  * the pixel buffer has already been replaced, so re-fetch it with win_map and
  * redraw everything - the new one starts blank. */

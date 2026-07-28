@@ -172,7 +172,7 @@ static void draw(void)
     bevel(12, 198, (int)g_w - 24, 20, 0);
     text(16, 200, g_last, INK);
 
-    text(16, 226, "keys go to the focused window; q quits", INK);
+    text(16, 226, "keys go to the focused window; ctrl+q closes", INK);
 }
 
 static void note(const char* what, int x, int y)
@@ -259,10 +259,6 @@ int main(int argc, char** argv)
                 draw();
                 win_present(id);
             } else if (event.type == WIN_EVENT_KEY) {
-                if (event.key == 'q') {
-                    win_destroy(id);
-                    return 0;
-                }
                 char line[48];
                 snprintf(line, sizeof(line), "key '%c'", (char)event.key);
                 unsigned i = 0;

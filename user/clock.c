@@ -28,8 +28,7 @@ int main(int argc, char** argv)
     for (;;) {
         struct win_event event;
         while (win_poll(id, &event)) {
-            if (event.type == WIN_EVENT_CLOSE ||
-                (event.type == WIN_EVENT_KEY && event.key == 'q')) {
+            if (event.type == WIN_EVENT_CLOSE) {
                 win_destroy(id);
                 return 0;
             }
