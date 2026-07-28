@@ -19,9 +19,6 @@ alignas(64) Cpu g_cpus[kMaxCpus]{};
 // kernel entry and exit; the table costs one uncached read and no new invariant.
 u8 g_slot_by_apic[256]{};
 
-// Valid while the kernel lock is held; see the header.
-volatile u32 g_active_slot = 0;
-
 } // namespace
 
 void init(u32 slot, u32 apic_id)
@@ -34,14 +31,16 @@ void init(u32 slot, u32 apic_id)
     cpu.self    = &cpu;
     cpu.slot    = slot;
     cpu.apic_id = apic_id;
+    cpu.previous_task = 0xFFFFFFFFu;    // nothing has been switched away from yet
 
     // While the kernel runs, GS points at this block. The user's GS lives in
     // KERNEL_GS_BASE and the two are exchanged by SWAPGS on entry and exit, so
     // kernel code can always read gs: without asking where it came from.
     g_slot_by_apic[apic_id & 0xFF] = static_cast<u8>(slot);
 
-    // GS carries the block for a future SYSCALL stub that reaches it through
-    // SWAPGS. Nothing reads it that way yet - see set_syscall_stack below.
+    // The kernel-side half of the invariant: while this CPU executes kernel
+    // code GS_BASE is its own block. The other half - the user's GS parked in
+    // IA32_KERNEL_GS_BASE - is established by the first exit to ring 3.
     cpu::write_msr(kIa32GsBase, reinterpret_cast<u64>(&cpu));
     cpu::write_msr(kIa32KernelGsBase, 0);
 }
@@ -54,25 +53,29 @@ u32 slot()
     return g_slot_by_apic[apic::local_id()];
 }
 
-void set_active(u32 s) { g_active_slot = s; }
-u32  active()          { return g_active_slot; }
+// Both read straight out of the segment base, so they describe the processor
+// actually executing rather than whichever one last took a lock. Valid from
+// percpu::init onwards, which runs before anything that can ask.
+Cpu& current()
+{
+    Cpu* self;
+    asm volatile("movq %%gs:0, %0" : "=r"(self));
+    return *self;
+}
 
-Cpu& current() { return g_cpus[active()]; }
+u32 active()
+{
+    u32 slot;
+    asm volatile("movl %%gs:24, %0" : "=r"(slot));
+    return slot;
+}
 
-// The stack SYSCALL lands on. This is still a single global inside
-// syscall_entry.asm, which is correct only because one CPU runs user tasks: the
-// stub has no free register on entry (RSP still points into user memory), so
-// reaching a per-CPU block needs SWAPGS - and SWAPGS is only sound once *every*
-// entry from ring 3 does it, interrupts included, and every exit undoes it. Half
-// of that discipline is worse than none: a task first entered through IRETQ
-// inherits the kernel's GS, and its next syscall swaps in a zero base and writes
-// to address 0x10. Doing it properly is the prerequisite for an application
-// processor running user code.
+// Writes gs:[8] on the processor that calls it, so the SYSCALL stub lands on
+// the running task's own kernel stack whichever CPU that task is on.
 extern "C" void set_syscall_stack(u64 rsp);
 
 void set_syscall_stack_for_this_cpu(u64 rsp)
 {
-    g_cpus[active()].syscall_stack = rsp;
     set_syscall_stack(rsp);
 }
 

@@ -122,6 +122,12 @@ void signal_reset_all();
 void start_preemption();
 void yield();
 
+// Block until at least `ticks` timer ticks have passed. The point of it is that
+// a task which only ever yields is still runnable, so it keeps re-entering the
+// kernel and can starve another CPU out of the lock; a sleeping one is not
+// runnable at all.
+void sleep_ticks(u64 ticks);
+
 // Turn time-slicing off and back on. A kernel routine that must poll a device to
 // completion - draining the NIC while waiting for a network reply - uses this so
 // a timer tick cannot schedule it away mid-wait, which would leave nothing

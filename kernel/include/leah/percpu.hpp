@@ -21,7 +21,9 @@ struct Cpu {
     u32  slot;              // +24  dense index, 0 for the bootstrap processor
     u32  apic_id;           // +28
     u32  current_task;      // +32  index into the scheduler's task table
-    u32  reserved;
+    u32  lock_depth;        // +36  this CPU's big-kernel-lock recursion depth
+    u32  shootdown_seen;    // +40  last TLB shootdown generation acknowledged
+    u32  previous_task;     // +44  task switched away from, not yet finished
 };
 
 // Install this CPU's block in GS. Must run *after* gdt::init_cpu, because
@@ -31,12 +33,17 @@ void init(u32 slot, u32 apic_id);
 Cpu& current();
 u32  slot();
 
-// The slot of whichever CPU is currently executing kernel code. Reading the
-// local APIC id costs an uncached MMIO access, and `current()` in the scheduler
-// is far too hot for that - but the big kernel lock means only one CPU is inside
-// the kernel at a time, so the slot can be cached when the lock is taken and
-// read freely by everything under it.
-void set_active(u32 slot);
+// The slot of whichever CPU is executing this instruction.
+//
+// This was once a global written when the kernel lock was taken, on the
+// reasoning that only one CPU is inside the kernel at a time. That is not true:
+// a context switch hands the lock off, and a CPU switching to a task that never
+// held it carries on running kernel code with the lock released - so another
+// CPU can own the global while this one is still using it. The scheduler then
+// reads *that* CPU's current task, and two processors run the same task.
+//
+// Reading it out of GS instead is one instruction and cannot be wrong, because
+// the segment base is genuinely per-processor.
 u32  active();
 
 // Record the kernel stack SYSCALL switches to on this CPU. Kept per CPU here,

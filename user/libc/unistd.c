@@ -33,6 +33,8 @@ pid_t wait(int* status)
     return (pid_t)__syscall(SYS_wait, 0, (long)status, 0, 0, 0);
 }
 
+void msleep(unsigned long ms) { __syscall(SYS_sleep, (long)ms, 0, 0, 0, 0); }
+
 void yield(void)
 {
     __syscall(SYS_yield, 0, 0, 0, 0, 0);

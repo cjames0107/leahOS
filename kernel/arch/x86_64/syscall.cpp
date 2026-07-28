@@ -3,13 +3,18 @@
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
 #include <leah/gdt.hpp>
-#include <leah/gui.hpp>
 #include <leah/interrupts.hpp>
 #include <leah/memory.hpp>
 #include <leah/net.hpp>
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
+#include <leah/shm.hpp>
+#include <leah/framebuffer.hpp>
+#include <leah/mouse.hpp>
+#include <leah/percpu.hpp>
+#include <leah/keyboard.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/timer.hpp>
 #include <leah/signal.hpp>
 #include <leah/spinlock.hpp>
 #include <leah/string.hpp>
@@ -164,7 +169,11 @@ i64 sys_munmap(u64 addr, u64 length)
         if (frame == 0)
             continue;
         vmm::unmap(page);
-        pmm::free(frame);
+        // Release, not free. A frame under this mapping may be shared - with a
+        // forked sibling, or through a shared-memory segment - and handing it
+        // straight back to the allocator while someone else still maps it is
+        // exactly how one process corrupts another.
+        pmm::release(frame);
     }
     return 0;
 }
@@ -410,7 +419,11 @@ void deliver_on_interrupt(interrupts::Frame& frame)
     frame.rflags = kUserFlags;
 }
 
-void init()
+// SYSCALL is configured entirely through MSRs, and an MSR belongs to one
+// processor. Miss this on an application processor and the first `syscall` a
+// task executes there raises #UD - EFER.SCE is what makes the opcode legal at
+// all - which looks like a corrupt user program rather than a missing bit.
+void init_this_cpu()
 {
     cpu::write_msr(kIa32Efer, cpu::read_msr(kIa32Efer) | kEferSyscallEnable);
 
@@ -425,6 +438,8 @@ void init()
     // inherits no string direction or single-step from the program.
     cpu::write_msr(kIa32Fmask, (1ull << 9) | (1ull << 10) | (1ull << 8));
 }
+
+void init() { init_this_cpu(); }
 
 } // namespace syscall
 
@@ -626,46 +641,61 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
     }
 
-    case WinCreate: {
-        // Lazily: the console keeps the screen until something actually asks
-        // for a window, which is what makes the text console and the desktop
-        // able to coexist at all.
-        if (!gui::active() && !gui::init()) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        char title[gui::kTitleLength] = {};
-        copy_user_string(frame->r8, title, sizeof(title));
-        frame->rax = static_cast<u64>(gui::create_window(
-            static_cast<i32>(frame->rdi), static_cast<i32>(frame->rsi),
-            static_cast<u32>(frame->rdx), static_cast<u32>(frame->r10), title));
+    case ShmOpen:
+        // Create or open a segment by key. The key is the rendezvous: two
+        // processes that agree on a number find the same memory, which is all
+        // a window server and its clients actually need from a namespace.
+        frame->rax = static_cast<u64>(
+            shm::open(static_cast<u32>(frame->rdi), frame->rsi,
+                      scheduler::current_uid(), static_cast<u32>(frame->rdx)));
         break;
-    }
 
-    case WinMap: {
-        // Map the window's pixels into the client so it can draw into them
-        // directly. The frames are contiguous, which is why one run of pages
-        // covers the whole buffer.
+    case ShmSize:
+        frame->rax = shm::size_of(static_cast<i32>(frame->rdi));
+        break;
+
+    case ShmDestroy:
+        // Drops the segment's own reference. Anyone who still has it mapped
+        // keeps it alive through theirs, so this is safe to call while the
+        // other side is still using it - the frames go when the last mapping
+        // does. Without it a key could never be reused, and reusing one would
+        // hand back a segment of the wrong size.
+        frame->rax = static_cast<u64>(
+            shm::destroy(static_cast<i32>(frame->rdi),
+                         scheduler::current_uid()) ? 0 : -1);
+        break;
+
+    case ShmMap: {
         const i32 id = static_cast<i32>(frame->rdi);
-        if (gui::owner_of(id) != scheduler::current_tgid()) {
+        if (!shm::exists(id)) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
-        const paddr_t phys = gui::buffer_phys(id);
-        const u32 bytes = gui::buffer_bytes(id);
-        if (phys == 0 || bytes == 0) {
+        if (!shm::accessible(id, scheduler::current_uid())) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
 
+        const usize pages = shm::page_count(id);
+        const u64 bytes = static_cast<u64>(pages) * vmm::kPageSize;
         const u64 base = scheduler::current_mmap_next();
-        if (base + bytes > memory::kUserMmapEnd) {
+        if (pages == 0 || base + bytes > memory::kUserMmapEnd) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
+
+        // One reference per frame for this mapping. Address-space teardown
+        // drops exactly one per mapped page, so the segment survives a client
+        // exiting - and the frames survive until the last mapping and the
+        // segment itself have both let go.
+        if (!shm::share_frames(id)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+
         bool ok = true;
-        for (u32 offset = 0; offset < bytes && ok; offset += vmm::kPageSize) {
-            ok = vmm::map(base + offset, phys + offset,
+        for (usize i = 0; i < pages && ok; ++i) {
+            ok = vmm::map(base + i * vmm::kPageSize, shm::frame_of(id, i),
                           vmm::Write | vmm::User | vmm::NoExecute);
         }
         if (!ok) {
@@ -677,32 +707,106 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
     }
 
-    case WinPresent:
-        if (gui::owner_of(static_cast<i32>(frame->rdi)) == scheduler::current_tgid())
-            gui::present(static_cast<i32>(frame->rdi));
-        frame->rax = 0;
-        break;
-
-    case WinPoll: {
-        const i32 id = static_cast<i32>(frame->rdi);
-        if (gui::owner_of(id) != scheduler::current_tgid() ||
-            !user_range_ok(frame->rsi, sizeof(gui::Event))) {
+    case FbInfo: {
+        // width, height, pitch in bytes, bits per pixel.
+        if (!user_range_ok(frame->rdi, sizeof(u32) * 4) ||
+            !framebuffer::available()) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
-        gui::Event event{};
-        const bool have = gui::poll_event(id, event);
-        if (have)
-            memcpy(reinterpret_cast<void*>(frame->rsi), &event, sizeof(event));
-        frame->rax = static_cast<u64>(have ? 1 : 0);
+        auto* out = reinterpret_cast<u32*>(frame->rdi);
+        out[0] = framebuffer::width();
+        out[1] = framebuffer::height();
+        out[2] = framebuffer::pitch();
+        out[3] = framebuffer::bits_per_pixel();
+        frame->rax = 0;
         break;
     }
 
-    case WinDestroy:
-        if (gui::owner_of(static_cast<i32>(frame->rdi)) == scheduler::current_tgid())
-            gui::destroy_window(static_cast<i32>(frame->rdi));
+    case FbMap: {
+        // Handing the screen to a process is not a small thing, so it is root's
+        // to ask for. Whoever holds this mapping can draw anywhere, including
+        // over whatever another user is looking at.
+        if (scheduler::current_uid() != 0 || !framebuffer::available()) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const u64 bytes = static_cast<u64>(framebuffer::pitch()) *
+                          framebuffer::height();
+        const paddr_t phys = framebuffer::physical_base();
+        const u64 base = scheduler::current_mmap_next();
+        if (phys == 0 || base + bytes > memory::kUserMmapEnd) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        bool ok = true;
+        for (u64 offset = 0; offset < bytes && ok; offset += vmm::kPageSize) {
+            ok = vmm::map(base + offset, phys + offset,
+                          vmm::Write | vmm::User | vmm::NoExecute);
+        }
+        if (ok) {
+            scheduler::set_current_mmap_next(base + bytes);
+            // The console stops painting: two things drawing to one screen just
+            // corrupt each other. It comes back when this process exits.
+            console::grant_display_to(scheduler::current_tgid());
+        }
+        frame->rax = ok ? base : static_cast<u64>(-1);
+        break;
+    }
+
+    case Sleep: {
+        // Milliseconds in, rounded up to whole ticks - sleeping for less than a
+        // tick would round to zero and busy-wait, which is the thing this
+        // exists to avoid.
+        const u64 ms = frame->rdi;
+        const u64 per_ms = timer::kFrequencyHz / 1000;
+        u64 ticks = per_ms != 0 ? ms * per_ms : (ms * timer::kFrequencyHz) / 1000;
+        if (ticks == 0 && ms != 0)
+            ticks = 1;
+        scheduler::sleep_ticks(ticks);
         frame->rax = 0;
         break;
+    }
+
+    case FbFont: {
+        // The 8x16 font stage 2 lifted out of the video BIOS, as 256 glyphs of
+        // 16 rows. A server drawing its own text would otherwise have to carry
+        // a second copy of a font the system already has.
+        constexpr u64 kFontBytes = 256 * 16;
+        if (!user_range_ok(frame->rdi, kFontBytes)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        auto* out = reinterpret_cast<u8*>(frame->rdi);
+        for (u32 glyph = 0; glyph < 256; ++glyph) {
+            for (u32 row = 0; row < 16; ++row) {
+                out[glyph * 16 + row] =
+                    framebuffer::glyph_row(static_cast<char>(glyph), row);
+            }
+        }
+        frame->rax = 0;
+        break;
+    }
+
+    case InputPoll: {
+        // Raw input, before the console cooks it: {mouse x, mouse y, buttons,
+        // key}. The key is 0 when nothing is waiting, so a server can poll this
+        // in its own loop without blocking on either device.
+        if (scheduler::current_uid() != 0 ||
+            !user_range_ok(frame->rdi, sizeof(i32) * 4)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const mouse::State state = mouse::state();
+        auto* out = reinterpret_cast<i32*>(frame->rdi);
+        out[0] = state.x;
+        out[1] = state.y;
+        out[2] = (state.left ? 1 : 0) | (state.right ? 2 : 0) |
+                 (state.middle ? 4 : 0);
+        out[3] = static_cast<i32>(static_cast<u8>(keyboard::read()));
+        frame->rax = 0;
+        break;
+    }
 
     case SetEcho:
         files::set_console_echo(frame->rdi != 0);

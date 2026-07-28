@@ -78,11 +78,10 @@ int main(int argc, char** argv)
                 drawing = 0;
             if (event.type == WIN_EVENT_KEY) {
                 /* c clears, q quits, and the digits pick a colour. */
-                /* Deliberately exits without closing the window: the kernel
-                   reclaims what a process still owns when it dies, and this is
-                   the path a client that crashed would take. */
-                if (event.key == 'q')
+                if (event.key == 'q') {
+                    win_destroy(id);
                     return 0;
+                }
                 if (event.key == 'c') {
                     fill(px, W, H, 0xFFFFFF);
                     border(px);

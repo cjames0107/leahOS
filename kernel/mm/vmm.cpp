@@ -1,6 +1,7 @@
 #include <leah/cpu.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
+#include <leah/percpu.hpp>
 #include <leah/apic.hpp>
 #include <leah/interrupts.hpp>
 #include <leah/pmm.hpp>
@@ -17,7 +18,14 @@ constexpr u64 kEntriesPerTable = 512;
 constexpr u64 kAddressMask = 0x000FFFFFFFFFF000ull;   // bits 51:12 of an entry
 
 u64 g_pml4_phys = 0;         // the kernel's own top-level table (physical)
-u64 g_current_pml4 = 0;      // the table CR3 currently points at (physical)
+// Which table is loaded is asked of CR3, never remembered: it is per-processor
+// state, and a global copy of it is wrong the moment a second CPU runs.
+u64 loaded_pml4()
+{
+    u64 value;
+    asm volatile("mov %%cr3, %0" : "=r"(value));
+    return value;
+}
 
 // Page-table entries always hold physical addresses. To read or write a table
 // the kernel needs a virtual pointer to it, which comes from the direct map -
@@ -33,7 +41,7 @@ u64* phys_ptr(paddr_t phys)
 }
 
 u64* kernel_pml4()  { return phys_ptr(g_pml4_phys); }
-u64* current_pml4() { return phys_ptr(g_current_pml4); }
+u64* current_pml4() { return phys_ptr(loaded_pml4()); }
 
 u64* table_of(u64 entry)
 {
@@ -102,7 +110,12 @@ bool split_huge_page(u64* pd, u64 index)
 
 } // namespace
 
-void init()
+// Paging control state that lives in the control registers rather than in the
+// page tables - and so belongs to a processor, not to the machine. An
+// application processor comes out of the trampoline with the reset defaults and
+// has to be told all of it before it can run a user task, or copy-on-write
+// quietly stops working on that core.
+void init_this_cpu()
 {
     // NXE has to be on before any entry sets bit 63, or the CPU faults on a
     // reserved bit rather than honouring the flag.
@@ -115,9 +128,22 @@ void init()
     // would write straight into the page a forked process still shares, instead
     // of faulting and being given a private copy first.
     constexpr u64 kCr0WriteProtect = 1ull << 16;
+    // CD and NW are set out of reset and leave the cache disabled. The
+    // bootstrap processor was brought up by firmware with them clear; an
+    // application processor has to clear them itself, or it runs uncached and
+    // ruinously slowly.
+    constexpr u64 kCr0CacheDisable = 1ull << 30;
+    constexpr u64 kCr0NotWriteThrough = 1ull << 29;
     u64 cr0;
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
-    asm volatile("mov %0, %%cr0" : : "r"(cr0 | kCr0WriteProtect) : "memory");
+    cr0 |= kCr0WriteProtect;
+    cr0 &= ~(kCr0CacheDisable | kCr0NotWriteThrough);
+    asm volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+}
+
+void init()
+{
+    init_this_cpu();
 
     // Built with the direct map not yet active: phys_ptr is still identity, and
     // the stage-2 low identity map that is live right now makes that valid.
@@ -155,7 +181,6 @@ void init()
         pd[index_of(virt, 2)] = offset | Present | Write | Huge;
     }
 
-    g_current_pml4 = g_pml4_phys;
     asm volatile("mov %0, %%cr3" : : "r"(g_pml4_phys) : "memory");
 
     // The low identity map is gone now; every physical dereference from here on
@@ -322,6 +347,10 @@ bool map(vaddr_t virt, paddr_t phys, u64 flags)
 namespace {
 bool g_shootdown_enabled = false;
 volatile u32 g_shootdown_acks = 0;
+// Bumped once per shootdown. A CPU compares it against its own last-seen value,
+// which makes acknowledging idempotent - it can be driven by the interrupt or
+// polled from a spin loop, and whichever happens first is the one that counts.
+volatile u32 g_shootdown_generation = 0;
 u32 g_other_cpus = 0;
 } // namespace
 
@@ -331,8 +360,25 @@ void enable_tlb_shootdown(u32 total_cpus)
     g_shootdown_enabled = g_other_cpus > 0;
 }
 
-void on_shootdown_ipi()
+// Answer any outstanding shootdown on this CPU. Idempotent, and deliberately
+// callable from a spin loop as well as from the interrupt.
+//
+// The interrupt alone is not enough. A CPU waiting for the kernel lock inside a
+// syscall spins with interrupts masked - SYSCALL clears IF through FMASK - so it
+// cannot take the IPI at all, and the CPU holding the lock sits waiting for an
+// acknowledgement that can never arrive. That is a genuine deadlock which the
+// sender's timeout only converts into a crawl. Making the acknowledgement
+// pollable means a CPU that cannot be interrupted can still answer.
+void ack_shootdown()
 {
+    if (!g_shootdown_enabled)
+        return;
+    const u32 generation = __atomic_load_n(&g_shootdown_generation, __ATOMIC_ACQUIRE);
+    percpu::Cpu& self = percpu::current();
+    if (self.shootdown_seen == generation)
+        return;
+    self.shootdown_seen = generation;
+
     // Reloading CR3 drops every non-global translation, which is heavier than
     // invalidating one page but needs no agreement about which page.
     u64 cr3;
@@ -341,13 +387,19 @@ void on_shootdown_ipi()
     __atomic_add_fetch(&g_shootdown_acks, 1, __ATOMIC_SEQ_CST);
 }
 
+void on_shootdown_ipi() { ack_shootdown(); }
+
 void shootdown()
 {
     if (!g_shootdown_enabled)
         return;
     const u32 other_cpus = g_other_cpus;
 
+    // Reset the count before announcing the new generation, so no CPU can
+    // acknowledge this round before the counter is ready for it.
     __atomic_store_n(&g_shootdown_acks, 0, __ATOMIC_SEQ_CST);
+    percpu::current().shootdown_seen =
+        __atomic_add_fetch(&g_shootdown_generation, 1, __ATOMIC_SEQ_CST);
     apic::send_ipi_all_but_self(interrupts::kTlbShootdownVector);
 
     // Bounded: a CPU that never answers must not wedge the kernel. Overrunning
@@ -369,7 +421,8 @@ void release_low_half()
         pml4[i] = 0;
     }
     // Reload CR3 rather than invalidating page by page: whole sub-trees went.
-    asm volatile("mov %0, %%cr3" : : "r"(g_current_pml4) : "memory");
+    const u64 loaded = loaded_pml4();
+    asm volatile("mov %0, %%cr3" : : "r"(loaded) : "memory");
 }
 
 bool handle_cow_fault(vaddr_t virt)
@@ -432,7 +485,7 @@ bool map_mmio(vaddr_t virt, paddr_t phys, usize bytes)
 }
 
 AddressSpace kernel_space()  { return g_pml4_phys; }
-AddressSpace current_space() { return g_current_pml4; }
+AddressSpace current_space() { return loaded_pml4(); }
 
 AddressSpace create_address_space()
 {
@@ -547,7 +600,7 @@ void destroy_address_space(AddressSpace space)
         return;
 
     // Never free while it is the active table; the caller switches away first.
-    if (space == g_current_pml4)
+    if (space == loaded_pml4())
         switch_address_space(g_pml4_phys);
 
     u64* pml4 = phys_ptr(space);
@@ -569,9 +622,15 @@ void destroy_address_space(AddressSpace space)
 
 void switch_address_space(AddressSpace space)
 {
-    if (space == 0 || space == g_current_pml4)
+    if (space == 0)
         return;
-    g_current_pml4 = space;
+    // Ask the register rather than a remembered value. Which address space is
+    // loaded is a property of one processor, and caching it in a global meant a
+    // second CPU switching to the same space skipped its own CR3 load and
+    // carried on with another process's page tables - which shows up much later
+    // as the kernel faulting on a perfectly valid user pointer.
+    if (space == loaded_pml4())
+        return;
     asm volatile("mov %0, %%cr3" : : "r"(space) : "memory");
 }
 

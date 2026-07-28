@@ -1,7 +1,6 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/gdt.hpp>
-#include <leah/gui.hpp>
 #include <leah/heap.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
@@ -10,16 +9,22 @@
 #include <leah/scheduler.hpp>
 #include <leah/signal.hpp>
 #include <leah/spinlock.hpp>
+#include <leah/timer.hpp>
 #include <leah/string.hpp>
 
 // Implemented in context.asm, user_entry.asm and syscall_entry.asm.
 extern "C" void context_switch(u64* save_rsp, u64 load_rsp);
 extern "C" void user_return();
+// The first-entry-to-ring-3 stub: releases the displaced task, then falls into
+// user_return. See user_entry.asm.
+extern "C" void first_user_entry();
 
 namespace scheduler {
 namespace {
 
 constexpr usize kMaxTasks   = 32;
+// "this CPU has not switched away from anything yet"
+constexpr u32 kNoPrevious   = 0xFFFFFFFFu;
 constexpr u32   kMaxSignals = signals::kMaxSignals;
 constexpr usize kStackSize  = 16 * 1024;
 constexpr u32   kQuantum    = 1;            // one 10 ms tick per slice
@@ -49,6 +54,14 @@ struct Task {
     i32   exit_code;
     u64   wait_channel;      // when Blocked on block_on(); 0 otherwise
     u32   bkl_depth;         // kernel-lock depth this task was suspended holding
+    // True from the moment a CPU commits to running this task until the CPU it
+    // left has finished saving its context. No other CPU may pick it up in
+    // between: its kernel_rsp is still stale, and resuming from it would put
+    // two processors on one kernel stack.
+    volatile bool on_cpu;
+    // Tick at which a sleeping task becomes runnable again, or 0 if it is not
+    // sleeping. Checked on every timer tick.
+    u64   wake_tick;
     u64   brk;               // sbrk program break, for user tasks
     u64   mmap_next;         // next free address mmap hands out
     // Credentials, inherited across fork and execve. uid 0 is root and bypasses
@@ -179,8 +192,13 @@ bool group_still_alive(const Task* except)
     return false;
 }
 
+void finish_switch();
+
 [[noreturn]] void kernel_thread_trampoline()
 {
+    // First code this task ever runs: it arrived by context_switch, so the CPU
+    // it displaced still needs releasing.
+    finish_switch();
     cpu::sti();
     Task* self = current();
     self->entry(self->arg);
@@ -194,7 +212,8 @@ u32 pick_next()
         const u32 index = (current_index() + step) % g_task_count;
         // Ready means runnable and not already running elsewhere: a task another
         // CPU is executing is marked Running, so this skips it.
-        if (!is_idle_task(index) && g_tasks[index].state == State::Ready)
+        if (!is_idle_task(index) && g_tasks[index].state == State::Ready &&
+            !__atomic_load_n(&g_tasks[index].on_cpu, __ATOMIC_ACQUIRE))
             return index;
     }
     // Keep running the current task if it is still runnable.
@@ -207,6 +226,38 @@ u32 pick_next()
     panic("scheduler: nothing runnable and no idle task");
 }
 
+// Release the task this CPU switched away from.
+//
+// Runs on the CPU that took over, after context_switch - which is the first
+// moment the outgoing task's kernel_rsp is actually valid. Every path that a
+// context switch can arrive at has to call this, including the two that never
+// return through switch_to: a fresh kernel thread and a task entering ring 3
+// for the first time.
+void finish_switch()
+{
+    const u32 index = percpu::current().previous_task;
+    percpu::current().previous_task = kNoPrevious;
+    if (index == kNoPrevious || index >= kMaxTasks)
+        return;
+
+    Task& prev = g_tasks[index];
+    // Only a task that was still running is now merely runnable; one that
+    // blocked or exited on its way out already said so.
+    if (prev.state == State::Running)
+        prev.state = State::Ready;
+    // Ordered last, and with a release, so a CPU that sees the flag clear also
+    // sees the state and the saved stack pointer that go with it.
+    __atomic_store_n(&prev.on_cpu, false, __ATOMIC_RELEASE);
+}
+
+} // namespace
+
+// Reached from first_user_entry, the one context-switch target that is assembly
+// all the way to IRETQ and so cannot call finish_switch itself.
+extern "C" void scheduler_finish_switch() { finish_switch(); }
+
+namespace {
+
 // Enter with interrupts disabled. Besides swapping kernel stacks, this loads
 // the incoming task's page table and the ring-0 stack the CPU will use if that
 // task takes an interrupt or a syscall while in ring 3.
@@ -218,9 +269,15 @@ void switch_to(u32 next_index)
     Task* prev = current();
     Task* next = &g_tasks[next_index];
 
-    if (prev->state == State::Running)
-        prev->state = State::Ready;
+    // prev is deliberately *not* marked Ready here. Doing so published it as
+    // runnable before context_switch had saved its stack pointer - and the
+    // kernel lock is handed off a few lines below, so another CPU could pick it
+    // up in that window and resume it from a stale kernel_rsp. The CPU that
+    // takes over does it instead, in finish_switch, once the context really is
+    // saved.
     next->state = State::Running;
+    __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELEASE);
+    percpu::current().previous_task = current_index();
     current_index() = next_index;
     g_quantum = kQuantum;
 
@@ -240,6 +297,9 @@ void switch_to(u32 next_index)
     sync::bkl::handoff(next->bkl_depth);
 
     context_switch(&prev->kernel_rsp, next->kernel_rsp);
+
+    // Reached as the *incoming* task, on whichever CPU resumed it.
+    finish_switch();
 }
 
 // Lay a fabricated frame on a fresh kernel stack so the first context_switch to
@@ -358,7 +418,7 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
 
     // The first switch to this task returns into user_return, which restores
     // the TrapFrame and drops to ring 3.
-    fabricate(task, reinterpret_cast<u64>(&user_return), &frame, sizeof(frame));
+    fabricate(task, reinterpret_cast<u64>(&first_user_entry), &frame, sizeof(frame));
     return task->pid;
 }
 
@@ -404,7 +464,7 @@ u32 spawn_thread(const TrapFrame& frame)
     // redirects to the group leader), but zero it so close_all cannot double-free.
     files::init_table(task->files);
 
-    fabricate(task, reinterpret_cast<u64>(&user_return), &frame, sizeof(frame));
+    fabricate(task, reinterpret_cast<u64>(&first_user_entry), &frame, sizeof(frame));
     return task->pid;
 }
 
@@ -481,6 +541,19 @@ void start_idle() { start_idle_for(0); }
         sync::bkl::reacquire(held);
         cpu::cli();
     }
+}
+
+void sleep_ticks(u64 ticks)
+{
+    if (ticks == 0) {
+        yield();
+        return;
+    }
+    KernelLock lock;
+    cpu::InterruptGuard guard;
+    current()->wake_tick = timer::ticks() + ticks;
+    current()->state = State::Blocked;
+    switch_to(pick_next());
 }
 
 void yield()
@@ -563,7 +636,18 @@ u32 fork_current(const TrapFrame& parent_user)
                sizeof(child_task->sig_handler));
         child_task->sig_restorer = parent->sig_restorer;
         child_task->sig_pending  = 0;
-        child_task->bkl_depth = 1;   // resumes inside a syscall, as the parent does
+        // Zero, not one. The parent returns from this syscall and releases the
+        // lock on its way out; the child does not - it is fabricated to enter
+        // ring 3 through first_user_entry, which goes straight to IRETQ and
+        // never reaches a release. Handing it the lock therefore leaked it: the
+        // child carried it into user mode and no one ever gave it back.
+        //
+        // On one processor that was invisible, because the CPU holding it just
+        // re-entered recursively and never noticed. On two it is fatal - the
+        // other CPU spins for a lock nobody holds, and since every device
+        // interrupt is routed to one processor, the machine loses its keyboard
+        // and mouse the first time a process forks.
+        child_task->bkl_depth = 0;
         child_task->uid = parent->uid;
         child_task->gid = parent->gid;
     }
@@ -585,9 +669,9 @@ void exit_current(i32 code)
     // it; otherwise a thread exiting would pull the fds from under its siblings.
     if (!group_still_alive(self)) {
         files::close_all(group_leader(self)->files);
-        // Same reasoning for windows: the last thread out takes the process's
-        // windows with it, however it happened to die.
-        gui::close_windows_of(self->tgid);
+        // If this was the process holding the screen, the console takes it
+        // back - however the process happened to die.
+        console::reclaim_display(self->tgid);
     }
 
     // Drop the user address space now; the kernel stack (in the shared heap)
@@ -650,7 +734,7 @@ i64 wait_child(i32* status)
 
 bool signal_send(u32 pid, int signo)
 {
-    if (signo <= 0 || signo >= static_cast<int>(kMaxSignals))
+    if (signo < 0 || signo >= static_cast<int>(kMaxSignals))
         return false;
     cpu::InterruptGuard guard;
 
@@ -658,6 +742,12 @@ bool signal_send(u32 pid, int signo)
     if (target == nullptr || !target->is_user ||
         target->state == State::Zombie || target->state == State::Dead)
         return false;
+
+    // Signal 0 delivers nothing: every check above still runs, so it answers
+    // "is this process still alive?" and nothing else. The window server needs
+    // that - outside the kernel, nothing tells it when a client dies.
+    if (signo == 0)
+        return true;
 
     target->sig_pending |= 1u << signo;
 
@@ -780,6 +870,21 @@ u32 alive_count()
 
 void on_tick()
 {
+    // Wake anything whose sleep has run out. Sleeping is what lets a polling
+    // process - a window server, say - poll at a sane rate instead of spinning:
+    // a task that never blocks holds the kernel lock over and over and can stop
+    // another processor from getting into the kernel at all.
+    const u64 now = timer::ticks();
+    for (u32 i = 0; i < g_task_count; ++i) {
+        Task& task = g_tasks[i];
+        if (task.state == State::Blocked && task.wake_tick != 0 &&
+            now >= task.wake_tick) {
+            task.wake_tick = 0;
+            task.wait_channel = 0;
+            task.state = State::Ready;
+        }
+    }
+
     if (!g_preemption)
         return;
     if (g_quantum > 0)

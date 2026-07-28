@@ -61,11 +61,20 @@ enum Number : u64 {
     UserName  = 44,
     UserAdd   = 45,
     SetPasswd = 46,
-    WinCreate  = 47,
-    WinMap     = 48,   // map the window's pixels into this process
-    WinPresent = 49,
-    WinPoll    = 50,
-    WinDestroy = 51,
+    // Shared memory: the first thing two processes can both write to.
+    ShmOpen    = 47,   // open or create a segment by key
+    ShmMap     = 48,   // map a segment into this process
+    ShmSize    = 49,
+
+    // What a window server needs in order to live outside the kernel: the
+    // screen, and input before the console has cooked it. Root only - these
+    // hand over the display and the keyboard wholesale.
+    FbInfo     = 50,   // geometry and pitch
+    FbMap      = 51,   // map the linear framebuffer
+    InputPoll  = 52,   // mouse position and buttons, and one key at a time
+    FbFont     = 53,   // the 8x16 BIOS font, so a server can draw its own text
+    Sleep      = 54,   // block for a number of milliseconds
+    ShmDestroy = 55,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.
@@ -99,6 +108,11 @@ constexpr u64 kUserData = 0x18 | 3;
 constexpr u64 kUserFlags = 0x202;       // IF set
 
 void init();
+
+// The per-processor half of init(): the SYSCALL MSRs, which every CPU that
+// runs user code needs for its own.
+void init_this_cpu();
+
 
 // Deliver a pending signal to a task interrupted in ring 3 by a hardware IRQ,
 // rewriting the frame the ISR is about to IRETQ through. Called from the

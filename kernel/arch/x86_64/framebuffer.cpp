@@ -83,6 +83,9 @@ u32 columns() { return g_columns; }
 u32 rows()    { return g_rows; }
 u32 width()   { return g_width; }
 u32 height()  { return g_height; }
+u32 pitch()   { return g_pitch; }
+u32 bits_per_pixel()    { return g_bytes_per_pixel * 8; }
+paddr_t physical_base() { return g_pixels_phys; }
 
 void plot(u32 x, u32 y, u32 colour)
 {

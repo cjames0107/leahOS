@@ -14,6 +14,12 @@
 ;   rip cs rflags rsp ss                                        <- CPU
 ;
 ; This must stay in step with interrupts::Frame in interrupts.hpp.
+;
+; Unlike SYSCALL, an interrupt can arrive from either ring, so the SWAPGS here
+; has to be conditional: the saved CS says where it came from, and GS is only
+; the user's - and so only worth swapping - when that is ring 3. Swapping
+; unconditionally would be worse than not swapping at all, because an interrupt
+; taken in kernel code would install the *user's* GS for the handler.
 ; ============================================================================
 
 BITS 64
@@ -50,6 +56,13 @@ isr_stub_%1:
 ; isr_common - save state, call into C++, restore, return
 ; ----------------------------------------------------------------------------
 isr_common:
+    ; Stack here: vector, error_code, rip, cs, ... - so CS is at +24. Its low
+    ; two bits are the ring the interrupt came from.
+    test qword [rsp + 24], 3
+    jz .kernel_entry                ; already in the kernel: GS is ours
+    swapgs
+.kernel_entry:
+
     push rax
     push rbx
     push rcx
@@ -90,6 +103,14 @@ isr_common:
     pop rax
 
     add rsp, 16                         ; discard vector and error code
+
+    ; Same test on the way out - CS is at +8 now that the vector and error code
+    ; are gone. The flags this leaves behind do not matter: IRETQ takes RFLAGS
+    ; from the stack.
+    test qword [rsp + 8], 3
+    jz .kernel_exit
+    swapgs
+.kernel_exit:
     iretq
 
 ; ----------------------------------------------------------------------------

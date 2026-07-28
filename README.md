@@ -173,11 +173,15 @@ and run under **users and permissions** enforced against the ext inode's own
 mode and owner bits. An **e1000 NIC driver** and a
 small **IPv4 stack** (Ethernet, ARP, ICMP, UDP, and a minimal DNS resolver)
 bring up networking, with `ifconfig`, `arp`, `ping` and `nslookup` talking to
-QEMU's virtual network — `ping example.com` resolves and reaches the host. A **window server** composites a Windows 3.1 / Mac OS 7 style desktop over the
-linear framebuffer, driven by a **PS/2 mouse**: windows have bevelled chrome, a
-title bar to drag and a close box, and clients draw into their own pixel buffer
-without ever seeing the screen. User programs are C linked against leahOS's own
-libc. Faults produce a register dump instead of a silent reset.
+QEMU's virtual network — `ping example.com` resolves and reaches the host.
+
+It runs tasks on **all** its processors, not just the one it booted on. A
+**window server** — an ordinary process, not kernel code — composites a Windows
+3.1 / Mac OS 7 style desktop over the linear framebuffer, driven by a **PS/2
+mouse**, and `login` starts it as soon as a password is accepted; clients draw
+into **shared memory** and never touch the screen. User programs are C linked
+against leahOS's own libc. Faults produce a register dump instead of a silent
+reset.
 
 ## Memory management
 
@@ -543,54 +547,105 @@ A failed mapping falls back silently to the text buffer, which in graphics mode
 means a black screen with a perfectly healthy serial log. Worth remembering as
 a symptom.
 
+## Shared memory
+
+Two processes could not write to the same page until now. Everything shared
+before this was shared by accident of a `fork` and then copied apart on the first
+write; a segment is the opposite, and it is what a window server outside the
+kernel needs in order to hand a client its pixels without copying them.
+
+A segment is named by an **integer key** rather than a path — there is no `/dev`
+or `/tmp` to hang a name off, and a well-known number is enough for two processes
+to find each other. The first to ask for a key creates it; later ones get what is
+already there.
+
+Lifetime rides on the frame reference counts copy-on-write already needed: the
+segment holds one reference per frame, every mapping takes another, and an
+address space dropping its mappings on teardown releases them. Nothing has to be
+told that a process died.
+
+A segment belongs to the user who created it, and only that user and root can map
+it — the same rule as a file. `SHM_PUBLIC` gives that up deliberately, which the
+window server needs for its rendezvous block and nothing else uses.
+
+Destroying one drops the segment's *own* reference and frees the key. Whoever
+still has it mapped keeps the pages alive through theirs, so it is safe to
+destroy a segment the other side is still reading. Without that a key could never
+be reused — and reusing one would hand back a segment of whatever size it happened
+to be created with, which is exactly what a window slot does when the next client
+takes it.
+
+Adding this exposed an older bug of the same family: `munmap` freed frames with
+`pmm::free` rather than `pmm::release`, so unmapping a shared page handed it
+straight back to the allocator while another process still had it mapped. The
+copy-on-write work had already fixed the identical mistake in address-space
+teardown; this was the second copy of it.
+
+One sharp edge, deliberately left rather than hidden: a mapping **inherited
+through `fork` is copy-on-write like anything else**, so a child that writes to it
+gets a private copy and stops sharing. Clients map segments for themselves rather
+than inheriting them, and the test suite says so explicitly.
+
 ## The window server
 
-`gui` starts the desktop; it comes down on its own when the last window closes.
-The text console and the desktop cannot both own the framebuffer, so they take
-turns: starting the server suspends console *drawing* (serial output carries on
-regardless, which is what keeps the boot log and any panic readable behind a
-desktop), and tearing it down clears the screen and hands it back. Nothing is
-composited until a program actually asks for a window, so `login` still gets a
-plain text console.
+The window server is an ordinary process. It owns three things the kernel hands
+it and nothing else: the framebuffer, the raw input devices, and a public shared
+memory block that clients find by a well-known key. Everything a window *is* —
+geometry, title, event queue — lives in that block, and its pixels live in a
+segment of the client's own. Compositing is then reading other processes' memory
+and writing the screen, with no kernel involvement beyond the page tables.
 
-The server lives in the kernel. That is not where it belongs — a real system
-puts it in a userland process — but a userland server needs shared memory and a
-message transport between processes, and there is neither yet. The split that
-actually matters is still enforced: a client never touches the framebuffer,
-only the pixels of its own window, and every window syscall checks the caller
-owns the window it names.
+`FbMap` and `InputPoll` are **root only**, and that is the whole reason `login`
+starts the server: mapping the framebuffer means being able to draw over anything
+anyone is looking at, and polling input means seeing every keystroke. Clients run
+as the logged-in user and never touch either.
 
-A window's pixels are one run of physically contiguous frames, mapped into the
-client with `WinMap`. The client draws into them directly and calls
-`WinPresent`; the compositor paints the desktop, then the windows back to front
-into an off-screen buffer, and blits the result in one pass. The cursor is
-drawn straight to the framebuffer afterwards and erased from the backbuffer
-before the next move, so pointer motion does not cost a recompose.
+There is no message passing. The protocol is reads and writes to one structure
+both sides can see, with a small number of rules keeping it honest: a client owns
+its slot and writes only geometry, title and a `present` counter; the server owns
+the screen and the event rings; and slot allocation — the one genuinely contended
+step, since `login` starts three clients at once — goes through a compare-and-swap
+rather than a lock.
 
-Input follows the same shape as any window system:
+Moving out of the kernel cost two things and bought one. It cost a **rendezvous**,
+hence the well-known key. It cost being **told when a client dies**: the server
+has to notice for itself, which it does by asking — `kill(pid, 0)` delivers
+nothing and reports only whether the process is still there, so a window whose
+owner has gone is released rather than left as a corpse on the desktop. What it
+bought is that a bug in the window manager is a dead process rather than a panic.
 
-- The topmost window is the focused one, and gets the keyboard.
-- Pressing inside a window's content **grabs** the pointer, so a stroke that
-  runs off the edge stops there instead of continuing into whatever is
-  underneath.
-- Dragging a title bar moves the window, clamped so the bar — and with it the
-  close box — can never leave the screen. Without the clamp a window can be
-  dragged somewhere it can no longer be closed.
-- Closing is a request, not an eviction: the server queues a `Close` event and
-  the client decides what to do with it.
+What it does *not* buy is the isolation the in-kernel version had. The control
+block is public, so any user can read every window's title and geometry and could
+write into another window's event ring. Pixels are not public — they stay owned by
+the client that created them — so one user's windows cannot be read by another.
+Fixing the rest needs per-client channels rather than one shared table.
 
-Windows are owned by a thread group and released when it dies, however it died,
-so a client that is killed rather than closed does not leave a window on the
-desktop with nobody behind it.
+### The desktop
 
-Bringing this up turned a latent bug into a reproducible hang. The console
-spinlock did not mask interrupts, and `console::clear()` writes three megabytes
-of framebuffer — long enough for the timer to preempt the holder. Anything then
-spinning for that lock with interrupts already masked (a syscall, or a task on
-its way out through `exit`) could never be preempted back, and on one processor
-the two wedged it permanently: RIP pinned inside `console::put` with `IF`
-clear. `sync::IrqScopedLock` masks interrupts for as long as the lock is held,
-which is what a lock reachable from interrupt context needed all along.
+`login` starts the desktop as soon as a password is accepted, and the session is
+the desktop: close every window and the console comes back with a shell on it,
+leave the shell and you are logged out. They cannot both be on screen — there is
+one framebuffer and no way to switch virtual consoles — so they take turns, and
+the console stops *drawing* while the server holds the screen. Serial output
+carries on regardless, which is what keeps the boot log and any panic readable
+from behind a desktop.
+
+The screen is granted to a process and reclaimed when that process exits, however
+it exits. A server that crashed returns the screen exactly as one that shut down
+cleanly does; a desktop that died must not leave the machine with no visible
+console.
+
+Input works the way a window system has to. The topmost window is focused and
+gets the keyboard. Pressing inside a window **grabs** the pointer, so a stroke
+that runs off the edge stops rather than continuing into whatever is underneath.
+Dragging clamps so the title bar — and with it the close box — can never leave the
+screen, or a window could be dragged somewhere it can never be closed. Closing is
+a request the client can act on, not an eviction.
+
+The compositor **sleeps** between passes rather than spinning. That is not a
+politeness: a polling loop that only ever yields stays runnable, holds the kernel
+lock over and over, and on a multiprocessor can keep another CPU out of the kernel
+entirely — including the one every device interrupt is routed to.
 
 ## Networking
 
@@ -771,11 +826,86 @@ though it were kernel-shared, and every user space then builds its mappings
 inside one shared page table. The symptom was a forked child's writes showing up
 in its parent — copy-on-write looking broken when the fault was in SMP startup.
 
-The application processors currently **park**. They come up, load the shared GDT
-and IDT, enable their own local APICs, check in, and halt. Letting them run
-tasks means making every structure the scheduler touches safe for more than one
-CPU first, and a half-locked scheduler on four cores is considerably worse than
-one core that works.
+The application processors **run tasks**. Each takes its own GDT and TSS, its own
+per-CPU block, its own local APIC and timer tick, an idle task of its own, and
+then enters the scheduler. Processes are genuinely distributed: three spinning
+workers land on three different processors and make comparable progress.
+
+Getting there was mostly a hunt for **state that describes a processor but was
+stored once for the machine**. Every one of these was invisible on a single core
+and fatal on two:
+
+- **Which CPU am I?** was a global written when the kernel lock was taken, on the
+  reasoning that only one CPU is inside the kernel at a time. That is not true —
+  a context switch hands the lock off, and a CPU switching to a task that never
+  held it carries on in the kernel with the lock released. Another CPU then owns
+  the global while this one is still reading it, so the scheduler returned *that*
+  CPU's current task and two processors ran the same one. It reads out of `GS`
+  now, which cannot be wrong.
+- **The kernel lock's recursion depth**, same story: two CPUs decrementing one
+  counter.
+- **Which address space is loaded** was cached in a global so a redundant `CR3`
+  reload could be skipped. A second CPU switching to the same space skipped its
+  own reload and kept running on another process's page tables. `CR3` is a
+  register; it is now simply read.
+- **`EFER.SCE`, `STAR`, `LSTAR`, `SFMASK`, and `CR0.WP`** are per-processor and
+  only the boot CPU ever set them. A task that migrated hit `#UD` on its next
+  `syscall` — the opcode is not legal without `EFER.SCE` — and, with `CR0.WP`
+  clear, copy-on-write quietly stopped working on that core. The application
+  processors also came out of the trampoline with `CR0.CD` and `CR0.NW` still
+  set, running uncached.
+
+Reaching per-CPU state at all needed **SWAPGS on every ring transition**, which
+had to go in as one piece. `SYSCALL` arrives with no free register — `RSP` still
+points into user memory and every general register holds user data — so the
+kernel stack to switch to has to come from somewhere reachable without one. That
+is what `GS` is for: one instruction turns it into this processor's block, and
+`gs:[8]` is its stack. A global names a single stack for the whole machine, which
+is only ever right on a uniprocessor.
+
+Half of that discipline is worse than none. An interrupt can arrive from either
+ring, so its swap has to be conditional on the saved `CS` — swapping
+unconditionally would install the *user's* `GS` for a handler that interrupted
+kernel code. And the one path that is assembly all the way to `IRETQ`, a task's
+first entry into ring 3, cannot use `SWAPGS` at all: the segment loads it has to
+do reset `GS_BASE` from the descriptor and would throw the block away, so it
+writes `IA32_KERNEL_GS_BASE` explicitly instead.
+
+Two genuine races, rather than misplaced state:
+
+**A task must not become runnable until its context is actually saved.**
+`switch_to` marked the outgoing task `Ready` and then handed off the lock, both
+*before* `context_switch` had stored its stack pointer. Another CPU could pick it
+up in that window and resume it from a stale `kernel_rsp` — two processors on one
+kernel stack, which showed up as a register dump full of stack addresses. The CPU
+taking over now does it, in `finish_switch`, once the context really is saved;
+tasks carry an `on_cpu` flag so nothing can be picked up mid-flight.
+
+**`fork` leaked the kernel lock.** The child was given a lock depth of one, on the
+grounds that it "resumes inside a syscall, as the parent does" — but it does not.
+It is fabricated to enter ring 3 through `first_user_entry`, which goes straight
+to `IRETQ` and never reaches the release that would balance it, so the child
+carried the lock into user mode and never gave it back. On one processor that is
+invisible: the CPU holding it just re-enters recursively. On two it is fatal, and
+the symptom was not what you would guess — every device interrupt is routed to
+one processor, so the machine lost its keyboard and mouse the first time
+anything forked.
+
+That last one also needed a change to how the lock is waited for. A CPU spinning
+for it holds nothing, so masking interrupts while it waits protects nothing — and
+a syscall enters with `IF` clear, so waiting the way the caller arrived meant the
+boot processor could sit there ignoring every key and mouse packet. Waiting now
+happens with interrupts **on**, which is safe precisely because the lock is not
+held yet: every check-then-block sequence in the kernel runs from inside a
+syscall, where the lock is already held and the acquire is a nested one that
+never spins.
+
+TLB shootdowns needed the same kind of rethink. A CPU waiting for the kernel lock
+inside a syscall could not take the shootdown IPI, and the CPU holding the lock
+sat waiting for an acknowledgement that could never arrive — a real deadlock that
+the sender's timeout merely turned into a crawl. Acknowledging is now idempotent
+and **pollable**: a generation counter the receiver compares against its own, so
+a processor that cannot be interrupted can still answer from inside a spin loop.
 
 ## Interrupt controllers and timekeeping
 
@@ -944,7 +1074,8 @@ process still mapped them.
 - [x] the local APIC and I/O APIC, with the PIC masked and the PIT retired
 - [x] the HPET as a monotonic clock, and a calibrated local APIC timer
 - [x] SMP: application processors brought out of reset into long mode
-- [ ] SMP: a locked scheduler, so those processors can run tasks
+- [x] SMP: a locked scheduler, so those processors can run tasks
+- [x] per-CPU state reached through GS, and a SWAPGS discipline on every ring transition
 - [x] TCP and sockets, with `fetch` doing an HTTP GET
 - [x] xHCI, with the HID and mass-storage class drivers
 - [ ] USB interrupt transfers driven by the controller's own interrupt
@@ -952,6 +1083,9 @@ process still mapped them.
 - [x] `login` at boot, `useradd`, `passwd`, `logout`
 - [x] `ls -l` and `stat` for permissions and metadata
 - [x] a window server and window manager: bevelled chrome, dragging, focus, a close box
-- [x] window syscalls and a client library, with `paint` and `clock`
-- [ ] a userland window server, once there is shared memory between processes
+- [x] shared memory between processes, keyed and reference-counted
+- [x] the window server moved out of the kernel, onto shared memory
+- [x] `login` starts the desktop; closing every window returns a shell
+- [ ] per-client channels, so the rendezvous block need not be world-writable
 - [ ] window resizing, overlapping-region damage instead of a full recompose
+- [ ] a terminal window, so the shell and the desktop need not take turns

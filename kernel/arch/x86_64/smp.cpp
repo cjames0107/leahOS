@@ -8,6 +8,7 @@
 #include <leah/percpu.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/smp.hpp>
+#include <leah/syscall.hpp>
 #include <leah/spinlock.hpp>
 #include <leah/timer.hpp>
 #include <leah/string.hpp>
@@ -38,6 +39,7 @@ constexpr usize kApStackSize = 16 * 1024;
 // processor spinning on it. Volatile because the two are genuinely different
 // CPUs, not two threads the compiler knows about.
 volatile u32 g_online = 1;              // the bootstrap processor counts itself
+volatile bool g_scheduling = false;
 volatile u32 g_handshake = 0;
 u32 g_next_slot = 0;                    // slot 0 is the bootstrap processor
 
@@ -74,26 +76,26 @@ extern "C" [[noreturn]] void ap_main()
     // processor's was touched during boot.
     apic::init_this_cpu();
 
+    // Everything else that lives in this processor's own registers rather than
+    // in shared memory: the paging control bits, and the MSRs that make
+    // SYSCALL legal and point it at the kernel.
+    vmm::init_this_cpu();
+    syscall::init_this_cpu();
+
     __atomic_add_fetch(&g_online, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&g_handshake, 1, __ATOMIC_SEQ_CST);
 
-    // Parked. Everything an application processor needs in order to run tasks
-    // is now in place and verified - its own GDT and TSS, its own SYSCALL stack
-    // reached through SWAPGS, a kernel lock that hands off across context
-    // switches, TLB shootdown, a locked console - and switching the two lines
-    // below back on does start all of them scheduling.
-    //
-    // What is not right yet is work distribution: with several CPUs a worker
-    // can sit Ready and never be picked, and a task that never runs never sees
-    // a stop flag, so it never exits either. That is a scheduling-policy bug
-    // rather than a locking one, and it is not worth shipping around.
-    //
-    //   apic::start_timer(interrupts::kIrqBase + interrupts::kIrqTimer,
-    //                     timer::kFrequencyHz);
-    //   scheduler::start_idle_for(slot);
-    //   scheduler::enter_scheduler_on_this_cpu();
-    for (;;)
-        asm volatile("cli; hlt");
+    // Its own tick, so this processor preempts on its own rather than waiting
+    // for the bootstrap one to notice.
+    apic::start_timer(interrupts::kIrqBase + interrupts::kIrqTimer,
+                      timer::kFrequencyHz);
+
+    // An idle task of its own, adopted before anything can switch away: until
+    // that happens current_index() still names task 0, and the first context
+    // switch would save this CPU's state straight over the bootstrap
+    // processor's.
+    scheduler::start_idle_for(slot);
+    scheduler::enter_scheduler_on_this_cpu();
 }
 
 usize init()
@@ -157,6 +159,8 @@ usize init()
     // space created later would inherit them from the kernel's PML4.
     vmm::release_low_half();
     g_cpu_count = __atomic_load_n(&g_online, __ATOMIC_SEQ_CST);
+    if (g_cpu_count > 1)
+        __atomic_store_n(&g_scheduling, true, __ATOMIC_SEQ_CST);
     return g_cpu_count;
 }
 
@@ -164,9 +168,10 @@ usize cpu_count() { return g_cpu_count; }
 
 bool multiprocessor() { return g_cpu_count > 1; }
 
-// False while the APs are parked: a halted processor with interrupts off can
-// never acknowledge a shootdown, and gating on the CPU count instead made every
-// unmap wait out the full timeout.
-bool scheduling() { return false; }
+// True once the application processors are running tasks. A shootdown has to
+// be gated on this rather than on the CPU count: a parked processor halted with
+// interrupts off can never acknowledge one, so counting cores instead made
+// every unmap wait out the full timeout.
+bool scheduling() { return __atomic_load_n(&g_scheduling, __ATOMIC_SEQ_CST); }
 
 } // namespace smp

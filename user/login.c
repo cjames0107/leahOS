@@ -9,6 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <shm.h>
+#include <signal.h>
+#include <window.h>
 
 /* Distinct from any status a shell is likely to return, so the parent can tell
  * "wrong password" from "the user typed exit". */
@@ -32,6 +35,64 @@ static int read_line(const char* prompt, char* out, int max, int echo)
     return n;
 }
 
+/* What an authenticated user gets: the desktop first, then a text shell.
+ *
+ * They cannot both be on screen - there is one framebuffer and no way to switch
+ * between virtual consoles - so they take turns. Closing the last window ends
+ * the desktop, the console comes back, and the shell starts on it. Leaving the
+ * shell logs out.
+ *
+ * By the time this runs the server is already up: login waits for it, so there
+ * is nothing to poll for here. */
+static void session(void)
+{
+    if (win_server_running()) {
+        printf("starting the desktop - close every window to reach a shell.\n");
+        char* paint1[] = { "paint", "80", "90", 0 };
+        char* paint2[] = { "paint", "430", "150", 0 };
+        char* clock[]  = { "clock", 0 };
+        const char* which[] = { "/BIN/PAINT.ELF", "/BIN/PAINT.ELF", "/BIN/CLOCK.ELF" };
+        char** argv[] = { paint1, paint2, clock };
+        int started = 0;
+        for (int i = 0; i < 3; ++i) {
+            const int pid = fork();
+            if (pid == 0) {
+                execve(which[i], argv[i], 0);
+                exit(127);
+            }
+            if (pid > 0)
+                ++started;
+        }
+        for (int i = 0; i < started; ++i)
+            wait(0);
+    }
+
+    /* The desktop is gone and the console is back. */
+    char* sh[] = { "sh", 0 };
+    execve("/BIN/SH.ELF", sh, 0);
+    printf("login: cannot start a shell\n");
+}
+
+/* Check the password without giving this process away.
+ *
+ * login() changes the credentials of whoever calls it, and this process has to
+ * stay root - it starts the window server, which needs the framebuffer, and it
+ * has to come back to the prompt afterwards. So the check happens in a child
+ * that exists only to report the answer. */
+static int password_accepted(const char* user, const char* password)
+{
+    const int pid = fork();
+    if (pid < 0)
+        return 0;
+    if (pid == 0) {
+        char home[128] = {};
+        exit(login(user, password, home) < 0 ? AUTH_FAILED : 0);
+    }
+    int status = 0;
+    wait(&status);
+    return status != AUTH_FAILED;
+}
+
 int main(void)
 {
     for (;;) {
@@ -44,6 +105,29 @@ int main(void)
         if (read_line("Password: ", password, sizeof(password), 0) < 0)
             continue;
 
+        if (!password_accepted(user, password)) {
+            /* Deliberately says nothing about which half was wrong. */
+            printf("Login incorrect\n");
+            continue;
+        }
+
+        /* Start the desktop before the session, not alongside it. Mapping the
+         * framebuffer is root's to do, so it has to be started from here rather
+         * than by the user's own processes - and starting it first means the
+         * session never has to wonder whether it is ready yet. */
+        const int server = fork();
+        if (server == 0) {
+            char* args[] = { "wserver", 0 };
+            execve("/BIN/WSERVER.ELF", args, 0);
+            exit(127);
+        }
+        if (server > 0) {
+            /* Bounded: a server that cannot start must not hold up the login.
+             * Falling through without one simply means a text session. */
+            for (int i = 0; i < 600 && !win_server_running(); ++i)
+                msleep(10);         /* up to six seconds, without spinning */
+        }
+
         const int pid = fork();
         if (pid == 0) {
             char home[128] = {};
@@ -51,19 +135,21 @@ int main(void)
                 exit(AUTH_FAILED);
             if (home[0] != '\0')
                 chdir(home);
-            char* sh[] = { "sh", 0 };
-            execve("/BIN/SH.ELF", sh, 0);
-            exit(127);
+            session();
+            exit(0);
         }
+        (void)pid;
 
-        int status = 0;
-        wait(&status);
-        if (status == AUTH_FAILED) {
-            /* Deliberately says nothing about which half was wrong. */
-            printf("Login incorrect\n");
-        } else {
-            printf("logout\n");
+        wait(0);                /* the session */
+
+        /* The server has no reason of its own to stop if the session ended
+         * without ever opening a window, so say so rather than leaving it
+         * running behind the next login prompt. */
+        if (server > 0) {
+            kill(server, SIGTERM);
+            wait(0);
         }
+        printf("logout\n");
     }
     return 0;
 }

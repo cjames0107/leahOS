@@ -7,6 +7,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <shm.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -67,12 +68,20 @@ static void test_mmap(void)
 static volatile int g_counter;
 static volatile int g_seen_tids[4];
 
+static mutex_t g_counter_lock;
+
 static void worker(void* arg)
 {
     int slot = (int)(long)arg;
     g_seen_tids[slot] = gettid();
-    for (int i = 0; i < 1000; ++i)
+    /* The lock is not decoration. A bare g_counter = g_counter + 1 from four
+     * threads loses updates the moment they genuinely run at the same time -
+     * it only ever totalled 4000 because there was one processor to run on. */
+    for (int i = 0; i < 1000; ++i) {
+        mutex_lock(&g_counter_lock);
         g_counter = g_counter + 1;
+        mutex_unlock(&g_counter_lock);
+    }
 }
 
 static void test_threads(void)
@@ -83,6 +92,7 @@ static void test_threads(void)
     check("gettid and getpid agree on the main thread", self == getpid());
 
     g_counter = 0;
+    g_counter_lock.state = 0;
     tid_t made[4];
     int all_started = 1;
     for (int i = 0; i < 4; ++i) {
@@ -96,7 +106,9 @@ static void test_threads(void)
         thread_join();
 
     /* Every thread wrote into the same globals, so the parent sees their work:
-     * that is the whole point of sharing an address space rather than forking. */
+     * that is the whole point of sharing an address space rather than forking.
+     * With the increments serialised the total is exact, which also means this
+     * is a real test of the mutex on more than one processor. */
     check("threads share the parent's memory", g_counter == 4000);
 
     int distinct = 1;
@@ -231,6 +243,47 @@ static void catcher(int signo)
 {
     g_caught_signo = signo;
     ++g_caught;
+}
+
+static void test_shm(void)
+{
+    printf("shared memory:\n");
+
+    const int id = shm_open(4242, 4096, 0);
+    check("a segment can be created", id >= 0);
+
+    volatile unsigned* a = (volatile unsigned*)shm_map(id);
+    check("it maps into this process", a != 0);
+    if (a == 0)
+        return;
+    check("a new segment reads as zero", a[0] == 0);
+    a[0] = 0x1234u;
+
+    check("the same key returns the same segment", shm_open(4242, 0, 0) == id);
+    check("an unknown key cannot be opened", shm_open(4243, 0, 0) < 0);
+    check("the size is the size asked for", shm_size(id) == 4096);
+
+    /* Two independent mappings of one segment must be the same memory - that
+     * is the whole point, and it is what the window server relies on. */
+    volatile unsigned* b = (volatile unsigned*)shm_map(shm_open(4242, 0, 0));
+    check("a second mapping is a different address", b != 0 && b != a);
+    check("but the same memory", b != 0 && b[0] == 0x1234u);
+    if (b != 0) {
+        b[1] = 0x5678u;
+        check("a write through either is seen through both", a[1] == 0x5678u);
+    }
+
+    /* And across processes. The child maps it for itself rather than
+     * inheriting: a mapping inherited through fork is copy-on-write like
+     * anything else, so writing to it would give the child a private copy. */
+    if (fork() == 0) {
+        volatile unsigned* c = (volatile unsigned*)shm_map(shm_open(4242, 0, 0));
+        if (c != 0)
+            c[2] = 0xC0FFEEu;
+        exit(0);
+    }
+    wait(0);
+    check("another process shares the same pages", a[2] == 0xC0FFEEu);
 }
 
 static void test_signals(void)
@@ -566,6 +619,7 @@ int main(void)
     test_threads();
     test_mutex();
     test_cow();
+    test_shm();
     test_signals();
     test_permissions();
     test_accounts();

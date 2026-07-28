@@ -27,6 +27,7 @@
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/shm.hpp>
 #include <leah/sha256.hpp>
 #include <leah/smp.hpp>
 #include <leah/timer.hpp>
@@ -610,11 +611,13 @@ void run_userland()
 
 // --- preemptive scheduler self-test ----------------------------------------
 //
-// Several workers spin in tight loops that never yield. The only thing that can
-// move the CPU between them is the timer preempting one mid-loop, so if every
-// worker makes progress - and the interleave trace shows the CPU bouncing
-// between them - preemption is real. main spins too, without yielding, so its
-// own survival to the end is proof the scheduler switches back as well.
+// Several workers spin in tight loops that never yield. On one processor the
+// only thing that can move between them is the timer preempting one mid-loop,
+// so if every worker makes progress - and the interleave trace shows the CPU
+// bouncing between them - preemption is real. With several processors the same
+// test also demonstrates the workers running side by side. main spins too,
+// without yielding, so its own survival to the end is proof the scheduler
+// switches back as well.
 
 constexpr usize kWorkers = 3;
 volatile u64  g_work_counter[kWorkers];
@@ -630,8 +633,11 @@ void worker_thread(void* arg)
         g_work_counter[id] = g_work_counter[id] + 1;
 
         // Record only when execution has moved to a different worker since the
-        // last entry, so the log is a trace of preemption switches rather than
-        // of loop iterations. Single core, so no two workers race here.
+        // last entry, so the log is a trace of switches rather than of loop
+        // iterations. On one CPU that is exactly a record of preemption; with
+        // several it also picks up workers genuinely running at the same time,
+        // which is why the check below insists every worker made progress
+        // rather than reading the trace alone.
         const u32 len = g_interleave_len;
         if ((len == 0 || g_interleave[len - 1] != id) && len < 255) {
             g_interleave[len] = static_cast<u8>(id);
@@ -837,9 +843,8 @@ extern "C" void kernel_main(const boot::Info* boot_info)
             vmm::enable_tlb_shootdown(
                 smp::scheduling() ? static_cast<u32>(cpus) : 1);
             if (cpus > 1)
-                console::printf("  [ ok ] SMP: %llu processors online "
-                                "(application processors parked)\n",
-                                static_cast<u64>(cpus));
+                console::printf("  [ ok ] SMP: %llu processors online, all "
+                                "scheduling\n", static_cast<u64>(cpus));
             else if (acpi::cpu_count() > 1)
                 step("SMP: application processors did not start");
         }
@@ -917,6 +922,7 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     self_test_fs_write();
     step("ext4 write path verified (create, extent grow, mkdir, remove, rename)");
 
+    shm::init();
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");
 

@@ -49,11 +49,18 @@
 #define SYS_username 44
 #define SYS_useradd  45
 #define SYS_passwd   46
-#define SYS_wincreate  47
-#define SYS_winmap     48
-#define SYS_winpresent 49
-#define SYS_winpoll    50
-#define SYS_windestroy 51
+#define SYS_shmopen    47
+#define SYS_shmmap     48
+#define SYS_shmsize    49
+#define SYS_fbinfo     50
+#define SYS_fbmap      51
+#define SYS_inputpoll  52
+#define SYS_fbfont     53
+#define SYS_sleep      54
+#define SYS_shmdestroy 55
+
+/* shm_open flags */
+#define SHM_PUBLIC     1
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused

@@ -23,6 +23,13 @@ u32 rows();
 u32 width();
 u32 height();
 
+// Bytes per scanline, which is not always width * bytes-per-pixel, and the
+// pixel depth. A process that maps the framebuffer for itself has to be told
+// both, along with where it is.
+u32 pitch();
+u32 bits_per_pixel();
+paddr_t physical_base();
+
 void clear(u32 colour);
 void draw_glyph(u32 column, u32 row, char c, u32 foreground, u32 background);
 void scroll_up(u32 background);

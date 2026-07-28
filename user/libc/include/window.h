@@ -2,32 +2,20 @@
 #define _WINDOW_H
 
 #include <stdint.h>
+#include <wproto.h>
 
 /* Talking to the window server.
  *
- * A window is a rectangle of 32-bit pixels the server maps into this process.
- * Drawing means writing to that memory and then calling win_present; the client
- * never touches the screen itself and cannot see any other window's pixels. */
+ * A window is a rectangle of 32-bit pixels in a shared memory segment that both
+ * this process and the server map. Drawing means writing to that memory and
+ * calling win_present; the client never touches the screen itself, and the
+ * pixels stay owned by this process so no other user can map them.
+ *
+ * struct win_event and the WIN_EVENT_* constants come from <wproto.h>, which is
+ * the protocol both sides share. */
 
-enum {
-    WIN_EVENT_NONE = 0,
-    WIN_EVENT_MOUSE_DOWN,
-    WIN_EVENT_MOUSE_UP,
-    WIN_EVENT_MOUSE_MOVE,
-    WIN_EVENT_KEY,
-    WIN_EVENT_CLOSE,        /* the close box was clicked */
-};
-
-struct win_event {
-    uint32_t type;
-    uint32_t window;
-    int32_t  x;             /* relative to the content area */
-    int32_t  y;
-    uint32_t button;
-    uint32_t key;
-};
-
-/* Open a window of `width` x `height` content pixels. Returns its id, or -1. */
+/* Open a window of `width` x `height` content pixels. Returns its id (which is
+ * its slot in the server's table), or -1 when there is no server or no room. */
 int win_create(int x, int y, unsigned width, unsigned height, const char* title);
 
 /* The window's pixel buffer, `width * height` packed as 0x00RRGGBB. */
@@ -40,5 +28,8 @@ void win_present(int id);
 int win_poll(int id, struct win_event* out);
 
 void win_destroy(int id);
+
+/* Whether a server is running, so a client can say so rather than just fail. */
+int win_server_running(void);
 
 #endif /* _WINDOW_H */

@@ -6,10 +6,28 @@
 ; C++ dispatcher, then restores and SYSRETs back to ring 3.
 ;
 ; The kernel stack it switches to is the running task's own - the scheduler
-; keeps kernel_syscall_rsp pointing at it. That matters because a syscall that
-; blocks (fork, wait, exit) is suspended mid-handler on this stack; a single
-; shared stack would be clobbered the moment another task made a syscall.
+; keeps this CPU's per-CPU block pointing at it. That matters because a syscall
+; that blocks (fork, wait, exit) is suspended mid-handler on this stack; a
+; single shared stack would be clobbered the moment another task made a
+; syscall.
+;
+; Finding that stack is the awkward part. On entry there is no free register -
+; RSP still points into user memory and every general register holds user data -
+; so the address has to come from somewhere the instruction stream can reach
+; without one. That is what GS is for: SWAPGS exchanges GS_BASE with
+; IA32_KERNEL_GS_BASE, so one instruction turns GS into this processor's own
+; block, and gs:[8] is its syscall stack. A global would name a single stack for
+; the whole machine, which is only ever right on a uniprocessor.
+;
+; The invariant, which every entry from ring 3 and every exit to it maintains:
+; while kernel code runs, GS_BASE is this CPU's percpu::Cpu and
+; IA32_KERNEL_GS_BASE holds the user's GS; in ring 3 the two are swapped.
 ; ============================================================================
+
+; percpu::Cpu field offsets - an ABI with percpu.hpp.
+%define CPU_SELF            0
+%define CPU_SYSCALL_STACK   8
+%define CPU_USER_RSP        16
 
 BITS 64
 DEFAULT REL
@@ -27,12 +45,13 @@ SECTION .text
 ; ----------------------------------------------------------------------------
 GLOBAL syscall_entry
 syscall_entry:
-    mov [user_rsp_scratch], rsp
-    mov rsp, [kernel_syscall_rsp]
+    swapgs                          ; GS now this CPU's block, not the user's
+    mov [gs:CPU_USER_RSP], rsp      ; park the untrusted user stack
+    mov rsp, [gs:CPU_SYSCALL_STACK] ; and stand on the running task's own
 
     ; Build a syscall::Frame. Push order is the reverse of the struct, so the
     ; lowest field (r15) is pushed last and ends up at the lowest address.
-    push qword [user_rsp_scratch]   ; user_rsp
+    push qword [gs:CPU_USER_RSP]    ; user_rsp
     push r11                        ; user_flags
     push rcx                        ; user_rip
     push rax                        ; number / return slot
@@ -75,19 +94,21 @@ syscall_entry:
     pop r11                         ; user_flags -> R11 for SYSRET
     pop rsp                         ; back to the user stack
 
+    ; Hand GS back to the user and park this CPU's block for the next entry.
+    swapgs
+
     ; SYSRETQ loads RIP from RCX, RFLAGS from R11, and CS/SS from STAR at RPL 3.
     o64 sysret
 
 ; ----------------------------------------------------------------------------
 ; set_syscall_stack - the scheduler points this at the running task's stack on
 ; every switch, so SYSCALL always lands on the current task's own kernel stack.
+;
+; Writing it through GS rather than by CPU slot means it always lands on the
+; block of the processor actually executing, with no way for the two to
+; disagree.
 ; ----------------------------------------------------------------------------
 GLOBAL set_syscall_stack
 set_syscall_stack:
-    mov [kernel_syscall_rsp], rdi
+    mov [gs:CPU_SYSCALL_STACK], rdi
     ret
-
-SECTION .bss
-ALIGN 8
-kernel_syscall_rsp: RESQ 1
-user_rsp_scratch:   RESQ 1

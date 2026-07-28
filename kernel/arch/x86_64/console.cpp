@@ -33,8 +33,9 @@ u32  g_rows    = kVgaHeight;
 // panicking cores is how the first SMP bug here announced itself.
 sync::Spinlock g_console_lock;
 
-// True while the window server owns the framebuffer.
+// True while the window server owns the framebuffer, and which process that is.
 bool g_display_suspended = false;
+u32  g_display_owner = 0;
 
 u32 g_row    = 0;
 u32 g_column = 0;
@@ -299,6 +300,28 @@ void suspend_display(bool suspended)
 {
     sync::IrqScopedLock guard(g_console_lock);
     g_display_suspended = suspended;
+}
+
+void grant_display_to(u32 tgid)
+{
+    {
+        sync::IrqScopedLock guard(g_console_lock);
+        g_display_owner = tgid;
+        g_display_suspended = true;
+    }
+}
+
+void reclaim_display(u32 tgid)
+{
+    {
+        sync::IrqScopedLock guard(g_console_lock);
+        if (tgid == 0 || g_display_owner != tgid)
+            return;
+        g_display_owner = 0;
+        g_display_suspended = false;
+    }
+    // Outside the lock: clear() takes it too, and this one does not nest.
+    clear();
 }
 
 void set_color(Color fg, Color bg)

@@ -38,6 +38,11 @@ using AddressSpace = paddr_t;
 
 void init();
 
+// The per-processor half of init(): control-register state an application
+// processor must adopt before it can run user tasks.
+void init_this_cpu();
+
+
 // 4 KiB granularity, operating on whichever space is currently active. Splits a
 // containing 2 MiB page if it has to, so callers never have to know how the
 // region was originally mapped.
@@ -97,6 +102,10 @@ void shootdown();
 
 // Called from the shootdown interrupt on the receiving CPU.
 void on_shootdown_ipi();
+
+// Answer an outstanding shootdown without needing an interrupt. Spin loops call
+// this so a CPU waiting with interrupts masked can still acknowledge one.
+void ack_shootdown();
 
 // Make a space active: load CR3 and record it as current. Cheap to call with
 // the already-active space (skips the reload).

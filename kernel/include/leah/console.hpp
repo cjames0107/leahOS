@@ -29,6 +29,15 @@ void set_color(Color fg, Color bg = Color::Black);
 // panic still need somewhere to go, and the serial port is unaffected.
 void suspend_display(bool suspended);
 
+// Hand the screen to a process - the window server, which maps the framebuffer
+// and composites into it. Console text stops being painted for the duration.
+void grant_display_to(u32 tgid);
+
+// Take it back. Called for every process that exits, so a server that crashed
+// or was killed returns the screen just as one that shut down cleanly does; a
+// desktop that died must not leave the machine with no visible console.
+void reclaim_display(u32 tgid);
+
 void put(char c);
 void write(const char* str);
 

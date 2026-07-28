@@ -15,10 +15,38 @@
 
 BITS 64
 
+EXTERN scheduler_finish_switch
+
 SECTION .text
+
+; ----------------------------------------------------------------------------
+; first_user_entry - what a brand new user task is context-switched into.
+;
+; The scheduler needs one call before the task starts: the CPU this task
+; displaced is still marked as running and cannot be picked up elsewhere until
+; its context is known to be saved. Every other arrival from a context switch is
+; C and makes that call itself; this path is assembly through to the IRETQ, so
+; it makes it here. The call leaves RSP exactly where it found it, still
+; pointing at the TrapFrame user_return is about to consume.
+; ----------------------------------------------------------------------------
+GLOBAL first_user_entry
+first_user_entry:
+    call scheduler_finish_switch
+    jmp user_return
 
 GLOBAL user_return
 user_return:
+    ; Park this CPU's per-CPU block in IA32_KERNEL_GS_BASE, so the SWAPGS at the
+    ; next entry from ring 3 finds it. This path cannot use SWAPGS itself: the
+    ; segment loads below reload GS_BASE from the descriptor - which is zero -
+    ; and would throw the block away, so it has to be read out first and written
+    ; to the MSR explicitly. Every other exit to ring 3 is a plain SWAPGS.
+    mov rdx, [gs:0]                 ; percpu::Cpu::self
+    mov rax, rdx
+    shr rdx, 32                     ; WRMSR takes the value in EDX:EAX
+    mov ecx, 0xC0000102             ; IA32_KERNEL_GS_BASE
+    wrmsr
+
     ; Ring 3 wants the user data selector in every segment register. IRETQ
     ; reloads SS from the frame but leaves DS/ES/FS/GS alone, so set them here.
     ; AX is scratch; RAX gets its real value from the frame a few lines down.
@@ -26,7 +54,7 @@ user_return:
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
+    mov gs, ax                      ; GS_BASE := 0, which is the user's
 
     pop r15
     pop r14

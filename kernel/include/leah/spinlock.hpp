@@ -10,6 +10,11 @@
 // the moment a second core executes kernel code, and a spinlock is the smallest
 // thing that restores it.
 
+// Forward-declared rather than included: a waiting CPU has to stay able to
+// answer a TLB shootdown, and <leah/vmm.hpp> cannot be pulled into a header
+// this low down without a cycle.
+namespace vmm { void ack_shootdown(); }
+
 namespace sync {
 
 // Test-and-set rather than a ticket lock, deliberately. A ticket lock is fairer,
@@ -27,8 +32,13 @@ public:
 
     void acquire()
     {
-        while (!try_acquire())
+        while (!try_acquire()) {
+            // Waiting is not an excuse to stop answering: the CPU that holds
+            // this lock may be waiting on a shootdown from us, and we may be
+            // spinning with interrupts masked and unable to take the IPI.
+            vmm::ack_shootdown();
             asm volatile("pause");
+        }
     }
 
     void release() { __atomic_store_n(&m_locked, 0u, __ATOMIC_RELEASE); }

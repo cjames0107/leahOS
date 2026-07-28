@@ -15,6 +15,11 @@ int   execve(const char* path, char* const argv[], char* const envp[]);
 pid_t wait(int* status);
 void  yield(void);
 
+/* Block for at least `ms` milliseconds. Prefer this to spinning on yield() in a
+ * polling loop: a task that only yields stays runnable and keeps taking the
+ * kernel lock, which on a multiprocessor can starve another CPU out of it. */
+void  msleep(unsigned long ms);
+
 int    close(int fd);
 long   lseek(int fd, long offset, int whence);
 int    chdir(const char* path);
