@@ -60,8 +60,7 @@
 #define SYS_shmdestroy 55
 #define SYS_threadexit 56
 
-/* shm_open flags */
-#define SHM_PUBLIC     1
+/* shm_open's flags live in <shm.h> with the call they belong to. */
 
 /* The raw entry point. Arguments go in the SysV syscall registers
  * (rdi, rsi, rdx, r10, r8, r9) and the result comes back in rax. Unused

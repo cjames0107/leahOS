@@ -743,6 +743,37 @@ size. There is no widget toolkit behind it - a client owns a rectangle of
 pixels and draws it itself - and showing that plainly is more useful than
 hiding it.
 
+### Browsing and editing
+
+`browse` shows one directory three ways, because they answer different
+questions: icons for what is in here, a list for how big it is, a tree for
+where it sits. They share a selection and a current directory, so switching
+never loses your place. Opening is one gesture everywhere - click to select,
+click the selection again, or press Return - and what happens depends on what
+was opened: a directory is entered, a `.ELF` is run, and anything else is
+handed to `edit`. That last rule is a rule about the **name**, not the contents,
+because nothing in the filesystem records a type; a real one is on the list
+above.
+
+The tree is built **iteratively** rather than by the obvious recursive walk. A
+`struct dirent` is 144 bytes and a directory buffer holds sixty-four of them,
+so recursion costs nine kilobytes of stack per level - which overran the user
+stack a few levels down and killed the process. Expanding in passes, splicing
+each opened directory's children in after it, needs one buffer however deep the
+tree goes.
+
+`edit` keeps its buffer as one flat array with the newlines left in, rather than
+an array of lines: insertion is a memmove and saving is a single write, at the
+cost of recomputing where the lines start after every edit. For files this size
+that is free, and it is far less to get wrong than keeping two representations
+agreeing.
+
+Both draw through `widget.h`, which is the handful of operations - fill, bevel,
+clipped text, a button - that every client turned out to need. It is not a
+toolkit: a client still owns a rectangle of pixels and draws it itself. It
+exists because four programs were otherwise going to carry four copies of the
+same bevel routine.
+
 The compositor **sleeps** between passes rather than spinning. That is not a
 politeness: a polling loop that only ever yields stays runnable, holds the kernel
 lock over and over, and on a multiprocessor can keep another CPU out of the kernel
@@ -1191,4 +1222,7 @@ process still mapped them.
 - [x] window resizing, and damage rectangles instead of a full recompose
 - [x] a terminal window, so the shell and the desktop need not take turns
 - [x] `uitest`, a window of every element the desktop draws
+- [x] `browse`, a file browser with icon, list and tree views
+- [x] `edit`, a text editor, and what a document opens into
+- [ ] a real type for a file, so opening one need not guess from its name
 - [ ] reflowing a terminal's scrollback when it is resized

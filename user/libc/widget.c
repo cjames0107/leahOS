@@ -1,0 +1,104 @@
+#include <display.h>
+#include <string.h>
+#include <widget.h>
+
+static uint32_t* g_px;
+static unsigned  g_w, g_h;
+static unsigned char g_font[256 * 16];
+static int g_have_font;
+
+void wg_target(uint32_t* pixels, unsigned width, unsigned height)
+{
+    g_px = pixels;
+    g_w = width;
+    g_h = height;
+}
+
+int wg_font(void)
+{
+    if (g_have_font)
+        return 0;
+    if (fb_font(g_font) != 0)
+        return -1;
+    g_have_font = 1;
+    return 0;
+}
+
+void wg_plot(int x, int y, uint32_t colour)
+{
+    if (g_px == 0 || x < 0 || y < 0 ||
+        (unsigned)x >= g_w || (unsigned)y >= g_h)
+        return;
+    g_px[(unsigned)y * g_w + (unsigned)x] = colour;
+}
+
+void wg_fill(int x, int y, int w, int h, uint32_t colour)
+{
+    /* Clipped once here rather than per pixel: filling a window's background is
+     * most of its area, and doing the bounds check a million times shows. */
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + w, y1 = y + h;
+    if (x1 > (int)g_w) x1 = (int)g_w;
+    if (y1 > (int)g_h) y1 = (int)g_h;
+    if (g_px == 0)
+        return;
+    for (int row = y0; row < y1; ++row)
+        for (int col = x0; col < x1; ++col)
+            g_px[(unsigned)row * g_w + (unsigned)col] = colour;
+}
+
+void wg_bevel(int x, int y, int w, int h, int raised)
+{
+    const uint32_t tl = raised ? WG_LIGHT : WG_SHADOW;
+    const uint32_t br = raised ? WG_SHADOW : WG_LIGHT;
+    for (int i = 0; i < w; ++i) {
+        wg_plot(x + i, y, tl);
+        wg_plot(x + i, y + h - 1, br);
+    }
+    for (int i = 0; i < h; ++i) {
+        wg_plot(x, y + i, tl);
+        wg_plot(x + w - 1, y + i, br);
+    }
+}
+
+void wg_text(int x, int y, const char* s, uint32_t colour)
+{
+    for (unsigned i = 0; s[i] != '\0'; ++i) {
+        const unsigned char* glyph = &g_font[(unsigned char)s[i] * 16];
+        for (int row = 0; row < WG_GLYPH_H; ++row)
+            for (int col = 0; col < WG_GLYPH_W; ++col)
+                if (glyph[row] & (0x80 >> col))
+                    wg_plot(x + (int)i * WG_GLYPH_W + col, y + row, colour);
+    }
+}
+
+void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w)
+{
+    const int fits = max_w / WG_GLYPH_W;
+    if (fits <= 0)
+        return;
+    const int len = (int)strlen(s);
+    if (len <= fits) {
+        wg_text(x, y, s, colour);
+        return;
+    }
+    char cut[160];
+    int keep = fits - 2;
+    if (keep < 1) keep = 1;
+    if (keep > (int)sizeof(cut) - 3) keep = (int)sizeof(cut) - 3;
+    for (int i = 0; i < keep; ++i)
+        cut[i] = s[i];
+    cut[keep] = '.';
+    cut[keep + 1] = '.';
+    cut[keep + 2] = '\0';
+    wg_text(x, y, cut, colour);
+}
+
+void wg_button(int x, int y, int w, int h, const char* label, int down)
+{
+    wg_fill(x, y, w, h, WG_FACE);
+    wg_bevel(x, y, w, h, !down);
+    const int tw = (int)strlen(label) * WG_GLYPH_W;
+    wg_text(x + (w - tw) / 2 + down, y + (h - WG_GLYPH_H) / 2 + down,
+            label, WG_INK);
+}
