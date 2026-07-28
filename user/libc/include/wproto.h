@@ -74,7 +74,10 @@ struct win_event {
     uint32_t type;
     uint32_t window;
     int32_t  x, y;      /* relative to the window's content area */
-    uint32_t button;    /* 1 left, 2 right */
+    uint32_t button;    /* 1 left, 2 right - a right press is delivered as a
+                           MOUSE_DOWN and is the client's cue to raise a
+                           context menu; the server does not raise or focus the
+                           window for one */
     uint32_t key;       /* the character, for key events */
 };
 

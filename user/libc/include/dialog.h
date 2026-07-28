@@ -57,3 +57,26 @@ const char* dlg_path(void);
 const char* dlg_subject(void);
 
 #endif /* _DIALOG_H */
+
+/* --- context menus --------------------------------------------------------
+ *
+ * The same overlay idea as a dialogue, and for the same reason: there are no
+ * popup windows, so a menu is something the application draws over itself. It
+ * is separate from the dialogue state so that a menu can raise a dialogue.
+ */
+
+/* Show a menu at the point it was asked for. `items` is a NUL-terminated array
+ * of labels; a label of "-" draws a separator and cannot be chosen. */
+void menu_open(int x, int y, const char* const* items, int count);
+int  menu_active(void);
+
+/* Feed an event. Returns the chosen index, -1 while pending, and -2 when it was
+ * dismissed without a choice. */
+int  menu_event(const struct win_event* event);
+void menu_draw(void);
+
+/* --- the "always" checkbox ------------------------------------------------ */
+
+/* Whether the open-with dialogue's "always open this kind with it" box was
+ * ticked when the choice was accepted. */
+int  dlg_always(void);

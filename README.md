@@ -821,6 +821,33 @@ about its type, and a hint is not good enough to decide for someone, so the
 browser offers the editor, the image viewer, paint, and - when the file is a
 program - running it directly.
 
+### Watching the system
+
+`taskman` shows a snapshot the kernel copies out under its own lock - a reader
+walking the live table would see slots change as tasks come and go. Threads
+appear alongside processes, indented under their group, because that is what
+they are here and hiding them would misreport where the time is going.
+
+Its "CPU" column is **share of scheduler slices between refreshes, not a duty
+cycle**. This system has no per-task clock; the slice count is the honest thing
+it does have, and it is labelled as a share rather than dressed up as a
+percentage of wall time. Samples are matched by pid between refreshes, so a
+task that exits does not make whichever slot it vacated look enormously busy.
+The strip chart deliberately excludes the idle tasks - on a quiet machine they
+are nearly all the slices, and charting them would draw a flat line at 100%.
+
+Right-clicking is delivered as a `MOUSE_DOWN` with button 2 and, unlike a left
+press, does **not** raise or focus the window: a right-click is a question about
+something, not a decision to work in it. The menu itself is another overlay, for
+the same reason dialogues are - there are no popup windows. It is kept separate
+from the dialogue state because choosing from a menu is very often what raises a
+dialogue.
+
+The open-with dialogue now has an **always** box. The association is held for
+the session only: there is no per-user settings store to write it to, and
+inventing a file format for three associations would be worse than being clear
+that they do not outlive a logout.
+
 The compositor **sleeps** between passes rather than spinning. That is not a
 politeness: a polling loop that only ever yields stays runnable, holds the kernel
 lock over and over, and on a multiprocessor can keep another CPU out of the kernel
@@ -1274,5 +1301,9 @@ process still mapped them.
 - [x] `calc`, `settings`, `imgview`, and a paint that saves PNG and GIF
 - [ ] a deflate compressor, so PNG need not be written as stored blocks
 - [ ] a JPEG encoder - it needs a DCT and Huffman tables, and is not written
+- [x] `taskman`, with a resource monitor
+- [x] right-click context menus, and an "always open with" that is remembered
+- [ ] per-task CPU time, so the monitor can show a duty cycle not a share
+- [ ] a settings store, so an "always open with" survives a logout
 - [ ] a real type for a file, so opening one need not guess from its name
 - [ ] reflowing a terminal's scrollback when it is resized

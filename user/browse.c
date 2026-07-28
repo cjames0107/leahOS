@@ -411,6 +411,67 @@ static void launch(const char* app, const char* document)
 /* What the open-with dialogue is deciding about. */
 static char g_opening[256];
 
+/* Remembered "always open this kind with" choices, keyed by extension.
+ *
+ * Held in memory for this session only: there is no per-user settings store to
+ * write them to, and inventing a file format for three associations would be
+ * worse than being clear that they do not survive a logout. */
+#define MAX_ASSOC 12
+static char g_assoc_ext[MAX_ASSOC][12];
+static char g_assoc_app[MAX_ASSOC][64];
+static int  g_assoc_n;
+
+static void extension_of(const char* path, char* out, int max)
+{
+    int dot = -1;
+    for (int i = 0; path[i] != '\0'; ++i)
+        if (path[i] == '.') dot = i;
+    int n = 0;
+    if (dot >= 0)
+        for (int i = dot; path[i] != '\0' && n < max - 1; ++i) {
+            char c = path[i];
+            if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+            out[n++] = c;
+        }
+    out[n] = '\0';
+}
+
+static const char* remembered(const char* path)
+{
+    char ext[12];
+    extension_of(path, ext, sizeof(ext));
+    if (ext[0] == '\0')
+        return 0;
+    for (int i = 0; i < g_assoc_n; ++i)
+        if (strcmp(g_assoc_ext[i], ext) == 0)
+            return g_assoc_app[i];
+    return 0;
+}
+
+static void remember(const char* path, const char* app)
+{
+    char ext[12];
+    extension_of(path, ext, sizeof(ext));
+    if (ext[0] == '\0')
+        return;
+    for (int i = 0; i < g_assoc_n; ++i)
+        if (strcmp(g_assoc_ext[i], ext) == 0) {
+            int k = 0;
+            while (app[k] && k < 63) { g_assoc_app[i][k] = app[k]; ++k; }
+            g_assoc_app[i][k] = '\0';
+            return;
+        }
+    if (g_assoc_n >= MAX_ASSOC)
+        return;
+    int k = 0;
+    while (ext[k] && k < 11) { g_assoc_ext[g_assoc_n][k] = ext[k]; ++k; }
+    g_assoc_ext[g_assoc_n][k] = '\0';
+    k = 0;
+    while (app[k] && k < 63) { g_assoc_app[g_assoc_n][k] = app[k]; ++k; }
+    g_assoc_app[g_assoc_n][k] = '\0';
+    ++g_assoc_n;
+}
+
 static void open_path(const char* path, int is_dir)
 {
     if (is_dir) {
@@ -425,11 +486,21 @@ static void open_path(const char* path, int is_dir)
             rebuild_tree();
         return;
     }
-    /* Ask rather than assume. The name is the only hint this system has about
-     * what a file is, and a hint is not good enough to decide for someone. */
     int n = 0;
     while (path[n] != '\0' && n < 255) { g_opening[n] = path[n]; ++n; }
     g_opening[n] = '\0';
+
+    /* If the user has already said "always", honour it and do not ask again -
+     * that is the entire point of having ticked the box. */
+    const char* known = remembered(g_opening);
+    if (known != 0) {
+        launch(known, g_opening);
+        snprintf(g_status, sizeof(g_status), "opened with %s", known);
+        return;
+    }
+
+    /* Otherwise ask. The name is the only hint this system has about what a
+     * file is, and a hint is not good enough to decide for someone. */
     dlg_open_with(g_opening);
     snprintf(g_status, sizeof(g_status), "choose an application");
 }
@@ -495,6 +566,8 @@ static void scroll_by(int delta)
     if (g_scroll < 0) g_scroll = 0;
 }
 
+static const char* const kMenu[] = { "Open", "Open with...", "-", "Refresh" };
+
 int main(int argc, char** argv)
 {
     const int x = argc > 1 ? atoi_simple(argv[1]) : 60;
@@ -526,6 +599,36 @@ int main(int argc, char** argv)
                 win_destroy(id);
                 return 0;
             }
+            if (menu_active() && event.type != WIN_EVENT_RESIZE) {
+                const int pick = menu_event(&event);
+                if (pick == 0) {
+                    open_selected();
+                } else if (pick == 1 && g_selected >= 0) {
+                    /* Ask even when a choice is remembered: this is how it gets
+                     * changed. */
+                    char full[256];
+                    if (g_view == VIEW_TREE) {
+                        int k = 0;
+                        while (g_rows[g_selected].path[k] && k < 255) {
+                            full[k] = g_rows[g_selected].path[k]; ++k;
+                        }
+                        full[k] = '\0';
+                    } else {
+                        join(g_path, g_entries[g_selected].d_name, full, sizeof(full));
+                    }
+                    int k = 0;
+                    while (full[k] && k < 255) { g_opening[k] = full[k]; ++k; }
+                    g_opening[k] = '\0';
+                    dlg_open_with(g_opening);
+                } else if (pick == 3) {
+                    read_dir();
+                }
+                draw();
+                dlg_draw((int)g_w, (int)g_h);
+                menu_draw();
+                win_present(id);
+                continue;
+            }
             if (dlg_active() && event.type != WIN_EVENT_RESIZE) {
                 if (dlg_event(&event) == DLG_ACCEPT) {
                     const char* app = dlg_path();
@@ -533,6 +636,8 @@ int main(int argc, char** argv)
                      * program, not an argument to one. */
                     const int itself = (strcmp(app, g_opening) == 0);
                     launch(app, itself ? 0 : g_opening);
+                    if (dlg_always() && !itself)
+                        remember(g_opening, app);
                     snprintf(g_status, sizeof(g_status), "opened with %s", app);
                 }
                 draw();
@@ -563,6 +668,12 @@ int main(int argc, char** argv)
                     scroll_by(-1);
                 } else if (inside(&g_dnline, event.x, event.y)) {
                     scroll_by(1);
+                } else if (event.button == 2) {
+                    const int hit = hit_test(event.x, event.y);
+                    if (hit >= 0) {
+                        g_selected = hit;
+                        menu_open(event.x, event.y, kMenu, 4);
+                    }
                 } else {
                     const int hit = hit_test(event.x, event.y);
                     if (hit >= 0) {
@@ -590,6 +701,7 @@ int main(int argc, char** argv)
             }
             draw();
             dlg_draw((int)g_w, (int)g_h);
+            menu_draw();
             win_present(id);
         }
         msleep(15);

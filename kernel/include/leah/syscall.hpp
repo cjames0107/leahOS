@@ -79,6 +79,8 @@ enum Number : u64 {
     // distinction POSIX draws between exit and exit_group - and without it a
     // process cannot end while one of its threads is blocked in a syscall.
     ThreadExit = 56,
+    ProcList   = 57,   // snapshot of the task table
+    MemInfo    = 58,   // physical memory: used, free, usable
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

@@ -173,6 +173,25 @@ const char* current_name();
 bool current_is_user();
 u32 alive_count();
 
+// A snapshot of the task table, for a task manager to show. Copied out under
+// the kernel lock rather than handed out by reference: the table is live, and a
+// reader walking it while a task exits would see a slot change underneath it.
+struct TaskInfo {
+    u32 pid;
+    u32 tgid;
+    u32 parent;
+    u32 uid;
+    u32 state;          // matches State, with 0 meaning an unused slot
+    u32 is_user;
+    u64 ticks;          // scheduler slices this task has been given
+    u64 bytes;          // resident user memory
+    char name[32];
+};
+
+// Fills `out` with up to `max` entries and returns how many. Includes every
+// live task, threads as well as processes - a thread is a task here.
+u32 snapshot(TaskInfo* out, u32 max);
+
 // The running task's address space, and a setter execve uses to swap in a
 // freshly loaded image's space (the caller frees the old one).
 vmm::AddressSpace current_task_space();

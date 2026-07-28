@@ -139,6 +139,7 @@ static struct rect g_band;
 static int g_band_shown;
 static int g_mouse_grab = -1;
 static int g_last_left;
+static int g_last_right;
 
 static int imax(int a, int b) { return a > b ? a : b; }
 static int imin(int a, int b) { return a < b ? a : b; }
@@ -625,6 +626,22 @@ static void handle_input(void)
     const int left = (in.buttons & 1) != 0;
     const int pressed = left && !g_last_left;
     const int released = !left && g_last_left;
+
+    /* The right button raises a context menu, which is the client's to draw -
+     * the server only says where it was asked for. It does not raise or focus
+     * the window: a right-click is a question about something, not a decision
+     * to work in it. */
+    const int right = (in.buttons & 2) != 0;
+    if (right && !g_last_right) {
+        const int slot = window_at(x, y);
+        if (slot >= 0) {
+            struct ws_window* w = &g_control->windows[slot];
+            push_event(slot, WIN_EVENT_MOUSE_DOWN,
+                       x - (w->x + BORDER),
+                       y - (w->y + BORDER + TITLE_HEIGHT), 2, 0);
+        }
+    }
+    g_last_right = right;
 
     if (pressed) {
         const int slot = window_at(x, y);

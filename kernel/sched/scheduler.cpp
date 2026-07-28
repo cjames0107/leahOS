@@ -54,6 +54,7 @@ struct Task {
     i32   exit_code;
     u64   wait_channel;      // when Blocked on block_on(); 0 otherwise
     u32   bkl_depth;         // kernel-lock depth this task was suspended holding
+    u64   ticks;             // slices given to this task, for a resource monitor
     // True from the moment a CPU commits to running this task until the CPU it
     // left has finished saving its context. No other CPU may pick it up in
     // between: its kernel_rsp is still stale, and resuming from it would put
@@ -281,6 +282,7 @@ void switch_to(u32 next_index)
     // takes over does it instead, in finish_switch, once the context really is
     // saved.
     next->state = State::Running;
+    ++next->ticks;
     __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELEASE);
     percpu::current().previous_task = current_index();
     current_index() = next_index;
@@ -902,6 +904,38 @@ void set_current_brk(u64 brk) { group_leader(current())->brk = brk; }
 
 u64  current_mmap_next()             { return group_leader(current())->mmap_next; }
 void set_current_mmap_next(u64 next) { group_leader(current())->mmap_next = next; }
+
+u32 snapshot(TaskInfo* out, u32 max)
+{
+    KernelLock lock;
+    cpu::InterruptGuard guard;
+    u32 n = 0;
+    for (u32 i = 0; i < g_task_count && n < max; ++i) {
+        const Task& t = g_tasks[i];
+        if (t.state == State::Unused)
+            continue;
+        TaskInfo& o = out[n++];
+        o.pid = t.pid;
+        o.tgid = t.tgid;
+        o.parent = t.parent_pid;
+        o.uid = t.uid;
+        o.state = static_cast<u32>(t.state);
+        o.is_user = t.is_user ? 1u : 0u;
+        o.ticks = t.ticks;
+        // What the process has asked for beyond its image: the break and the
+        // mmap arena are the two things it grows, and together they are the
+        // number a resource monitor is actually being asked for.
+        o.bytes = t.is_user && t.space != 0
+                ? (t.mmap_next > memory::kUserMmapBase
+                       ? t.mmap_next - memory::kUserMmapBase : 0)
+                : 0;
+        u32 k = 0;
+        if (t.name != nullptr)
+            while (t.name[k] != '\0' && k < 31) { o.name[k] = t.name[k]; ++k; }
+        o.name[k] = '\0';
+    }
+    return n;
+}
 
 u32 alive_count()
 {

@@ -19,6 +19,7 @@ static char g_result[384];
 static char g_subject[256];
 static int  g_sel = -1;
 static int  g_scroll;
+static int  g_always;           /* the open-with checkbox */
 
 /* The listing: directories to navigate into for a save, applications to choose
  * from for an open-with. One array serves both because both are "a list of
@@ -109,9 +110,12 @@ void dlg_save(const char* where, const char* suggested)
     list_dirs();
 }
 
+int dlg_always(void) { return g_always; }
+
 void dlg_open_with(const char* path)
 {
     g_kind = KIND_OPEN;
+    g_always = 0;
     copy(g_subject, path, sizeof(g_subject));
     list_openers(path);
 }
@@ -165,6 +169,15 @@ int dlg_event(const struct win_event* e)
         e->y >= ok_y && e->y < ok_y + 22) {
         g_kind = KIND_NONE;
         return DLG_CANCEL;
+    }
+    /* The checkbox, on the same line the name field occupies in a save. */
+    if (g_kind == KIND_OPEN) {
+        const int cy = list_y + ROWS * ROW_H + 10;
+        if (e->x >= g_px + 12 && e->x < g_px + 26 &&
+            e->y >= cy && e->y < cy + 14) {
+            g_always = !g_always;
+            return DLG_PENDING;
+        }
     }
     if (e->x >= list_x && e->x < list_x + PANEL_W - 24 &&
         e->y >= list_y && e->y < list_y + ROWS * ROW_H) {
@@ -230,6 +243,17 @@ void dlg_draw(int window_w, int window_h)
                         g_item_dir[i] ? WG_ACCENT : WG_INK, list_w - 10);
     }
 
+    if (g_kind == KIND_OPEN) {
+        const int cy = list_y + list_h + 10;
+        wg_fill(g_px + 12, cy, 14, 14, WG_PAPER);
+        wg_bevel(g_px + 12, cy, 14, 14, 0);
+        if (g_always) {
+            for (int i = 0; i < 5; ++i) wg_plot(g_px + 15 + i, cy + 6 + i, WG_ACCENT);
+            for (int i = 0; i < 5; ++i) wg_plot(g_px + 19 + i, cy + 10 - i, WG_ACCENT);
+        }
+        wg_text(g_px + 34, cy - 1, "always open this kind this way", WG_INK);
+    }
+
     if (g_kind == KIND_SAVE) {
         const int fy = list_y + list_h + 8;
         wg_text(g_px + 12, fy + 3, "name", WG_DIM);
@@ -241,4 +265,78 @@ void dlg_draw(int window_w, int window_h)
     const int ok_x = g_px + PANEL_W - 150, ok_y = g_py + PANEL_H - 32;
     wg_button(ok_x, ok_y, 64, 22, g_kind == KIND_SAVE ? "Save" : "Open", 0);
     wg_button(ok_x + 72, ok_y, 64, 22, "Cancel", 0);
+}
+
+/* --- context menus --------------------------------------------------------
+ *
+ * Kept apart from the dialogue state on purpose: choosing from a menu is very
+ * often what raises a dialogue, so the two have to be able to exist at once.
+ */
+#define MENU_MAX  10
+#define MENU_ROW  17
+
+static int  g_menu_on;
+static int  g_mx, g_my, g_mw;
+static const char* const* g_menu_items;
+static int  g_menu_n;
+
+void menu_open(int x, int y, const char* const* items, int count)
+{
+    g_menu_on = 1;
+    g_mx = x;
+    g_my = y;
+    g_menu_items = items;
+    g_menu_n = count > MENU_MAX ? MENU_MAX : count;
+    g_mw = 0;
+    for (int i = 0; i < g_menu_n; ++i) {
+        const int w = (int)strlen(items[i]) * WG_GLYPH_W + 24;
+        if (w > g_mw) g_mw = w;
+    }
+    if (g_mw < 100) g_mw = 100;
+}
+
+int menu_active(void) { return g_menu_on; }
+
+int menu_event(const struct win_event* e)
+{
+    if (!g_menu_on)
+        return -1;
+    if (e->type == WIN_EVENT_KEY) {
+        g_menu_on = 0;
+        return -2;                      /* any key dismisses it */
+    }
+    if (e->type != WIN_EVENT_MOUSE_DOWN)
+        return -1;
+
+    const int h = g_menu_n * MENU_ROW + 4;
+    if (e->x < g_mx || e->x >= g_mx + g_mw || e->y < g_my || e->y >= g_my + h) {
+        /* A click outside is a dismissal, and is *not* passed on to the
+         * application: the first click after a menu closes it and nothing
+         * else, which is what every menu everywhere does. */
+        g_menu_on = 0;
+        return -2;
+    }
+    const int i = (e->y - g_my - 2) / MENU_ROW;
+    g_menu_on = 0;
+    if (i < 0 || i >= g_menu_n || g_menu_items[i][0] == '-')
+        return -2;
+    return i;
+}
+
+void menu_draw(void)
+{
+    if (!g_menu_on)
+        return;
+    const int h = g_menu_n * MENU_ROW + 4;
+    wg_fill(g_mx + 3, g_my + 3, g_mw, h, WG_SHADOW);
+    wg_fill(g_mx, g_my, g_mw, h, WG_FACE);
+    wg_bevel(g_mx, g_my, g_mw, h, 1);
+    for (int i = 0; i < g_menu_n; ++i) {
+        const int y = g_my + 2 + i * MENU_ROW;
+        if (g_menu_items[i][0] == '-') {
+            wg_fill(g_mx + 4, y + MENU_ROW / 2, g_mw - 8, 1, WG_SHADOW);
+            continue;
+        }
+        wg_text_clipped(g_mx + 10, y, g_menu_items[i], WG_INK, g_mw - 16);
+    }
 }

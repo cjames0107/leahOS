@@ -457,6 +457,33 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         // The whole process: a program returning from main ends its threads too.
         scheduler::exit_group(static_cast<i32>(frame->rdi));     // never returns
 
+    case ProcList: {
+        // The count is capped by the caller's buffer, which is validated
+        // against the whole array rather than per entry.
+        const u32 max = static_cast<u32>(frame->rsi);
+        const u64 bytes = static_cast<u64>(max) * sizeof(scheduler::TaskInfo);
+        if (max == 0 || max > 128 || !user_range_ok(frame->rdi, bytes)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = scheduler::snapshot(
+            reinterpret_cast<scheduler::TaskInfo*>(frame->rdi), max);
+        break;
+    }
+
+    case MemInfo: {
+        if (!user_range_ok(frame->rdi, sizeof(u64) * 3)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        auto* out = reinterpret_cast<u64*>(frame->rdi);
+        out[0] = pmm::usable_bytes();
+        out[1] = pmm::used_bytes();
+        out[2] = pmm::free_bytes();
+        frame->rax = 0;
+        break;
+    }
+
     case ThreadExit:
         scheduler::exit_current(static_cast<i32>(frame->rdi));   // never returns
 
