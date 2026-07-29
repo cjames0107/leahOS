@@ -53,6 +53,13 @@ static int  g_band;             /* a rubber band is being dragged */
 static int  g_bar_drag;         /* the scrollbar's thumb is being dragged */
 static int  g_band_x, g_band_y, g_band_x2, g_band_y2;
 static int g_view = VIEW_ICON;
+/* Measured in pixels down the content, not in items.
+ *
+ * It used to count items, which in the icon view meant a step of one moved
+ * every icon one place around the grid: the first one vanished and the rest
+ * reflowed, so it looked like the listing was filing out rather than scrolling
+ * past. A pixel offset scrolls the grid as a grid, and lets it stop between
+ * rows instead of jumping a whole one at a time. */
 static int g_scroll;
 static char g_status[128] = "";
 
@@ -280,16 +287,39 @@ static void file_icon(int x, int y, int program)
 static int content_top(void)  { return TOOLBAR_H + PATH_H; }
 static int content_h(void)    { return (int)g_h - content_top() - STATUS_H; }
 static int bar_x(void)        { return (int)g_w - 4 - WG_SCROLL_W; }
-static int visible_rows(void)
+
+static int icon_cols(void)
 {
-    const int per = (g_view == VIEW_ICON) ? CELL_H : ROW_H;
-    const int n = content_h() / per;
-    return n > 0 ? n : 1;
+    const int c = ((int)g_w - 8 - WG_SCROLL_W) / CELL_W;
+    return c > 0 ? c : 1;
 }
-static int scroll_span(void)
+
+/* The whole content's height in pixels - what the bar's span is measured in
+ * now that scrolling is smooth. */
+static int content_span(void)
 {
-    const int n = (g_view == VIEW_TREE) ? g_row_count : g_count;
-    return n > 0 ? n : 1;
+    int h;
+    if (g_view == VIEW_ICON)
+        h = ((g_count + icon_cols() - 1) / icon_cols()) * CELL_H + 12;
+    else if (g_view == VIEW_LIST)
+        h = ROW_H + 2 + g_count * ROW_H;
+    else
+        h = 2 + g_row_count * ROW_H;
+    return h > 0 ? h : 1;
+}
+
+/* A step small enough to feel continuous and large enough to get somewhere. */
+static int scroll_step(void)
+{
+    return (g_view == VIEW_ICON) ? CELL_H / 4 : ROW_H;
+}
+
+static void scroll_to(int px)
+{
+    const int most = content_span() - content_h();
+    if (px > most) px = most;
+    if (px < 0) px = 0;
+    g_scroll = px;
 }
 
 static void draw_toolbar(void)
@@ -316,15 +346,21 @@ static void draw_toolbar(void)
 static void draw_icons(void)
 {
     const int top = content_top();
-    const int cols = ((int)g_w - 8) / CELL_W;
-    if (cols < 1)
-        return;
-    for (int i = g_scroll; i < g_count; ++i) {
-        const int slot = i - g_scroll;
+    const int cols = icon_cols();
+
+    /* Whole rows are laid out as always; the offset just slides them, so a
+     * partly-visible row at either edge is drawn and clipped rather than
+     * skipped. */
+    const int first = g_scroll / CELL_H;
+    const int shift = g_scroll % CELL_H;
+    for (int i = first * cols; i < g_count; ++i) {
+        const int slot = i - first * cols;
         const int cx = 8 + (slot % cols) * CELL_W;
-        const int cy = top + 6 + (slot / cols) * CELL_H;
-        if (cy + CELL_H > top + content_h())
+        const int cy = top + 6 + (slot / cols) * CELL_H - shift;
+        if (cy >= top + content_h())
             break;
+        if (cy + CELL_H < top)
+            continue;
         if (i == g_selected || g_marked[i])
             wg_fill(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6, 0xB0C4DE);
         const int dir = (g_entries[i].d_type == S_IFDIR);
@@ -344,11 +380,13 @@ static void draw_list(void)
     wg_text(400, top + 2, "Kind", WG_DIM);
     wg_fill(8, top + ROW_H, (int)g_w - 16, 1, WG_DIM);
 
-    for (int i = g_scroll; i < g_count; ++i) {
-        const int slot = i - g_scroll;
-        const int y = top + ROW_H + 2 + slot * ROW_H;
-        if (y + ROW_H > top + content_h())
+    const int first = (g_scroll > ROW_H + 2) ? (g_scroll - ROW_H - 2) / ROW_H : 0;
+    for (int i = first; i < g_count; ++i) {
+        const int y = top + ROW_H + 2 + i * ROW_H - g_scroll;
+        if (y >= top + content_h())
             break;
+        if (y + ROW_H < top + ROW_H)
+            continue;               /* under the column headings */
         if (i == g_selected || g_marked[i])
             wg_fill(8, y, (int)g_w - 16, ROW_H, 0xB0C4DE);
         const int dir = (g_entries[i].d_type == S_IFDIR);
@@ -371,11 +409,13 @@ static void draw_list(void)
 static void draw_tree(void)
 {
     const int top = content_top();
-    for (int i = g_scroll; i < g_row_count; ++i) {
-        const int slot = i - g_scroll;
-        const int y = top + 2 + slot * ROW_H;
-        if (y + ROW_H > top + content_h())
+    const int first = g_scroll / ROW_H;
+    for (int i = first; i < g_row_count; ++i) {
+        const int y = top + 2 + i * ROW_H - g_scroll;
+        if (y >= top + content_h())
             break;
+        if (y + ROW_H < top)
+            continue;
         const struct row* r = &g_rows[i];
         const int x = 10 + r->depth * 16;
         if (i == g_selected)
@@ -397,15 +437,20 @@ static void draw_tree(void)
 static void draw(void)
 {
     wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
-    draw_toolbar();
 
     /* The listing sits in its own sunken well, the way a document area does. */
     wg_fill(4, content_top(), (int)g_w - 8, content_h(), WG_PAPER);
-    wg_bevel(4, content_top(), (int)g_w - 8, content_h(), 0);
 
     if (g_view == VIEW_ICON)      draw_icons();
     else if (g_view == VIEW_LIST) draw_list();
     else                          draw_tree();
+
+    /* The chrome goes on last. Now that a row can be half-scrolled off the top,
+     * it draws above the content area - the drawing primitives clip to the
+     * window, not to the well - so the toolbar has to be painted over it rather
+     * than under it. The well's edge is redrawn for the same reason. */
+    draw_toolbar();
+    wg_bevel(4, content_top(), (int)g_w - 8, content_h(), 0);
 
     if (g_band) {
         const int x0 = g_band_x < g_band_x2 ? g_band_x : g_band_x2;
@@ -418,7 +463,7 @@ static void draw(void)
 
     /* A vertical bar, since a directory rarely fits. */
     wg_scrollbar_v(bar_x(), content_top(), content_h(),
-                   g_scroll, visible_rows(), scroll_span());
+                   g_scroll, content_h(), content_span());
 
     wg_fill(0, (int)g_h - STATUS_H, (int)g_w, STATUS_H, WG_FACE);
     wg_text_clipped(8, (int)g_h - STATUS_H + 2, g_status, WG_INK, (int)g_w - 16);
@@ -604,30 +649,27 @@ static int hit_test(int x, int y)
     if (y < top || y >= top + content_h())
         return -1;
     if (g_view == VIEW_ICON) {
-        const int cols = ((int)g_w - 8) / CELL_W;
-        if (cols < 1 || x < 8)
+        const int cols = icon_cols();
+        if (x < 8)
             return -1;
         const int col = (x - 8) / CELL_W;
-        const int rowi = (y - top - 6) / CELL_H;
+        const int rowi = (y - top - 6 + g_scroll) / CELL_H;
         if (col >= cols || rowi < 0)
             return -1;
-        const int i = g_scroll + rowi * cols + col;
+        const int i = rowi * cols + col;
         return i < g_count ? i : -1;
     }
     if (g_view == VIEW_LIST) {
-        const int i = g_scroll + (y - top - ROW_H - 2) / ROW_H;
-        return (i >= g_scroll && i < g_count) ? i : -1;
+        const int i = (y - top - ROW_H - 2 + g_scroll) / ROW_H;
+        return (i >= 0 && i < g_count) ? i : -1;
     }
-    const int i = g_scroll + (y - top - 2) / ROW_H;
-    return (i >= g_scroll && i < g_row_count) ? i : -1;
+    const int i = (y - top - 2 + g_scroll) / ROW_H;
+    return (i >= 0 && i < g_row_count) ? i : -1;
 }
 
-static void scroll_by(int delta)
+static void scroll_by(int steps)
 {
-    const int total = (g_view == VIEW_TREE) ? g_row_count : g_count;
-    g_scroll += delta;
-    if (g_scroll > total - 1) g_scroll = total - 1;
-    if (g_scroll < 0) g_scroll = 0;
+    scroll_to(g_scroll + steps * scroll_step());
 }
 
 static const char* const kMenu[] = { "Open", "Open with...", "Copy", "Select all", "-", "Refresh" };
@@ -741,13 +783,13 @@ int main(int argc, char** argv)
                     /* The bar was drawn but never listened to, which made it
                      * look broken rather than absent. */
                     if (wg_scroll_on_thumb_v(event.y, content_top(), content_h(),
-                                             g_scroll, visible_rows(),
-                                             scroll_span()))
+                                             g_scroll, content_h(),
+                                             content_span()))
                         g_bar_drag = 1;
                     else
-                        g_scroll = wg_scroll_hit_v(event.x, event.y, bar_x(),
+                        scroll_to(wg_scroll_hit_v(event.x, event.y, bar_x(),
                             content_top(), content_h(), g_scroll,
-                            visible_rows(), scroll_span());
+                            content_h(), content_span()));
                 } else if (event.button == 1 && event.y >= content_top() &&
                            hit_test(event.x, event.y) < 0) {
                     /* A press on empty space starts a rubber band rather than
@@ -780,8 +822,8 @@ int main(int argc, char** argv)
                     }
                 }
             } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_bar_drag) {
-                g_scroll = wg_scroll_drag_v(event.y, content_top(), content_h(),
-                                            visible_rows(), scroll_span());
+                scroll_to(wg_scroll_drag_v(event.y, content_top(), content_h(),
+                                           content_h(), content_span()));
             } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_band) {
                 g_band_x2 = event.x;
                 g_band_y2 = event.y;
@@ -804,16 +846,13 @@ int main(int argc, char** argv)
                 g_bar_drag = 0;
             } else if (event.type == WIN_EVENT_KEY) {
                 if (event.key == WIN_KEY_DOWN) {
-                    if (g_scroll + visible_rows() < scroll_span()) ++g_scroll;
+                    scroll_to(g_scroll + scroll_step());
                 } else if (event.key == WIN_KEY_UP) {
-                    if (g_scroll > 0) --g_scroll;
+                    scroll_to(g_scroll - scroll_step());
                 } else if (event.key == WIN_KEY_RIGHT) {
-                    g_scroll += visible_rows();
-                    if (g_scroll > scroll_span() - 1) g_scroll = scroll_span() - 1;
-                    if (g_scroll < 0) g_scroll = 0;
+                    scroll_to(g_scroll + content_h());      /* a page */
                 } else if (event.key == WIN_KEY_LEFT) {
-                    g_scroll -= visible_rows();
-                    if (g_scroll < 0) g_scroll = 0;
+                    scroll_to(g_scroll - content_h());
                 } else if (event.key == 1) {    /* ctrl+a */
                     select_all();
                 } else if (event.key == 3) {    /* ctrl+c */
