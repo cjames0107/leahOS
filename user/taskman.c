@@ -110,6 +110,7 @@ static void meter(int x, int y, int w, int h, uint64_t part, uint64_t whole,
 
 static void draw(void)
 {
+    wg_theme();
     wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
 
     char line[96];
@@ -152,7 +153,7 @@ static void draw(void)
             break;
         const int y = top + 2 + r * ROW_H;
         if (i == g_sel)
-            wg_fill(6, y, (int)g_w - 12, ROW_H, 0xB0C4DE);
+            wg_fill(6, y, (int)g_w - 12, ROW_H, wg_sel_colour());
 
         snprintf(line, sizeof(line), "%u", g_procs[i].pid);
         wg_text(10, y, line, WG_INK);

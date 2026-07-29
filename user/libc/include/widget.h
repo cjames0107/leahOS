@@ -25,6 +25,17 @@
  * in window coordinates without checking whether it fits. */
 void wg_target(uint32_t* pixels, unsigned width, unsigned height);
 
+/* Pick up the desktop's theme, so a client's selection highlight and body
+ * colour match every other client's. Safe to call every frame - it only reads
+ * the shared block, and does nothing when there is no window server. The
+ * colours below fall back to the built-in ones until it is called. */
+void wg_theme(void);
+
+uint32_t wg_sel_colour(void);   /* the selection highlight   */
+uint32_t wg_body_colour(void);  /* a content-area background */
+uint32_t wg_ink_colour(void);   /* ink on that background    */
+unsigned wg_scale(void);        /* 1 or 2 - the text scale   */
+
 /* Load the console font. Call once; without it text draws nothing. */
 int  wg_font(void);
 

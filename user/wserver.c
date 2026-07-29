@@ -40,8 +40,9 @@
 #define OUTLINE      0x000000
 #define DESKTOP      (g_control->theme.desktop)
 #define FACE         (g_control->theme.face)
-#define LIGHT        (g_control->theme.light)
-#define SHADOW       (g_control->theme.shadow)
+/* Contrast pushes the bevel shades apart, or together, around the face. */
+#define LIGHT        tint(g_control->theme.light,  g_control->theme.contrast)
+#define SHADOW       tint(g_control->theme.shadow, -g_control->theme.contrast)
 #define TITLE_ACTIVE (g_control->theme.title_active)
 #define TITLE_IDLE   (g_control->theme.title_idle)
 #define TITLE_TEXT   (g_control->theme.title_text)
@@ -144,6 +145,30 @@ static int g_band_shown;
 static int g_mouse_grab = -1;
 static int g_last_left;
 static int g_last_right;
+
+/* Shift a colour towards white or black by `amount` percent. Used for the
+ * bevels, which is where contrast actually lives: the face colour stays put and
+ * the light and shadow move apart or together around it. */
+static uint32_t tint(uint32_t c, int amount)
+{
+    int r = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)(c & 0xFF);
+    if (amount >= 0) {
+        r += (255 - r) * amount / 100;
+        g += (255 - g) * amount / 100;
+        b += (255 - b) * amount / 100;
+    } else {
+        r += r * amount / 100;
+        g += g * amount / 100;
+        b += b * amount / 100;
+    }
+    if (r < 0) r = 0;
+    if (r > 255) r = 255;
+    if (g < 0) g = 0;
+    if (g > 255) g = 255;
+    if (b < 0) b = 0;
+    if (b > 255) b = 255;
+    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
 
 static int imax(int a, int b) { return a > b ? a : b; }
 static int imin(int a, int b) { return a < b ? a : b; }
@@ -401,6 +426,8 @@ static void reload_theme(void)
     damage_all();
 }
 
+static void compose_cursor(void);
+
 /* Desktop, then windows back to front so the topmost is drawn last and wins -
  * within one rectangle, and skipping the windows that do not touch it. */
 static void compose_rect(const struct rect* r)
@@ -414,8 +441,29 @@ static void compose_rect(const struct rect* r)
             for (int x = 0; x < r->w; ++x)
                 row[x] = src[(unsigned)(r->x + x) * g_paper_w / g_fb.width];
         } else {
-            for (int x = 0; x < r->w; ++x)
-                row[x] = DESKTOP;
+            /* A pattern is drawn from the desktop colour rather than a second
+             * one, so it stays consistent with whatever was chosen. */
+            const uint32_t base = DESKTOP;
+            const uint32_t lit = tint(base, 18);
+            const uint32_t dim = tint(base, -18);
+            for (int x = 0; x < r->w; ++x) {
+                const int gx = r->x + x;
+                uint32_t c = base;
+                switch (g_control->theme.pattern) {
+                case WS_PATTERN_GRID:
+                    if ((gx % 32) == 0 || (y % 32) == 0) c = lit;
+                    break;
+                case WS_PATTERN_DOTS:
+                    if ((gx % 16) == 0 && (y % 16) == 0) c = lit;
+                    break;
+                case WS_PATTERN_WEAVE:
+                    c = (((gx >> 2) + (y >> 2)) & 1) ? lit : dim;
+                    break;
+                default:
+                    break;
+                }
+                row[x] = c;
+            }
         }
     }
     for (int i = g_count - 1; i >= 0; --i) {
@@ -423,6 +471,12 @@ static void compose_rect(const struct rect* r)
         if (rects_overlap(&f, r))
             draw_window(g_order[i], i == 0);
     }
+
+    /* Last, and above every window: it is the one thing always on top. */
+    struct rect c;
+    c.x = g_cursor_x; c.y = g_cursor_y; c.w = CURSOR_W; c.h = CURSOR_H;
+    if (rects_overlap(&c, r))
+        compose_cursor();
 }
 
 /* --- getting it onto the screen ----------------------------------------- */
@@ -444,31 +498,36 @@ static void present_region(int x, int y, unsigned w, unsigned h)
     }
 }
 
-/* The cursor goes straight to the screen and is rubbed out from the backbuffer,
- * so moving the pointer never costs a recompose. */
-static void draw_cursor(void)
+/* The cursor is composed like anything else, into the backbuffer, and the whole
+ * frame is blitted once.
+ *
+ * It used to be drawn straight to the screen after the blit, with the
+ * backbuffer never containing it. That works only while nothing else is being
+ * repainted: every damage pass blits a rectangle that does not have the cursor
+ * in it and then draws the cursor back, so for the width of that gap the
+ * pointer is not on the screen. With a client presenting steadily - a clock, a
+ * task list, the desktop rescanning - the gap comes round often enough to read
+ * as a blink.
+ *
+ * Composing it means the screen only ever shows finished frames. A move damages
+ * where it was and where it is, which is two rectangles of 12x19 - cheaper than
+ * the recompose this arrangement was originally avoiding. */
+static void compose_cursor(void)
 {
     for (int row = 0; row < CURSOR_H; ++row) {
         for (int col = 0; col < CURSOR_W; ++col) {
             const unsigned char v = kCursor[row][col];
             if (v == 0)
                 continue;
-            const int x = g_cursor_x + col, y = g_cursor_y + row;
-            if (x < 0 || y < 0 || (unsigned)x >= g_fb.width ||
-                (unsigned)y >= g_fb.height)
-                continue;
-            uint32_t* p = (uint32_t*)(g_screen + (unsigned long)y * g_fb.pitch
-                                      + (unsigned long)x * 4);
-            *p = (v == 1) ? OUTLINE : CURSOR_FILL;
+            back_plot(g_cursor_x + col, g_cursor_y + row,
+                      (v == 1) ? OUTLINE : CURSOR_FILL);
         }
     }
 }
 
-static void erase_cursor(void)
+static void damage_cursor(int x, int y)
 {
-    if (g_last_cursor_x < 0)
-        return;
-    present_region(g_last_cursor_x, g_last_cursor_y, CURSOR_W, CURSOR_H);
+    damage_rect(x, y, CURSOR_W, CURSOR_H);
 }
 
 /* --- events -------------------------------------------------------------- */
@@ -928,12 +987,19 @@ int main(void)
     g_control->theme.title_idle   = 0x808080;
     g_control->theme.title_text   = 0xFFFFFF;
     g_control->theme.cursor       = 0xFFFFFF;
+    g_control->theme.selection    = 0xB0C4DE;
+    g_control->theme.body         = 0xFFFFFF;
+    g_control->theme.text         = 0x000000;
+    g_control->theme.text_scale   = 1;
+    g_control->theme.contrast     = 0;
+    g_control->theme.pattern      = WS_PATTERN_FLAT;
     g_control->theme.generation   = 1;
     for (int i = 0; i < WS_MAX_WINDOWS; ++i)
         g_order[i] = -1;
 
     g_cursor_x = (int)g_fb.width / 2;
     g_cursor_y = (int)g_fb.height / 2;
+    g_last_cursor_x = g_last_cursor_y = -1;
     for (int i = 0; i < WS_MAX_WINDOWS; ++i)
         g_pixel_gen[i] = 0xFFFFFFFFu;
     g_clip.x = 0; g_clip.y = 0;
@@ -977,21 +1043,25 @@ int main(void)
             continue;
         }
 
-        /* The cursor and the rubber band live on the screen rather than in the
-         * backbuffer, so both have to come off before anything reads the screen
-         * back or composes over it.
-         *
-         * Unconditionally, and before the damage pass. Erasing the cursor only
-         * when nothing else had changed left the old one on screen whenever a
-         * window happened to be redrawn in the same frame the pointer moved -
-         * which is most frames while dragging, and is what painted a trail of
-         * cursors across the desktop. */
+        /* The rubber band still lives on the screen rather than in the
+         * backbuffer, so it has to come off before anything composes over it.
+         * The cursor no longer does - it is composed like a window, which is
+         * what stopped it blinking. */
         if (g_band_shown) {
             erase_band(&g_band);
             g_band_shown = 0;
         }
-        erase_cursor();
-        g_last_cursor_x = -1;
+
+        /* A pointer move is damage like anything else: where it was, and where
+         * it is. Nothing draws to the screen outside the blit below, so the
+         * screen only ever shows finished frames. */
+        if (g_cursor_x != g_last_cursor_x || g_cursor_y != g_last_cursor_y) {
+            if (g_last_cursor_x >= 0)
+                damage_cursor(g_last_cursor_x, g_last_cursor_y);
+            damage_cursor(g_cursor_x, g_cursor_y);
+            g_last_cursor_x = g_cursor_x;
+            g_last_cursor_y = g_cursor_y;
+        }
 
         for (int i = 0; i < g_damage_count; ++i) {
             compose_rect(&g_damage[i]);
@@ -1010,9 +1080,6 @@ int main(void)
             g_band_shown = 1;
         }
 
-        draw_cursor();
-        g_last_cursor_x = g_cursor_x;
-        g_last_cursor_y = g_cursor_y;
         msleep(kFrameSleepMs);
     }
 

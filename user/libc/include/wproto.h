@@ -150,7 +150,24 @@ struct ws_theme {
     volatile uint32_t cursor;       /* the arrow's fill; its outline stays black */
     volatile uint32_t generation;
     char wallpaper[128];            /* a PNG to show behind the windows, or "" */
+
+    /* Read by clients as well as by the server: a selection highlight drawn a
+     * different colour in every application is not a theme. */
+    volatile uint32_t selection;    /* the highlight behind a chosen item     */
+    volatile uint32_t body;         /* a window's content background          */
+    volatile uint32_t text;         /* ink on that background                 */
+    volatile uint32_t text_scale;   /* 1 or 2 - the font is a bitmap          */
+    volatile int32_t  contrast;     /* -100..100, applied to the bevels       */
+    volatile uint32_t pattern;      /* WS_PATTERN_*, drawn when no wallpaper  */
 };
+
+/* Backdrop patterns. Drawn from the desktop colour rather than a second one, so
+ * a pattern stays consistent with whatever colour was chosen. */
+#define WS_PATTERN_FLAT   0
+#define WS_PATTERN_GRID   1
+#define WS_PATTERN_DOTS   2
+#define WS_PATTERN_WEAVE  3
+#define WS_PATTERN_COUNT  4
 
 struct ws_shared {
     volatile uint32_t magic;

@@ -36,7 +36,7 @@
 #define ROW_H   22
 
 static uint32_t* g_px;
-static unsigned  g_w = 560, g_h = 400;
+static unsigned  g_w = 660, g_h = 400;
 static int g_page = PAGE_GENERAL;
 static char g_note[128] = "";
 
@@ -56,9 +56,37 @@ static struct ws_shared* g_ws;
 #define EL_FACE    1
 #define EL_TITLE   2
 #define EL_CURSOR  3
-#define ELEMENTS   4
+#define EL_SEL     4
+#define EL_BODY    5
+#define ELEMENTS   6
 static const char* kElements[ELEMENTS] = {
-    "wallpaper", "windows", "title bar", "pointer"
+    "desktop", "window", "title", "pointer", "selection", "body"
+};
+
+/* Whole looks rather than six separate choices. Most people want "the dark
+ * one", not to pick a shadow colour; the individual controls are still there
+ * for anyone who does. */
+struct preset {
+    const char* name;
+    uint32_t desktop, face, light, shadow, title, title_text, cursor;
+    uint32_t selection, body, text;
+    int32_t contrast;
+    uint32_t pattern;
+};
+static const struct preset kPresets[] = {
+    { "Default",  0x008080, 0xC0C0C0, 0xFFFFFF, 0x606060, 0x000080, 0xFFFFFF,
+      0xFFFFFF, 0xB0C4DE, 0xFFFFFF, 0x000000, 0, WS_PATTERN_FLAT },
+    { "Slate",    0x2E3440, 0x4C566A, 0x7B88A1, 0x2B303B, 0x5E81AC, 0xECEFF4,
+      0xD8DEE9, 0x5E81AC, 0x3B4252, 0xE5E9F0, 10, WS_PATTERN_GRID },
+    { "Parchment",0x8B7355, 0xE8DCC0, 0xFFF8E7, 0x9A8C70, 0x6B4423, 0xFFF8E7,
+      0xFFF8E7, 0xC8B48A, 0xFFFDF5, 0x2A1F14, -10, WS_PATTERN_WEAVE },
+    { "Contrast", 0x000000, 0xFFFFFF, 0xFFFFFF, 0x000000, 0x000000, 0xFFFFFF,
+      0xFFFF00, 0x0000FF, 0xFFFFFF, 0x000000, 60, WS_PATTERN_FLAT },
+};
+#define PRESETS (int)(sizeof(kPresets) / sizeof(kPresets[0]))
+
+static const char* kPatterns[WS_PATTERN_COUNT] = {
+    "flat", "grid", "dots", "weave"
 };
 static int g_element;
 
@@ -81,6 +109,12 @@ static void theme_changed(void)
     prefs_set_u32("theme.face", g_ws->theme.face);
     prefs_set_u32("theme.title", g_ws->theme.title_active);
     prefs_set_u32("theme.cursor", g_ws->theme.cursor);
+    prefs_set_u32("theme.selection", g_ws->theme.selection);
+    prefs_set_u32("theme.body", g_ws->theme.body);
+    prefs_set_u32("theme.text", g_ws->theme.text);
+    prefs_set_u32("theme.scale", g_ws->theme.text_scale);
+    prefs_set_u32("theme.contrast", (unsigned)(g_ws->theme.contrast + 100));
+    prefs_set_u32("theme.pattern", g_ws->theme.pattern);
     prefs_set_str("theme.wallpaper", (const char*)g_ws->theme.wallpaper);
     if (prefs_save() != 0)
         snprintf(g_note, sizeof(g_note), "changed, but could not be saved");
@@ -97,6 +131,12 @@ static void apply_saved_theme(void)
     g_ws->theme.face         = prefs_get_u32("theme.face", g_ws->theme.face);
     g_ws->theme.title_active = prefs_get_u32("theme.title", g_ws->theme.title_active);
     g_ws->theme.cursor       = prefs_get_u32("theme.cursor", g_ws->theme.cursor);
+    g_ws->theme.selection  = prefs_get_u32("theme.selection", g_ws->theme.selection);
+    g_ws->theme.body       = prefs_get_u32("theme.body", g_ws->theme.body);
+    g_ws->theme.text       = prefs_get_u32("theme.text", g_ws->theme.text);
+    g_ws->theme.text_scale = prefs_get_u32("theme.scale", 1);
+    g_ws->theme.contrast   = (int32_t)prefs_get_u32("theme.contrast", 100) - 100;
+    g_ws->theme.pattern    = prefs_get_u32("theme.pattern", WS_PATTERN_FLAT);
     const char* paper = prefs_get_str("theme.wallpaper", "");
     int n = 0;
     while (paper[n] != '\0' && n < 126) { g_ws->theme.wallpaper[n] = paper[n]; ++n; }
@@ -126,9 +166,41 @@ static void set_colour(uint32_t c)
     case EL_CURSOR:
         g_ws->theme.cursor = c;
         break;
+    case EL_SEL:
+        g_ws->theme.selection = c;
+        break;
+    case EL_BODY:
+        /* Ink follows the body: light text on a light background is not a
+         * choice anyone is making on purpose. */
+        g_ws->theme.body = c;
+        g_ws->theme.text = (((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF))
+                           > 3 * 128 ? 0x000000 : 0xFFFFFF;
+        break;
     }
     theme_changed();
     snprintf(g_note, sizeof(g_note), "%s set", kElements[g_element]);
+}
+
+static void apply_preset(int i)
+{
+    if (g_ws == 0 || i < 0 || i >= PRESETS)
+        return;
+    const struct preset* p = &kPresets[i];
+    g_ws->theme.desktop      = p->desktop;
+    g_ws->theme.face         = p->face;
+    g_ws->theme.light        = p->light;
+    g_ws->theme.shadow       = p->shadow;
+    g_ws->theme.title_active = p->title;
+    g_ws->theme.title_text   = p->title_text;
+    g_ws->theme.cursor       = p->cursor;
+    g_ws->theme.selection    = p->selection;
+    g_ws->theme.body         = p->body;
+    g_ws->theme.text         = p->text;
+    g_ws->theme.contrast     = p->contrast;
+    g_ws->theme.pattern      = p->pattern;
+    g_ws->theme.wallpaper[0] = '\0';
+    theme_changed();
+    snprintf(g_note, sizeof(g_note), "%s", p->name);
 }
 
 static void set_wallpaper(const char* path)
@@ -274,38 +346,62 @@ static void draw_appearance(void)
     wg_text(SIDEBAR + 14, 16, "Appearance", WG_INK);
     wg_fill(SIDEBAR + 14, 34, (int)g_w - SIDEBAR - 28, 1, WG_DIM);
 
-    wg_text(SIDEBAR + 14, 48, "element", WG_DIM);
-    for (int i = 0; i < ELEMENTS; ++i)
-        wg_button(SIDEBAR + 90 + i * 86, 44, 82, 22, kElements[i],
-                  g_element == i);
+    wg_text(SIDEBAR + 14, 42, "theme", WG_DIM);
+    for (int i = 0; i < PRESETS; ++i)
+        wg_button(SIDEBAR + 90 + i * 78, 38, 74, 22, kPresets[i].name, 0);
 
-    wg_text(SIDEBAR + 14, 84, "colour", WG_DIM);
+    wg_text(SIDEBAR + 14, 70, "element", WG_DIM);
+    for (int i = 0; i < ELEMENTS; ++i)
+        wg_button(SIDEBAR + 90 + (i % 3) * 78, 66 + (i / 3) * 24, 74, 22,
+                  kElements[i], g_element == i);
+
+    wg_text(SIDEBAR + 14, 122, "colour", WG_DIM);
     for (int i = 0; i < 16; ++i) {
         const int x = SIDEBAR + 90 + (i % 8) * 30;
-        const int y = 78 + (i / 8) * 30;
+        const int y = 118 + (i / 8) * 30;
         wg_fill(x, y, 26, 26, kSwatch[i]);
         wg_bevel(x, y, 26, 26, 1);
     }
 
+    wg_text(SIDEBAR + 14, 182, "text", WG_DIM);
+    wg_button(SIDEBAR + 90, 178, 74, 22, "normal",
+              g_ws && g_ws->theme.text_scale != 2);
+    wg_button(SIDEBAR + 168, 178, 74, 22, "large",
+              g_ws && g_ws->theme.text_scale == 2);
+
+    wg_text(SIDEBAR + 14, 210, "contrast", WG_DIM);
+    wg_button(SIDEBAR + 90, 206, 34, 22, "-", 0);
+    wg_button(SIDEBAR + 126, 206, 34, 22, "+", 0);
+    {
+        char c[24];
+        snprintf(c, sizeof(c), "%d", g_ws ? (int)g_ws->theme.contrast : 0);
+        wg_text(SIDEBAR + 166, 209, c, WG_INK);
+    }
+
+    wg_text(SIDEBAR + 14, 238, "pattern", WG_DIM);
+    for (int i = 0; i < WS_PATTERN_COUNT; ++i)
+        wg_button(SIDEBAR + 90 + i * 62, 234, 58, 22, kPatterns[i],
+                  g_ws && (int)g_ws->theme.pattern == i);
+
     /* A live preview, so a choice can be judged before it is made. */
-    wg_text(SIDEBAR + 14, 148, "preview", WG_DIM);
-    const int px = SIDEBAR + 90, py = 142;
+    wg_text(SIDEBAR + 320, 182, "preview", WG_DIM);
+    const int px = SIDEBAR + 320, py = 200;
     wg_fill(px, py, 150, 60, g_ws ? g_ws->theme.desktop : 0x008080);
     wg_fill(px + 12, py + 10, 110, 40, g_ws ? g_ws->theme.face : 0xC0C0C0);
     wg_bevel(px + 12, py + 10, 110, 40, 1);
     wg_fill(px + 15, py + 13, 104, 12, g_ws ? g_ws->theme.title_active : 0x000080);
     wg_bevel(px, py, 150, 60, 0);
 
-    wg_text(SIDEBAR + 14, 216, "wallpaper", WG_DIM);
-    wg_button(SIDEBAR + 90, 212, 130, 24, "Choose a PNG...", 0);
-    wg_button(SIDEBAR + 228, 212, 96, 24, "Remove", 0);
+    wg_text(SIDEBAR + 14, 266, "wallpaper", WG_DIM);
+    wg_button(SIDEBAR + 90, 262, 130, 24, "Choose a PNG...", 0);
+    wg_button(SIDEBAR + 228, 262, 96, 24, "Remove", 0);
     if (g_ws != 0 && g_ws->theme.wallpaper[0] != '\0')
-        wg_text_clipped(SIDEBAR + 90, 242, (const char*)g_ws->theme.wallpaper,
+        wg_text_clipped(SIDEBAR + 90, 290, (const char*)g_ws->theme.wallpaper,
                         WG_INK, (int)g_w - SIDEBAR - 105);
     else
-        wg_text(SIDEBAR + 90, 242, "none - the flat colour shows", WG_DIM);
+        wg_text(SIDEBAR + 90, 290, "none - the pattern shows", WG_DIM);
 
-    wg_text_clipped(SIDEBAR + 14, 272,
+    wg_text_clipped(SIDEBAR + 14, 314,
                     "saved to ~/.leahrc and restored when settings next starts",
                     WG_DIM, (int)g_w - SIDEBAR - 28);
 }
@@ -437,7 +533,7 @@ int main(int argc, char** argv)
     g_px = win_map(id);
     if (g_px == 0)
         return 1;
-    win_set_min_size(id, 520, 330);
+    win_set_min_size(id, 620, 360);
     wg_target(g_px, g_w, g_h);
     draw();
     win_present(id);
@@ -466,22 +562,51 @@ int main(int argc, char** argv)
                     const int i = (e.y - 10) / ROW_H;
                     if (i >= 0 && i < PAGES) { g_page = i; g_note[0] = '\0'; }
                 } else if (g_page == PAGE_APPEAR) {
-                    for (int i = 0; i < ELEMENTS; ++i)
-                        if (e.x >= SIDEBAR + 90 + i * 86 &&
-                            e.x < SIDEBAR + 172 + i * 86 &&
-                            e.y >= 44 && e.y < 66)
+                    for (int i = 0; i < PRESETS; ++i)
+                        if (e.x >= SIDEBAR + 90 + i * 78 &&
+                            e.x < SIDEBAR + 164 + i * 78 &&
+                            e.y >= 38 && e.y < 60)
+                            apply_preset(i);
+                    for (int i = 0; i < ELEMENTS; ++i) {
+                        const int bx = SIDEBAR + 90 + (i % 3) * 78;
+                        const int by = 66 + (i / 3) * 24;
+                        if (e.x >= bx && e.x < bx + 74 &&
+                            e.y >= by && e.y < by + 22)
                             g_element = i;
+                    }
                     for (int i = 0; i < 16; ++i) {
                         const int x = SIDEBAR + 90 + (i % 8) * 30;
-                        const int y = 78 + (i / 8) * 30;
+                        const int y = 118 + (i / 8) * 30;
                         if (e.x >= x && e.x < x + 26 && e.y >= y && e.y < y + 26)
                             set_colour(kSwatch[i]);
                     }
+                    if (g_ws != 0 && e.y >= 178 && e.y < 200) {
+                        if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 164)
+                            { g_ws->theme.text_scale = 1; theme_changed(); }
+                        else if (e.x >= SIDEBAR + 168 && e.x < SIDEBAR + 242)
+                            { g_ws->theme.text_scale = 2; theme_changed(); }
+                    }
+                    if (g_ws != 0 && e.y >= 206 && e.y < 228) {
+                        int c = g_ws->theme.contrast;
+                        if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 124) c -= 10;
+                        else if (e.x >= SIDEBAR + 126 && e.x < SIDEBAR + 160) c += 10;
+                        if (c < -100) c = -100;
+                        if (c > 100) c = 100;
+                        if (c != g_ws->theme.contrast)
+                            { g_ws->theme.contrast = c; theme_changed(); }
+                    }
+                    if (g_ws != 0 && e.y >= 234 && e.y < 256) {
+                        for (int i = 0; i < WS_PATTERN_COUNT; ++i)
+                            if (e.x >= SIDEBAR + 90 + i * 62 &&
+                                e.x < SIDEBAR + 148 + i * 62)
+                                { g_ws->theme.pattern = (uint32_t)i;
+                                  theme_changed(); }
+                    }
                     if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 220 &&
-                        e.y >= 212 && e.y < 236)
+                        e.y >= 262 && e.y < 286)
                         dlg_save("/", "wallpaper.png");   /* a picker, reused */
                     else if (e.x >= SIDEBAR + 228 && e.x < SIDEBAR + 324 &&
-                             e.y >= 212 && e.y < 236)
+                             e.y >= 262 && e.y < 286)
                         set_wallpaper("");
                 } else if (g_page == PAGE_USERS) {
                     if (inside(&g_f_name, e.x, e.y))      g_ufield = 1;

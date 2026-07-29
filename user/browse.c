@@ -371,7 +371,7 @@ static void draw_icons(void)
         if (cy + CELL_H < top)
             continue;
         if (i == g_selected || g_marked[i])
-            wg_fill(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6, 0xB0C4DE);
+            wg_fill(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6, wg_sel_colour());
         /* A bundle is drawn as the application it is, not as the directory it
          * happens to be made of. */
         const int app = bundle_is_app(g_entries[i].d_name);
@@ -401,7 +401,7 @@ static void draw_list(void)
         if (y + ROW_H < top + ROW_H)
             continue;               /* under the column headings */
         if (i == g_selected || g_marked[i])
-            wg_fill(8, y, (int)g_w - 16, ROW_H, 0xB0C4DE);
+            wg_fill(8, y, (int)g_w - 16, ROW_H, wg_sel_colour());
         const int dir = (g_entries[i].d_type == S_IFDIR) &&
                         !bundle_is_app(g_entries[i].d_name);
         wg_text_clipped(12, y + 1, g_entries[i].d_name, WG_INK, 280);
@@ -434,7 +434,7 @@ static void draw_tree(void)
         const struct row* r = &g_rows[i];
         const int x = 10 + r->depth * 16;
         if (i == g_selected)
-            wg_fill(8, y, (int)g_w - 16, ROW_H, 0xB0C4DE);
+            wg_fill(8, y, (int)g_w - 16, ROW_H, wg_sel_colour());
         if (r->is_dir) {
             /* A twisty: a box with a minus when open, a plus when shut. */
             wg_fill(x, y + 4, 9, 9, WG_PAPER);
@@ -451,10 +451,11 @@ static void draw_tree(void)
 
 static void draw(void)
 {
+    wg_theme();                 /* whatever settings last chose */
     wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
 
     /* The listing sits in its own sunken well, the way a document area does. */
-    wg_fill(4, content_top(), (int)g_w - 8, content_h(), WG_PAPER);
+    wg_fill(4, content_top(), (int)g_w - 8, content_h(), wg_body_colour());
 
     if (g_view == VIEW_ICON)      draw_icons();
     else if (g_view == VIEW_LIST) draw_list();

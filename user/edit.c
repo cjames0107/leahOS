@@ -254,6 +254,7 @@ static void follow_caret(void)
 
 static void draw(void)
 {
+    wg_theme();
     wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
     wg_button(g_save.x, g_save.y, g_save.w, g_save.h, "Save", 0);
     wg_button(g_up.x, g_up.y, g_up.w, g_up.h, "^", 0);
@@ -265,7 +266,7 @@ static void draw(void)
 
     const int top = TOOLBAR_H;
     const int h = (int)g_h - TOOLBAR_H - STATUS_H;
-    wg_fill(4, top, (int)g_w - 8, h, WG_PAPER);
+    wg_fill(4, top, (int)g_w - 8, h, wg_body_colour());
     wg_bevel(4, top, (int)g_w - 8, h, 0);
 
     const int rows = text_rows();
@@ -286,7 +287,7 @@ static void draw(void)
             const int x0 = 8 + (a < 0 ? 0 : a) * WG_GLYPH_W;
             const int x1 = 8 + (b < 0 ? 0 : b) * WG_GLYPH_W;
             if (x1 > x0)
-                wg_fill(x0, y, x1 - x0, WG_GLYPH_H, 0xB0C4DE);
+                wg_fill(x0, y, x1 - x0, WG_GLYPH_H, wg_sel_colour());
         }
 
         char buf[256];

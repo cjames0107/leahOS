@@ -1,4 +1,6 @@
 #include <display.h>
+#include <shm.h>
+#include <wproto.h>
 #include <string.h>
 #include <widget.h>
 
@@ -6,6 +8,34 @@ static uint32_t* g_px;
 static unsigned  g_w, g_h;
 static unsigned char g_font[256 * 16];
 static int g_have_font;
+
+/* The theme, cached from the window server's control block. */
+static struct ws_shared* g_ws;
+static uint32_t g_sel = 0xB0C4DE, g_body = WG_PAPER, g_ink = WG_INK;
+static unsigned g_scale = 1;
+
+void wg_theme(void)
+{
+    if (g_ws == 0) {
+        const int id = shm_open(WS_CONTROL_KEY, 0, 0);
+        if (id < 0)
+            return;
+        g_ws = (struct ws_shared*)shm_map(id);
+        if (g_ws == 0)
+            return;
+    }
+    if (g_ws->magic != WS_MAGIC)
+        return;
+    if (g_ws->theme.selection != 0) g_sel = g_ws->theme.selection;
+    if (g_ws->theme.body != 0)      g_body = g_ws->theme.body;
+    g_ink = g_ws->theme.text;
+    g_scale = g_ws->theme.text_scale == 2 ? 2u : 1u;
+}
+
+uint32_t wg_sel_colour(void)  { return g_sel; }
+uint32_t wg_body_colour(void) { return g_body; }
+uint32_t wg_ink_colour(void)  { return g_ink; }
+unsigned wg_scale(void)       { return g_scale; }
 
 void wg_target(uint32_t* pixels, unsigned width, unsigned height)
 {
@@ -63,12 +93,21 @@ void wg_bevel(int x, int y, int w, int h, int raised)
 
 void wg_text(int x, int y, const char* s, uint32_t colour)
 {
+    /* The font is a bitmap, so "larger text" can only mean whole-pixel doubling.
+     * Saying so is better than pretending to a range of sizes there is no
+     * outline to produce. */
+    const unsigned k = g_scale;
     for (unsigned i = 0; s[i] != '\0'; ++i) {
         const unsigned char* glyph = &g_font[(unsigned char)s[i] * 16];
         for (int row = 0; row < WG_GLYPH_H; ++row)
-            for (int col = 0; col < WG_GLYPH_W; ++col)
-                if (glyph[row] & (0x80 >> col))
-                    wg_plot(x + (int)i * WG_GLYPH_W + col, y + row, colour);
+            for (int col = 0; col < WG_GLYPH_W; ++col) {
+                if (!(glyph[row] & (0x80 >> col)))
+                    continue;
+                for (unsigned dy = 0; dy < k; ++dy)
+                    for (unsigned dx = 0; dx < k; ++dx)
+                        wg_plot(x + (int)(i * WG_GLYPH_W * k + (unsigned)col * k + dx),
+                                y + (int)((unsigned)row * k + dy), colour);
+            }
     }
 }
 
