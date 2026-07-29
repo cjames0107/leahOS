@@ -106,6 +106,7 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
     w->pixels_gen = 0;
     w->min_width = 64;
     w->min_height = 32;
+    w->flags = 0;
     unsigned n = 0;
     while (title != 0 && title[n] != '\0' && n < WS_TITLE_LEN - 1) {
         w->title[n] = title[n];
@@ -279,4 +280,12 @@ void win_set_min_size(int id, unsigned width, unsigned height)
         return;
     block->windows[id].min_width = width;
     block->windows[id].min_height = height;
+}
+
+void win_set_desktop(int id)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+        return;
+    block->windows[id].flags |= WS_FLAG_DESKTOP;
 }

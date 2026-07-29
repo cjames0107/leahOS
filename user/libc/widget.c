@@ -102,3 +102,125 @@ void wg_button(int x, int y, int w, int h, const char* label, int down)
     wg_text(x + (w - tw) / 2 + down, y + (h - WG_GLYPH_H) / 2 + down,
             label, WG_INK);
 }
+
+/* --- scrollbars ----------------------------------------------------------- */
+
+/* The thumb's extent within the trough, as a fraction of the span. Kept to a
+ * minimum size so it stays grabbable on a long list. */
+static void thumb_of(int track, int first, int page, int span,
+                     int* pos, int* len)
+{
+    if (span <= page || span <= 0) {
+        *pos = 0;
+        *len = track;
+        return;
+    }
+    int l = track * page / span;
+    if (l < 12) l = 12;
+    if (l > track) l = track;
+    int p = (track - l) * first / (span - page);
+    if (p < 0) p = 0;
+    if (p > track - l) p = track - l;
+    *pos = p;
+    *len = l;
+}
+
+static void arrow(int x, int y, int size, int dir)
+{
+    /* dir: 0 up, 1 down, 2 left, 3 right. A filled triangle by rows. */
+    for (int i = 0; i < size / 2; ++i) {
+        const int run = i * 2 + 1;
+        for (int k = 0; k < run; ++k) {
+            int px, py;
+            if (dir == 0)      { px = x + size / 2 - i + k; py = y + 3 + i; }
+            else if (dir == 1) { px = x + size / 2 - i + k; py = y + size - 4 - i; }
+            else if (dir == 2) { px = x + 3 + i;            py = y + size / 2 - i + k; }
+            else               { px = x + size - 4 - i;     py = y + size / 2 - i + k; }
+            wg_plot(px, py, WG_INK);
+        }
+    }
+}
+
+void wg_scrollbar_v(int x, int y, int h, int first, int page, int span)
+{
+    wg_fill(x, y, WG_SCROLL_W, h, 0xA0A0A0);
+    wg_button(x, y, WG_SCROLL_W, WG_SCROLL_W, "", 0);
+    arrow(x, y, WG_SCROLL_W, 0);
+    wg_button(x, y + h - WG_SCROLL_W, WG_SCROLL_W, WG_SCROLL_W, "", 0);
+    arrow(x, y + h - WG_SCROLL_W, WG_SCROLL_W, 1);
+
+    const int track = h - WG_SCROLL_W * 2;
+    if (track <= 0)
+        return;
+    int pos, len;
+    thumb_of(track, first, page, span, &pos, &len);
+    wg_fill(x, y + WG_SCROLL_W + pos, WG_SCROLL_W, len, WG_FACE);
+    wg_bevel(x, y + WG_SCROLL_W + pos, WG_SCROLL_W, len, 1);
+}
+
+void wg_scrollbar_h(int x, int y, int w, int first, int page, int span)
+{
+    wg_fill(x, y, w, WG_SCROLL_W, 0xA0A0A0);
+    wg_button(x, y, WG_SCROLL_W, WG_SCROLL_W, "", 0);
+    arrow(x, y, WG_SCROLL_W, 2);
+    wg_button(x + w - WG_SCROLL_W, y, WG_SCROLL_W, WG_SCROLL_W, "", 0);
+    arrow(x + w - WG_SCROLL_W, y, WG_SCROLL_W, 3);
+
+    const int track = w - WG_SCROLL_W * 2;
+    if (track <= 0)
+        return;
+    int pos, len;
+    thumb_of(track, first, page, span, &pos, &len);
+    wg_fill(x + WG_SCROLL_W + pos, y, len, WG_SCROLL_W, WG_FACE);
+    wg_bevel(x + WG_SCROLL_W + pos, y, len, WG_SCROLL_W, 1);
+}
+
+static int clamp_first(int first, int page, int span)
+{
+    if (first > span - page) first = span - page;
+    if (first < 0) first = 0;
+    return first;
+}
+
+int wg_scroll_hit_v(int x, int y, int bx, int by, int bh,
+                    int first, int page, int span)
+{
+    if (x < bx || x >= bx + WG_SCROLL_W || y < by || y >= by + bh)
+        return first;
+    if (y < by + WG_SCROLL_W)
+        return clamp_first(first - 1, page, span);
+    if (y >= by + bh - WG_SCROLL_W)
+        return clamp_first(first + 1, page, span);
+
+    /* On the trough: jump so the thumb centres on the click, which is what a
+     * long list needs far more than paging one screen at a time. */
+    const int track = bh - WG_SCROLL_W * 2;
+    if (track <= 0 || span <= page)
+        return first;
+    int pos, len;
+    thumb_of(track, first, page, span, &pos, &len);
+    const int at = y - (by + WG_SCROLL_W);
+    if (at < pos)  return clamp_first(first - page, page, span);
+    if (at >= pos + len) return clamp_first(first + page, page, span);
+    return first;
+}
+
+int wg_scroll_hit_h(int x, int y, int bx, int by, int bw,
+                    int first, int page, int span)
+{
+    if (y < by || y >= by + WG_SCROLL_W || x < bx || x >= bx + bw)
+        return first;
+    if (x < bx + WG_SCROLL_W)
+        return clamp_first(first - 1, page, span);
+    if (x >= bx + bw - WG_SCROLL_W)
+        return clamp_first(first + 1, page, span);
+    const int track = bw - WG_SCROLL_W * 2;
+    if (track <= 0 || span <= page)
+        return first;
+    int pos, len;
+    thumb_of(track, first, page, span, &pos, &len);
+    const int at = x - (bx + WG_SCROLL_W);
+    if (at < pos) return clamp_first(first - page, page, span);
+    if (at >= pos + len) return clamp_first(first + page, page, span);
+    return first;
+}

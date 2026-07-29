@@ -875,6 +875,28 @@ user. "Permissions" here means the mode of the home directory, because that is
 what this system actually has to offer; it is labelled as such rather than as
 something grander.
 
+### The desktop, and things that cross windows
+
+The **clipboard** is a shared memory segment under a well-known key, exactly
+like the server's control block - which is the only cross-process channel this
+system has, and the right one, because a clipboard *is* state that outlives
+whoever filled it. It is public, and that is worth naming: with two people
+logged in, one could read the other's copied text. Fixing it needs a
+per-session clipboard, which needs a session this system does not have.
+
+**Desktop icons** cost the server about thirty lines rather than a new concept.
+A client sets `WS_FLAG_DESKTOP` and the server draws it without chrome, keeps it
+last in the order, and refuses to raise or drag it. Everything else - pixels,
+events, right-click - works as any window's does. Because it covers the screen
+it also paints the backdrop and the wallpaper, so exactly one thing is
+responsible for what is behind the windows rather than two drawing over each
+other.
+
+**Preferences** are `key value` lines in `~/.leahrc`: readable with `cat`,
+repairable with the editor, which at this size is worth more than compactness.
+Keys a program does not recognise are written back unchanged, so an older build
+cannot silently discard a newer one's settings.
+
 The compositor **sleeps** between passes rather than spinning. That is not a
 politeness: a polling loop that only ever yields stays runnable, holds the kernel
 lock over and over, and on a multiprocessor can keep another CPU out of the kernel
@@ -1333,6 +1355,9 @@ process still mapped them.
 - [ ] per-task CPU time, so the monitor can show a duty cycle not a share
 - [x] settings with categories: general, appearance, network, users, about
 - [x] the desktop's palette and wallpaper, changeable while it runs
-- [ ] a settings store, so appearance and associations survive a logout
+- [x] a clipboard, scrollbars, rubber-band selection, desktop icons
+- [x] per-user preferences in ~/.leahrc, and appearance restored from it
+- [ ] drag and drop between windows, which needs the server to carry a drag
+- [ ] a per-session clipboard, so two logged-in users cannot read each other's
 - [ ] a real type for a file, so opening one need not guess from its name
 - [ ] reflowing a terminal's scrollback when it is resized

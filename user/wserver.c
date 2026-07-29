@@ -254,10 +254,20 @@ static void draw_text(int x, int y, const char* text, uint32_t colour)
 }
 
 /* Sizes come from the server's validated copy, never from the client's fields. */
-static unsigned frame_width(int slot)  { return g_width[slot] + BORDER * 2; }
+/* A desktop window is all content: no border, no title bar, no grip. */
+static int is_desktop(int slot)
+{
+    return (g_control->windows[slot].flags & WS_FLAG_DESKTOP) != 0;
+}
+
+static unsigned frame_width(int slot)
+{
+    return is_desktop(slot) ? g_width[slot] : g_width[slot] + BORDER * 2;
+}
 static unsigned frame_height(int slot)
 {
-    return g_height[slot] + BORDER * 2 + TITLE_HEIGHT + GRIP_H;
+    return is_desktop(slot) ? g_height[slot]
+                            : g_height[slot] + BORDER * 2 + TITLE_HEIGHT + GRIP_H;
 }
 
 /* The whole window, frame included, as a rectangle - which is what damage is
@@ -297,6 +307,23 @@ static void draw_window(int slot, int focused)
 {
     struct ws_window* w = &g_control->windows[slot];
     const unsigned fw = frame_width(slot), fh = frame_height(slot);
+
+    if (is_desktop(slot)) {
+        /* Straight to the pixels: the client owns every one of them. */
+        const uint32_t* dp = g_pixels[slot];
+        if (dp == 0)
+            return;
+        const int x0 = imax(w->x, g_clip.x), y0 = imax(w->y, g_clip.y);
+        const int x1 = imin(w->x + (int)g_width[slot], g_clip.x + g_clip.w);
+        const int y1 = imin(w->y + (int)g_height[slot], g_clip.y + g_clip.h);
+        for (int y = y0; y < y1; ++y) {
+            const uint32_t* row = &dp[(unsigned long)(y - w->y) * g_width[slot]];
+            uint32_t* dst = &g_back[(unsigned)y * g_fb.width + (unsigned)x0];
+            for (int x = x0; x < x1; ++x)
+                *dst++ = row[x - w->x];
+        }
+        return;
+    }
 
     fill(w->x, w->y, fw, fh, FACE);
     bevel(w->x, w->y, fw, fh, 1);
@@ -479,6 +506,10 @@ static int window_at(int x, int y)
 
 static void raise_window(int slot)
 {
+    /* The desktop stays underneath, always. Raising it would put it over the
+     * windows it is supposed to sit behind. */
+    if (is_desktop(slot))
+        return;
     int at = 0;
     while (at < g_count && g_order[at] != slot)
         ++at;
@@ -560,11 +591,16 @@ static void reconcile(void)
             g_pixels[slot] = px;
             g_pixel_bytes[slot] = bytes;
             g_mapped_gen[slot] = w->present;
-            /* Newest on top, which is also focused. */
-            for (int i = g_count; i > 0; --i)
-                g_order[i] = g_order[i - 1];
-            g_order[0] = slot;
-            ++g_count;
+            if (is_desktop(slot)) {
+                /* Behind everything, and it stays there. */
+                g_order[g_count++] = slot;
+            } else {
+                /* Newest on top, which is also focused. */
+                for (int i = g_count; i > 0; --i)
+                    g_order[i] = g_order[i - 1];
+                g_order[0] = slot;
+                ++g_count;
+            }
             g_pixel_gen[slot] = gen;
             damage_window(slot);
         } else if (state != WS_SLOT_LIVE && known) {
@@ -671,9 +707,10 @@ static void handle_input(void)
         const int slot = window_at(x, y);
         if (slot >= 0) {
             struct ws_window* w = &g_control->windows[slot];
-            push_event(slot, WIN_EVENT_MOUSE_DOWN,
-                       x - (w->x + BORDER),
-                       y - (w->y + BORDER + TITLE_HEIGHT), 2, 0);
+            const int ox = is_desktop(slot) ? w->x : w->x + BORDER;
+            const int oy = is_desktop(slot) ? w->y
+                                            : w->y + BORDER + TITLE_HEIGHT;
+            push_event(slot, WIN_EVENT_MOUSE_DOWN, x - ox, y - oy, 2, 0);
         }
     }
     g_last_right = right;
@@ -695,7 +732,11 @@ static void handle_input(void)
             const int on_grip = x >= gx && y >= gy &&
                                 x < gx + GRIP_W && y < gy + GRIP_H;
 
-            if (on_grip) {
+            if (is_desktop(slot)) {
+                /* Everything on it is content, so a press is the client's. */
+                push_event(slot, WIN_EVENT_MOUSE_DOWN, x - w->x, y - w->y, 1, 0);
+                g_mouse_grab = slot;
+            } else if (on_grip) {
                 g_resizing = slot;
                 g_resize_start_w = (int)g_width[slot];
                 g_resize_start_h = (int)g_height[slot];

@@ -13,6 +13,7 @@
  * the filesystem that records a type.
  */
 
+#include <clipboard.h>
 #include <dialog.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +45,12 @@ static char g_path[256] = "/";
 static struct dirent g_entries[MAX_ENTRIES];
 static int g_count;
 static int g_selected = -1;
+/* Multiple selection, as a flag per row. Kept beside g_selected rather than
+ * replacing it because "the one you last clicked" and "everything marked" are
+ * genuinely different questions - opening uses the first, copying the second. */
+static char g_marked[MAX_ENTRIES];
+static int  g_band;             /* a rubber band is being dragged */
+static int  g_band_x, g_band_y, g_band_x2, g_band_y2;
 static int g_view = VIEW_ICON;
 static int g_scroll;
 static char g_status[128] = "";
@@ -134,6 +141,7 @@ static void read_dir(void)
     if (g_count < 0)
         g_count = 0;
     g_selected = -1;
+    memset(g_marked, 0, sizeof(g_marked));
     g_scroll = 0;
     snprintf(g_status, sizeof(g_status), "%d item%s", g_count,
              g_count == 1 ? "" : "s");
@@ -304,7 +312,7 @@ static void draw_icons(void)
         const int cy = top + 6 + (slot / cols) * CELL_H;
         if (cy + CELL_H > top + content_h())
             break;
-        if (i == g_selected)
+        if (i == g_selected || g_marked[i])
             wg_fill(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6, 0xB0C4DE);
         const int dir = (g_entries[i].d_type == S_IFDIR);
         if (dir)
@@ -328,7 +336,7 @@ static void draw_list(void)
         const int y = top + ROW_H + 2 + slot * ROW_H;
         if (y + ROW_H > top + content_h())
             break;
-        if (i == g_selected)
+        if (i == g_selected || g_marked[i])
             wg_fill(8, y, (int)g_w - 16, ROW_H, 0xB0C4DE);
         const int dir = (g_entries[i].d_type == S_IFDIR);
         wg_text_clipped(12, y + 1, g_entries[i].d_name, WG_INK, 280);
@@ -385,6 +393,23 @@ static void draw(void)
     if (g_view == VIEW_ICON)      draw_icons();
     else if (g_view == VIEW_LIST) draw_list();
     else                          draw_tree();
+
+    if (g_band) {
+        const int x0 = g_band_x < g_band_x2 ? g_band_x : g_band_x2;
+        const int x1 = g_band_x < g_band_x2 ? g_band_x2 : g_band_x;
+        const int y0 = g_band_y < g_band_y2 ? g_band_y : g_band_y2;
+        const int y1 = g_band_y < g_band_y2 ? g_band_y2 : g_band_y;
+        for (int x = x0; x <= x1; ++x) { wg_plot(x, y0, WG_INK); wg_plot(x, y1, WG_INK); }
+        for (int y = y0; y <= y1; ++y) { wg_plot(x0, y, WG_INK); wg_plot(x1, y, WG_INK); }
+    }
+
+    /* A vertical bar, since a directory rarely fits. */
+    {
+        const int rows = content_h() / ROW_H;
+        const int span = (g_view == VIEW_TREE) ? g_row_count : g_count;
+        wg_scrollbar_v((int)g_w - 4 - WG_SCROLL_W, content_top(), content_h(),
+                       g_scroll, rows > 0 ? rows : 1, span > 0 ? span : 1);
+    }
 
     wg_fill(0, (int)g_h - STATUS_H, (int)g_w, STATUS_H, WG_FACE);
     wg_text_clipped(8, (int)g_h - STATUS_H + 2, g_status, WG_INK, (int)g_w - 16);
@@ -526,6 +551,36 @@ static void open_selected(void)
     open_path(full, g_entries[g_selected].d_type == S_IFDIR);
 }
 
+/* Copy what is marked - one path per line, which is what a shell or an editor
+ * on the other end can actually use. */
+static void copy_marked(void)
+{
+    static char buf[CLIP_MAX];
+    int n = 0, count = 0;
+    for (int i = 0; i < g_count && n < (int)sizeof(buf) - 300; ++i) {
+        if (!g_marked[i] && i != g_selected)
+            continue;
+        char full[256];
+        join(g_path, g_entries[i].d_name, full, sizeof(full));
+        n += snprintf(&buf[n], sizeof(buf) - (unsigned)n, "%s\n", full);
+        ++count;
+    }
+    if (count == 0) {
+        snprintf(g_status, sizeof(g_status), "nothing selected");
+        return;
+    }
+    clip_put(buf, (unsigned)n);
+    snprintf(g_status, sizeof(g_status), "copied %d path%s", count,
+             count == 1 ? "" : "s");
+}
+
+static void select_all(void)
+{
+    for (int i = 0; i < g_count; ++i)
+        g_marked[i] = 1;
+    snprintf(g_status, sizeof(g_status), "selected %d", g_count);
+}
+
 static void go_up(void)
 {
     char up[256];
@@ -566,7 +621,7 @@ static void scroll_by(int delta)
     if (g_scroll < 0) g_scroll = 0;
 }
 
-static const char* const kMenu[] = { "Open", "Open with...", "-", "Refresh" };
+static const char* const kMenu[] = { "Open", "Open with...", "Copy", "Select all", "-", "Refresh" };
 
 int main(int argc, char** argv)
 {
@@ -620,7 +675,11 @@ int main(int argc, char** argv)
                     while (full[k] && k < 255) { g_opening[k] = full[k]; ++k; }
                     g_opening[k] = '\0';
                     dlg_open_with(g_opening);
+                } else if (pick == 2) {
+                    copy_marked();
                 } else if (pick == 3) {
+                    select_all();
+                } else if (pick == 5) {
                     read_dir();
                 }
                 draw();
@@ -668,11 +727,19 @@ int main(int argc, char** argv)
                     scroll_by(-1);
                 } else if (inside(&g_dnline, event.x, event.y)) {
                     scroll_by(1);
+                } else if (event.button == 1 && event.y >= content_top() &&
+                           hit_test(event.x, event.y) < 0) {
+                    /* A press on empty space starts a rubber band rather than
+                     * doing nothing. */
+                    g_band = 1;
+                    g_band_x = g_band_x2 = event.x;
+                    g_band_y = g_band_y2 = event.y;
+                    memset(g_marked, 0, sizeof(g_marked));
                 } else if (event.button == 2) {
                     const int hit = hit_test(event.x, event.y);
                     if (hit >= 0) {
                         g_selected = hit;
-                        menu_open(event.x, event.y, kMenu, 4);
+                        menu_open(event.x, event.y, kMenu, 6);
                     }
                 } else {
                     const int hit = hit_test(event.x, event.y);
@@ -685,8 +752,31 @@ int main(int argc, char** argv)
                             g_selected = hit;
                     }
                 }
+            } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_band) {
+                g_band_x2 = event.x;
+                g_band_y2 = event.y;
+                /* Mark by hit-testing the band's corners across the grid: the
+                 * views already know how to turn a point into an index, so this
+                 * needs no second layout calculation. */
+                const int x0 = g_band_x < g_band_x2 ? g_band_x : g_band_x2;
+                const int x1 = g_band_x < g_band_x2 ? g_band_x2 : g_band_x;
+                const int y0 = g_band_y < g_band_y2 ? g_band_y : g_band_y2;
+                const int y1 = g_band_y < g_band_y2 ? g_band_y2 : g_band_y;
+                memset(g_marked, 0, sizeof(g_marked));
+                for (int yy = y0; yy <= y1; yy += 4)
+                    for (int xx = x0; xx <= x1; xx += 8) {
+                        const int i = hit_test(xx, yy);
+                        if (i >= 0 && i < MAX_ENTRIES)
+                            g_marked[i] = 1;
+                    }
+            } else if (event.type == WIN_EVENT_MOUSE_UP && g_band) {
+                g_band = 0;
             } else if (event.type == WIN_EVENT_KEY) {
-                if (event.key == '\n' || event.key == '\r')
+                if (event.key == 1) {           /* ctrl+a */
+                    select_all();
+                } else if (event.key == 3) {    /* ctrl+c */
+                    copy_marked();
+                } else if (event.key == '\n' || event.key == '\r')
                     open_selected();
                 else if (event.key == 'u')
                     go_up();

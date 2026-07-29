@@ -13,6 +13,7 @@
 #include <dialog.h>
 #include <display.h>
 #include <net.h>
+#include <prefs.h>
 #include <proc.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,10 +69,38 @@ static const uint32_t kSwatch[16] = {
     0x000080, 0x0000FF, 0x800080, 0xC08040,
 };
 
+/* Written through to the user's file as well as to the running desktop, so a
+ * choice survives the session that made it. */
 static void theme_changed(void)
 {
     if (g_ws == 0)
         return;
+    __atomic_add_fetch(&g_ws->theme.generation, 1, __ATOMIC_RELEASE);
+
+    prefs_set_u32("theme.desktop", g_ws->theme.desktop);
+    prefs_set_u32("theme.face", g_ws->theme.face);
+    prefs_set_u32("theme.title", g_ws->theme.title_active);
+    prefs_set_u32("theme.cursor", g_ws->theme.cursor);
+    prefs_set_str("theme.wallpaper", (const char*)g_ws->theme.wallpaper);
+    if (prefs_save() != 0)
+        snprintf(g_note, sizeof(g_note), "changed, but could not be saved");
+}
+
+/* Put back what this user chose last time. Done once, at startup, because the
+ * server starts from its own defaults and has no idea whose desktop it is. */
+static void apply_saved_theme(void)
+{
+    if (g_ws == 0)
+        return;
+    prefs_load();
+    g_ws->theme.desktop      = prefs_get_u32("theme.desktop", g_ws->theme.desktop);
+    g_ws->theme.face         = prefs_get_u32("theme.face", g_ws->theme.face);
+    g_ws->theme.title_active = prefs_get_u32("theme.title", g_ws->theme.title_active);
+    g_ws->theme.cursor       = prefs_get_u32("theme.cursor", g_ws->theme.cursor);
+    const char* paper = prefs_get_str("theme.wallpaper", "");
+    int n = 0;
+    while (paper[n] != '\0' && n < 126) { g_ws->theme.wallpaper[n] = paper[n]; ++n; }
+    g_ws->theme.wallpaper[n] = '\0';
     __atomic_add_fetch(&g_ws->theme.generation, 1, __ATOMIC_RELEASE);
 }
 
@@ -277,7 +306,7 @@ static void draw_appearance(void)
         wg_text(SIDEBAR + 90, 242, "none - the flat colour shows", WG_DIM);
 
     wg_text_clipped(SIDEBAR + 14, 272,
-                    "appearance lasts for this desktop session only",
+                    "saved to ~/.leahrc and restored when settings next starts",
                     WG_DIM, (int)g_w - SIDEBAR - 28);
 }
 
@@ -398,6 +427,7 @@ int main(int argc, char** argv)
     const int cid = shm_open(WS_CONTROL_KEY, 0, 0);
     if (cid >= 0)
         g_ws = (struct ws_shared*)shm_map(cid);
+    apply_saved_theme();
 
     const int id = win_create(wx, wy, g_w, g_h, "Settings");
     if (id < 0) {

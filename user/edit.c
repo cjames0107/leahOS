@@ -9,6 +9,7 @@
  * Ctrl+S saves. Ctrl+Q is the window manager's and never arrives here.
  */
 
+#include <clipboard.h>
 #include <dialog.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -29,6 +30,10 @@ static unsigned  g_w = 520, g_h = 400;
 static char g_text[MAX_TEXT];
 static int  g_len;
 static int  g_caret;            /* byte offset of the insertion point */
+/* A selection is an ordered pair of offsets; anchor is where the drag began, so
+ * dragging backwards works without a special case. */
+static int  g_anchor = -1;
+static int  g_hcol;             /* first visible column, for wide lines */
 static int  g_dirty;
 static int  g_scroll;           /* first visible line */
 static char g_file[256];
@@ -148,7 +153,90 @@ static void backspace(void)
 
 static int text_rows(void)
 {
-    return ((int)g_h - TOOLBAR_H - STATUS_H - 8) / WG_GLYPH_H;
+    return ((int)g_h - TOOLBAR_H - STATUS_H - 8 - WG_SCROLL_W) / WG_GLYPH_H;
+}
+
+static int text_cols(void)
+{
+    return ((int)g_w - 16 - WG_SCROLL_W) / WG_GLYPH_W;
+}
+
+/* The selection, low offset first, or 0 length when there is none. */
+static void selection(int* from, int* to)
+{
+    if (g_anchor < 0) { *from = *to = g_caret; return; }
+    *from = g_anchor < g_caret ? g_anchor : g_caret;
+    *to   = g_anchor < g_caret ? g_caret : g_anchor;
+}
+
+/* The longest line, so the horizontal bar knows how far it can go. */
+static int widest(void)
+{
+    int w = 1;
+    for (int i = 0; i < g_lines; ++i) {
+        const int n = line_end(i) - g_line_start[i];
+        if (n > w) w = n;
+    }
+    return w;
+}
+
+/* Where in the text a point in the window lands. */
+static int offset_at(int x, int y)
+{
+    int line = g_scroll + (y - TOOLBAR_H - 4) / WG_GLYPH_H;
+    if (line < 0) line = 0;
+    if (line >= g_lines) line = g_lines - 1;
+    int col = g_hcol + (x - 8) / WG_GLYPH_W;
+    if (col < 0) col = 0;
+    int at = g_line_start[line] + col;
+    if (at > line_end(line)) at = line_end(line);
+    return at;
+}
+
+static void delete_selection(void)
+{
+    int from, to;
+    selection(&from, &to);
+    if (from == to)
+        return;
+    for (int i = from; i < g_len - (to - from); ++i)
+        g_text[i] = g_text[i + (to - from)];
+    g_len -= (to - from);
+    g_caret = from;
+    g_anchor = -1;
+    g_dirty = 1;
+    relines();
+}
+
+static void copy_selection(int cut)
+{
+    int from, to;
+    selection(&from, &to);
+    if (from == to) {
+        snprintf(g_status, sizeof(g_status), "nothing selected");
+        return;
+    }
+    clip_put(&g_text[from], (unsigned)(to - from));
+    snprintf(g_status, sizeof(g_status), "%s %d bytes",
+             cut ? "cut" : "copied", to - from);
+    if (cut)
+        delete_selection();
+}
+
+static void insert(char c);
+
+static void paste(void)
+{
+    static char buf[CLIP_MAX];
+    const int n = clip_get(buf, sizeof(buf));
+    if (n <= 0) {
+        snprintf(g_status, sizeof(g_status), "the clipboard is empty");
+        return;
+    }
+    delete_selection();
+    for (int i = 0; i < n; ++i)
+        insert(buf[i]);
+    snprintf(g_status, sizeof(g_status), "pasted %d bytes", n);
 }
 
 /* Keep the caret on screen: an editor that types off the bottom is unusable. */
@@ -188,9 +276,21 @@ static void draw(void)
         const int begin = g_line_start[line], end = line_end(line);
         const int y = top + 4 + r * WG_GLYPH_H;
 
+        /* Highlight first, so the glyphs sit on top of it. */
+        int from, to;
+        selection(&from, &to);
+        if (to > begin && from < end) {
+            const int a = (from > begin ? from : begin) - begin - g_hcol;
+            const int b = (to < end ? to : end) - begin - g_hcol;
+            const int x0 = 8 + (a < 0 ? 0 : a) * WG_GLYPH_W;
+            const int x1 = 8 + (b < 0 ? 0 : b) * WG_GLYPH_W;
+            if (x1 > x0)
+                wg_fill(x0, y, x1 - x0, WG_GLYPH_H, 0xB0C4DE);
+        }
+
         char buf[256];
         int n = 0;
-        for (int i = begin; i < end && n < (int)sizeof(buf) - 1; ++i)
+        for (int i = begin + g_hcol; i < end && n < (int)sizeof(buf) - 1; ++i)
             buf[n++] = g_text[i] == '\t' ? ' ' : g_text[i];
         buf[n] = '\0';
         wg_text(8, y, buf, WG_INK);
@@ -198,19 +298,28 @@ static void draw(void)
         /* The caret, drawn as a bar between characters rather than over one, so
          * it is visible at the end of a line as well as inside it. */
         if (line == caret_line) {
-            const int col = g_caret - begin;
-            wg_fill(8 + col * WG_GLYPH_W, y, 1, WG_GLYPH_H, WG_ACCENT);
+            const int col = g_caret - begin - g_hcol;
+            if (col >= 0)
+                wg_fill(8 + col * WG_GLYPH_W, y, 1, WG_GLYPH_H, WG_ACCENT);
         }
     }
 
+    /* The bars sit inside the sunken well, along its right and bottom edges. */
+    wg_scrollbar_v((int)g_w - 4 - WG_SCROLL_W, top, h - WG_SCROLL_W,
+                   g_scroll, rows, g_lines);
+    wg_scrollbar_h(4, top + h - WG_SCROLL_W, (int)g_w - 8 - WG_SCROLL_W,
+                   g_hcol, text_cols(), widest());
+
     wg_fill(0, (int)g_h - STATUS_H, (int)g_w, STATUS_H, WG_FACE);
     char line[160];
-    snprintf(line, sizeof(line), "line %d of %d   ctrl+s saves",
+    snprintf(line, sizeof(line), "line %d of %d   ctrl+a c v s",
              caret_line + 1, g_lines);
     wg_text_clipped(8, (int)g_h - STATUS_H + 2, line, WG_INK, 260);
     wg_text_clipped(280, (int)g_h - STATUS_H + 2, g_status, WG_DIM,
                     (int)g_w - 290);
 }
+
+static const char* const kMenu[] = { "Copy", "Cut", "Paste", "Select all" };
 
 int main(int argc, char** argv)
 {
@@ -251,6 +360,18 @@ int main(int argc, char** argv)
                 win_destroy(id);
                 return 0;
             }
+            if (menu_active() && event.type != WIN_EVENT_RESIZE) {
+                switch (menu_event(&event)) {
+                case 0: copy_selection(0); break;
+                case 1: copy_selection(1); break;
+                case 2: paste(); follow_caret(); break;
+                case 3: g_anchor = 0; g_caret = g_len; break;
+                }
+                draw();
+                menu_draw();
+                win_present(id);
+                continue;
+            }
             if (dlg_active() && event.type != WIN_EVENT_RESIZE) {
                 if (dlg_event(&event) == DLG_ACCEPT)
                     save_to(dlg_path());
@@ -274,31 +395,61 @@ int main(int argc, char** argv)
                     if (g_scroll > 0) --g_scroll;
                 } else if (inside(&g_down, event.x, event.y)) {
                     if (g_scroll + 1 < g_lines) ++g_scroll;
+                } else if (event.x >= (int)g_w - 4 - WG_SCROLL_W) {
+                    g_scroll = wg_scroll_hit_v(event.x, event.y,
+                        (int)g_w - 4 - WG_SCROLL_W, TOOLBAR_H,
+                        (int)g_h - TOOLBAR_H - STATUS_H - WG_SCROLL_W,
+                        g_scroll, text_rows(), g_lines);
+                } else if (event.y >= (int)g_h - STATUS_H - WG_SCROLL_W &&
+                           event.y < (int)g_h - STATUS_H) {
+                    g_hcol = wg_scroll_hit_h(event.x, event.y, 4,
+                        (int)g_h - STATUS_H - WG_SCROLL_W,
+                        (int)g_w - 8 - WG_SCROLL_W,
+                        g_hcol, text_cols(), widest());
                 } else if (event.y >= TOOLBAR_H &&
                            event.y < (int)g_h - STATUS_H) {
-                    /* Put the caret where it was clicked, clamped to the end of
-                     * that line so a click past the text lands sensibly. */
-                    const int line = g_scroll + (event.y - TOOLBAR_H - 4) / WG_GLYPH_H;
-                    if (line >= 0 && line < g_lines) {
-                        const int col = (event.x - 8) / WG_GLYPH_W;
-                        int at = g_line_start[line] + (col < 0 ? 0 : col);
-                        if (at > line_end(line))
-                            at = line_end(line);
-                        g_caret = at;
+                    if (event.button == 2) {
+                        menu_open(event.x, event.y, kMenu, 4);
+                    } else {
+                        /* A click starts a selection; the drag extends it. */
+                        g_caret = offset_at(event.x, event.y);
+                        g_anchor = g_caret;
                     }
                 }
+            } else if (event.type == WIN_EVENT_MOUSE_MOVE) {
+                if (g_anchor >= 0 && event.y >= TOOLBAR_H &&
+                    event.y < (int)g_h - STATUS_H - WG_SCROLL_W)
+                    g_caret = offset_at(event.x, event.y);
             } else if (event.type == WIN_EVENT_KEY) {
                 const char c = (char)event.key;
                 if (c == 19) {                  /* ctrl+s */
                     save();
+                } else if (c == 1) {            /* ctrl+a */
+                    g_anchor = 0;
+                    g_caret = g_len;
+                    snprintf(g_status, sizeof(g_status), "selected all");
+                } else if (c == 3) {            /* ctrl+c */
+                    copy_selection(0);
+                } else if (c == 24) {           /* ctrl+x */
+                    copy_selection(1);
+                } else if (c == 22) {           /* ctrl+v */
+                    paste();
+                    follow_caret();
                 } else if (c == '\b' || c == 0x7F) {
+                    if (g_anchor >= 0) { delete_selection(); follow_caret(); }
+                    else {
                     backspace();
                     follow_caret();
+                    }
                 } else if (c == '\n' || c == '\r') {
                     insert('\n');
                     follow_caret();
                 } else if ((unsigned char)c >= 32) {
+                    /* Typing over a selection replaces it, as it should. */
+                    if (g_anchor >= 0 && g_anchor != g_caret)
+                        delete_selection();
                     insert(c);
+                    g_anchor = -1;
                     follow_caret();
                 }
             } else {
@@ -306,6 +457,7 @@ int main(int argc, char** argv)
             }
             draw();
             dlg_draw((int)g_w, (int)g_h);
+            menu_draw();
             win_present(id);
         }
         msleep(15);

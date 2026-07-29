@@ -30,6 +30,10 @@ void win_size(int id, unsigned* width, unsigned* height);
 /* Refuse to be resized below this. Defaults to 64x32. */
 void win_set_min_size(int id, unsigned width, unsigned height);
 
+/* Make this the desktop: no chrome, always behind every other window, and not
+ * draggable. Call before drawing; see WS_FLAG_DESKTOP in <wproto.h>. */
+void win_set_desktop(int id);
+
 /* Show what has been drawn. */
 void win_present(int id);
 

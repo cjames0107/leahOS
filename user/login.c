@@ -52,14 +52,16 @@ static void session(void)
 {
     if (win_server_running()) {
         printf("starting the desktop - the terminal window is your shell.\n");
+        /* The desktop first, so it is at the back before anything else opens. */
+        char* desk[]   = { "desktop", 0 };
         char* browse[] = { "browse", "40", "40", 0 };
         char* term[]   = { "term", "60", "300", 0 };
         char* setts[]  = { "settings", "430", "60", 0 };
-        const char* which[] = { "/BIN/BROWSE.ELF", "/BIN/TERM.ELF",
-                                "/BIN/SETTINGS.ELF" };
-        char** argv[] = { browse, term, setts };
+        const char* which[] = { "/BIN/DESKTOP.ELF", "/BIN/BROWSE.ELF",
+                                "/BIN/TERM.ELF", "/BIN/SETTINGS.ELF" };
+        char** argv[] = { desk, browse, term, setts };
         int started = 0;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             const int pid = fork();
             if (pid == 0) {
                 execve(which[i], argv[i], 0);

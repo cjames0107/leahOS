@@ -42,6 +42,15 @@
 #define WS_EVENT_SLOTS 32
 #define WS_TITLE_LEN   32
 
+/* Window flags, set by the client before the slot goes live.
+ *
+ * WS_FLAG_DESKTOP is what makes desktop icons possible without teaching the
+ * server about them: the window is drawn without chrome, never raises above
+ * anything, and cannot be dragged or resized. It is a place for a client to
+ * draw on rather than a window in the usual sense, and everything else about it
+ * - its pixels, its events - works exactly as any other window does. */
+#define WS_FLAG_DESKTOP 1u
+
 /* Slot states. A client walks 0 -> CLAIMED -> LIVE and finally back to FREE. */
 #define WS_SLOT_FREE    0u
 #define WS_SLOT_CLAIMED 1u   /* won by a client, not yet filled in           */
@@ -100,6 +109,7 @@ struct ws_window {
     volatile uint32_t resize_seq;   /* server bumps to request a size          */
     volatile uint32_t pixels_gen;   /* client bumps once the new segment is up  */
     volatile uint32_t min_width, min_height;  /* the client's floor            */
+    volatile uint32_t flags;
 
     /* Event ring. The server writes at head, the client reads at tail. One
      * writer and one reader, so no lock is needed - only the ordering of the

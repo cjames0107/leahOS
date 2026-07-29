@@ -45,3 +45,22 @@ void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w);
 void wg_button(int x, int y, int w, int h, const char* label, int down);
 
 #endif /* _WIDGET_H */
+
+/* --- scrollbars -----------------------------------------------------------
+ *
+ * Drawn and hit-tested, but the scroll position stays the caller's: a widget
+ * that owned it would have to be told about every change of content, and the
+ * caller already knows. `span` is the whole extent, `page` how much is visible.
+ */
+#define WG_SCROLL_W 14
+
+void wg_scrollbar_v(int x, int y, int h, int first, int page, int span);
+void wg_scrollbar_h(int x, int y, int w, int first, int page, int span);
+
+/* Where a click on a bar wants to go: returns the new `first`, or the old one
+ * when the click was not on the bar. Clicking the trough pages; clicking an
+ * arrow steps. */
+int wg_scroll_hit_v(int x, int y, int bx, int by, int bh,
+                    int first, int page, int span);
+int wg_scroll_hit_h(int x, int y, int bx, int by, int bw,
+                    int first, int page, int span);
