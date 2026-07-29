@@ -6,6 +6,14 @@
 
 namespace keyboard {
 
+// Modifier bits, as reported by modifiers(). Mirrored in <display.h>.
+constexpr u32 kModShift = 1u << 0;
+constexpr u32 kModCtrl  = 1u << 1;
+
+// Which modifiers are held right now. A click needs this; a keystroke does not,
+// because its modifiers are already folded into the character.
+u32 modifiers();
+
 void init();
 
 // Feed a scancode through the decoder as though it had arrived on IRQ 1.

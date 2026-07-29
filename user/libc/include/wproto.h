@@ -95,7 +95,13 @@ struct win_event {
                            context menu; the server does not raise or focus the
                            window for one */
     uint32_t key;       /* the character, for key events */
+    /* What was held when this happened. Only meaningful for a press: a key
+     * event's modifiers are already folded into `key`. WIN_MOD_* below. */
+    uint32_t modifiers;
 };
+
+#define WIN_MOD_SHIFT 1u
+#define WIN_MOD_CTRL  2u
 
 struct ws_window {
     volatile uint32_t state;

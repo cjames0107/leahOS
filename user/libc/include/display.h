@@ -27,7 +27,11 @@ struct input_state {
     int32_t mouse_y;
     int32_t buttons;            /* 1 left, 2 right, 4 middle */
     int32_t key;                /* one character, or 0 when nothing is waiting */
+    int32_t modifiers;          /* MOD_SHIFT, MOD_CTRL - held now, for clicks */
 };
+
+#define MOD_SHIFT 1
+#define MOD_CTRL  2
 
 int input_poll(struct input_state* out);
 

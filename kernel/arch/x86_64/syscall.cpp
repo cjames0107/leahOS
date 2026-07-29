@@ -831,7 +831,7 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         // key}. The key is 0 when nothing is waiting, so a server can poll this
         // in its own loop without blocking on either device.
         if (scheduler::current_uid() != 0 ||
-            !user_range_ok(frame->rdi, sizeof(i32) * 4)) {
+            !user_range_ok(frame->rdi, sizeof(i32) * 5)) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
@@ -842,6 +842,9 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         out[2] = (state.left ? 1 : 0) | (state.right ? 2 : 0) |
                  (state.middle ? 4 : 0);
         out[3] = static_cast<i32>(static_cast<u8>(keyboard::read()));
+        /* What is held *now*, which is what a click needs: a keystroke already
+         * carries its modifiers in the character it produced. */
+        out[4] = static_cast<i32>(keyboard::modifiers());
         frame->rax = 0;
         break;
     }

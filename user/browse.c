@@ -14,6 +14,7 @@
  */
 
 #include <clipboard.h>
+#include <fcntl.h>
 #include <dialog.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +52,12 @@ static int g_selected = -1;
 static char g_marked[MAX_ENTRIES];
 static int  g_band;             /* a rubber band is being dragged */
 static int  g_bar_drag;         /* the scrollbar's thumb is being dragged */
+/* Where a range selection counts from. Shift extends from the last plain click
+ * rather than from the last thing touched, so shift-clicking twice re-ranges
+ * from the same place instead of creeping. */
+static int  g_anchor = -1;
+static int  g_blank_menu;   /* which menu is showing */
+static int  g_new_kind = -1; /* 0 file, 1 folder, once the name is chosen */
 static int  g_band_x, g_band_y, g_band_x2, g_band_y2;
 static int g_view = VIEW_ICON;
 /* Measured in pixels down the content, not in items.
@@ -628,6 +635,43 @@ static void copy_marked(void)
              count == 1 ? "" : "s");
 }
 
+/* Click, ctrl-click and shift-click, which between them are the whole of how
+ * anyone expects to pick things out of a list. */
+static void select_at(int hit, uint32_t mods)
+{
+    const int limit = (g_view == VIEW_TREE) ? g_row_count : g_count;
+    if (hit < 0 || hit >= limit)
+        return;
+
+    if (mods & WIN_MOD_CTRL) {
+        /* Add or remove one, and leave the rest alone. */
+        g_marked[hit] = (char)!g_marked[hit];
+        g_selected = hit;
+        g_anchor = hit;
+    } else if ((mods & WIN_MOD_SHIFT) && g_anchor >= 0) {
+        /* Everything between the anchor and here, replacing what was marked -
+         * the anchor deliberately stays put so a second shift-click re-ranges
+         * from the same origin rather than walking. */
+        memset(g_marked, 0, sizeof(g_marked));
+        const int a = g_anchor < hit ? g_anchor : hit;
+        const int b = g_anchor < hit ? hit : g_anchor;
+        for (int i = a; i <= b && i < MAX_ENTRIES; ++i)
+            g_marked[i] = 1;
+        g_selected = hit;
+    } else {
+        /* A plain click starts again, and sets the anchor a later shift-click
+         * will measure from. */
+        memset(g_marked, 0, sizeof(g_marked));
+        g_marked[hit] = 1;
+        g_selected = hit;
+        g_anchor = hit;
+    }
+    int n = 0;
+    for (int i = 0; i < limit && i < MAX_ENTRIES; ++i)
+        n += g_marked[i] ? 1 : 0;
+    snprintf(g_status, sizeof(g_status), "%d selected", n);
+}
+
 static void select_all(void)
 {
     for (int i = 0; i < g_count; ++i)
@@ -672,7 +716,16 @@ static void scroll_by(int steps)
     scroll_to(g_scroll + steps * scroll_step());
 }
 
-static const char* const kMenu[] = { "Open", "Open with...", "Copy", "Select all", "-", "Refresh" };
+static const char* const kMenu[] = {
+    "Open", "Open with...", "Copy", "Select all", "-", "Refresh"
+};
+
+/* The menu for the empty space around the items. Right-clicking nothing is
+ * still a question - "what can I do here?" - and answering it with silence is
+ * the difference between a window and a picture of one. */
+static const char* const kBlankMenu[] = {
+    "New file", "New folder", "-", "Paste", "Select all", "-", "Refresh"
+};
 
 int main(int argc, char** argv)
 {
@@ -707,6 +760,36 @@ int main(int argc, char** argv)
             }
             if (menu_active() && event.type != WIN_EVENT_RESIZE) {
                 const int pick = menu_event(&event);
+                if (g_blank_menu) {
+                    char full[300];
+                    if (pick == 0 || pick == 1) {
+                        /* Ask for the name rather than inventing one: an
+                         * "untitled" that has to be renamed immediately is not
+                         * a convenience. */
+                        dlg_save(g_path, pick == 0 ? "untitled.txt" : "folder");
+                        g_new_kind = pick;
+                    } else if (pick == 3) {
+                        static char buf[CLIP_MAX];
+                        if (clip_get(buf, sizeof(buf)) > 0)
+                            snprintf(g_status, sizeof(g_status),
+                                     "clipboard holds: %.60s", buf);
+                        else
+                            snprintf(g_status, sizeof(g_status),
+                                     "the clipboard is empty");
+                    } else if (pick == 4) {
+                        select_all();
+                    } else if (pick == 6) {
+                        read_dir();
+                    }
+                    (void)full;
+                    if (pick != -1)
+                        g_blank_menu = 0;
+                    draw();
+                    dlg_draw((int)g_w, (int)g_h);
+                    menu_draw();
+                    win_present(id);
+                    continue;
+                }
                 if (pick == 0) {
                     open_selected();
                 } else if (pick == 1 && g_selected >= 0) {
@@ -740,12 +823,39 @@ int main(int argc, char** argv)
                 continue;
             }
             if (dlg_active() && event.type != WIN_EVENT_RESIZE) {
-                if (dlg_event(&event) == DLG_ACCEPT) {
+                /* Once, and once only: the dialogue closes itself on accept,
+                 * so asking it twice would leave the second caller looking at
+                 * a dialogue that is no longer there. */
+                const int answer = dlg_event(&event);
+                if (answer == DLG_ACCEPT && g_new_kind >= 0) {
+                    const char* where = dlg_path();
+                    if (g_new_kind == 1) {
+                        if (mkdir(where) < 0)
+                            snprintf(g_status, sizeof(g_status),
+                                     "could not create %s", where);
+                        else
+                            snprintf(g_status, sizeof(g_status), "created %s", where);
+                    } else {
+                        const int fd = open(where, O_WRONLY | O_CREAT | O_TRUNC);
+                        if (fd < 0)
+                            snprintf(g_status, sizeof(g_status),
+                                     "could not create %s", where);
+                        else {
+                            close(fd);
+                            snprintf(g_status, sizeof(g_status), "created %s", where);
+                        }
+                    }
+                    g_new_kind = -1;
+                    read_dir();
+                }
+                else if (answer == DLG_ACCEPT) {
                     const char* app = dlg_path();
                     /* "Run it" hands back the file itself: then it is the
                      * program, not an argument to one. */
                     const int itself = (strcmp(app, g_opening) == 0);
                     launch(app, itself ? 0 : g_opening);
+                    /* Remembered by extension, so ticking the box on one .txt
+                     * settles every .txt - see remember(). */
                     if (dlg_always() && !itself)
                         remember(g_opening, app);
                     snprintf(g_status, sizeof(g_status), "opened with %s", app);
@@ -807,18 +917,25 @@ int main(int argc, char** argv)
                 } else if (event.button == 2) {
                     const int hit = hit_test(event.x, event.y);
                     if (hit >= 0) {
-                        g_selected = hit;
+                        if (!g_marked[hit])
+                            select_at(hit, 0);
                         menu_open(event.x, event.y, kMenu, 6);
+                    } else {
+                        menu_open(event.x, event.y, kBlankMenu, 7);
+                        g_blank_menu = 1;
                     }
                 } else {
                     const int hit = hit_test(event.x, event.y);
                     if (hit >= 0) {
                         /* Click to select, click again to open - the same
-                         * gesture in every view, and no timing to get wrong. */
-                        if (hit == g_selected)
+                         * gesture in every view, and no timing to get wrong.
+                         * A modified click is always a selection, never an
+                         * open: ctrl-clicking a thing twice must not launch it. */
+                        const uint32_t m = event.modifiers;
+                        if (hit == g_selected && !(m & (WIN_MOD_CTRL | WIN_MOD_SHIFT)))
                             open_selected();
                         else
-                            g_selected = hit;
+                            select_at(hit, m);
                     }
                 }
             } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_bar_drag) {

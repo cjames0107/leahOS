@@ -36,6 +36,8 @@ static struct ws_shared* g_ws;
 static struct dirent g_items[MAX_ICONS];
 static int g_n;
 static int g_sel = -1;
+static char g_marked[MAX_ICONS];
+static int  g_anchor = -1;
 static char g_dir[128];
 static char g_note[96] = "";
 
@@ -124,7 +126,7 @@ static void draw(void)
         const int y = 12 + (i / cols) * CELL_H;
         if (y + CELL_H > (int)g_h)
             break;
-        if (i == g_sel)
+        if (i == g_sel || g_marked[i])
             wg_fill(x - 2, y - 2, CELL_W - 6, CELL_H - 12, 0x4060A0);
         if (g_items[i].d_type == S_IFDIR)
             folder_icon(x + 22, y);
@@ -238,14 +240,32 @@ int main(void)
                         hit = i;
                 }
                 if (e.button == 2) {
-                    g_sel = hit;
+                    /* A menu either way: right-clicking bare desktop is still a
+                     * question worth answering. */
+                    if (hit >= 0 && !g_marked[hit]) { g_sel = hit; g_anchor = hit; }
                     menu_open(e.x, e.y, kMenu, 8);
                 } else if (hit >= 0) {
-                    if (hit == g_sel)
-                        open_selected();
-                    else
+                    const uint32_t m = e.modifiers;
+                    if (m & WIN_MOD_CTRL) {
+                        g_marked[hit] = (char)!g_marked[hit];
+                        g_sel = hit; g_anchor = hit;
+                    } else if ((m & WIN_MOD_SHIFT) && g_anchor >= 0) {
+                        memset(g_marked, 0, sizeof(g_marked));
+                        const int a = g_anchor < hit ? g_anchor : hit;
+                        const int b = g_anchor < hit ? hit : g_anchor;
+                        for (int i = a; i <= b && i < MAX_ICONS; ++i)
+                            g_marked[i] = 1;
                         g_sel = hit;
+                    } else if (hit == g_sel) {
+                        open_selected();
+                    } else {
+                        memset(g_marked, 0, sizeof(g_marked));
+                        g_marked[hit] = 1;
+                        g_sel = hit; g_anchor = hit;
+                    }
                 } else {
+                    /* Clicking the bare desktop lets go of everything. */
+                    memset(g_marked, 0, sizeof(g_marked));
                     g_sel = -1;
                 }
             } else if (e.type == WIN_EVENT_KEY) {

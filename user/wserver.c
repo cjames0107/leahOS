@@ -473,6 +473,8 @@ static void erase_cursor(void)
 
 /* --- events -------------------------------------------------------------- */
 
+static uint32_t g_mods;         /* what was held at the last input poll */
+
 static void push_event(int slot, uint32_t type, int x, int y,
                        uint32_t button, uint32_t key)
 {
@@ -489,6 +491,7 @@ static void push_event(int slot, uint32_t type, int x, int y,
     e->y = y;
     e->button = button;
     e->key = key;
+    e->modifiers = g_mods;
     __atomic_store_n(&w->head, head + 1, __ATOMIC_RELEASE);
 }
 
@@ -674,6 +677,7 @@ static void handle_input(void)
     if (input_poll(&in) != 0)
         return;
 
+    g_mods = (uint32_t)in.modifiers;
     const int before_x = g_cursor_x, before_y = g_cursor_y;
 
     int x = in.mouse_x, y = in.mouse_y;

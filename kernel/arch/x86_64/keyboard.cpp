@@ -300,4 +300,12 @@ char read_blocking()
     return read();
 }
 
+/* The live modifier state, for anything that needs to know what was held while
+ * something else happened - a click, not a keystroke. A keystroke already
+ * carries its modifiers in the character it produced; a mouse press cannot. */
+u32 modifiers()
+{
+    return (g_shift ? kModShift : 0u) | (g_ctrl ? kModCtrl : 0u);
+}
+
 } // namespace keyboard
