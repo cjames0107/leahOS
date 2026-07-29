@@ -107,6 +107,19 @@ constexpr char kShifted[128] = {
 
 bool g_shift = false;
 bool g_ctrl  = false;
+// The arrows and the other grey keys arrive as 0xE0 then an ordinary code, so
+// the byte after the prefix has to be read in a different table from the one a
+// plain scancode uses - 0x48 is 'up' after a prefix and the numeric keypad's 8
+// without it.
+bool g_extended = false;
+
+// Delivered as control characters in the range the Ctrl+letter mapping does not
+// use, so they travel through read() and the window protocol without needing a
+// wider key type. Mirrored in user/libc/include/wproto.h.
+constexpr char kUp    = 0x1C;
+constexpr char kDown  = 0x1D;
+constexpr char kLeft  = 0x1E;
+constexpr char kRight = 0x1F;
 bool g_caps  = false;
 
 // Power-of-two size so the wrap is a mask rather than a modulo.
@@ -129,6 +142,33 @@ void push(char c)
 // 8042 in the picture.
 void handle_scancode(u8 scancode)
 {
+    /* The arrows and the other grey keys arrive as 0xE0 then an ordinary code.
+     * The byte after the prefix means something different from the same byte
+     * without one - 0x48 is 'up' after a prefix and the keypad's 8 without -
+     * so it has to be decoded here rather than falling into the tables below. */
+    if (scancode == 0xE0) {
+        g_extended = true;
+        return;
+    }
+    if (g_extended) {
+        g_extended = false;
+        if ((scancode & kReleaseFlag) == 0) {
+            char c = 0;
+            switch (scancode) {
+            case 0x48: c = kUp;    break;
+            case 0x50: c = kDown;  break;
+            case 0x4B: c = kLeft;  break;
+            case 0x4D: c = kRight; break;
+            default: break;
+            }
+            if (c != 0) {
+                push(c);
+                scheduler::wake(scheduler::kKeyboardChannel);
+            }
+        }
+        return;
+    }
+
     if (scancode & kReleaseFlag) {
         const u8 released = static_cast<u8>(scancode & ~kReleaseFlag);
         if (released == kScancodeLeftShift || released == kScancodeRightShift)

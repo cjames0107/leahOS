@@ -64,3 +64,13 @@ int wg_scroll_hit_v(int x, int y, int bx, int by, int bh,
                     int first, int page, int span);
 int wg_scroll_hit_h(int x, int y, int bx, int by, int bw,
                     int first, int page, int span);
+
+/* Whether a point is on a bar's thumb, so a caller can begin a drag. */
+int wg_scroll_on_thumb_v(int y, int by, int bh, int first, int page, int span);
+int wg_scroll_on_thumb_h(int x, int bx, int bw, int first, int page, int span);
+
+/* Where a drag to this coordinate puts `first`. The thumb follows the pointer
+ * rather than the pointer following the thumb, which is what makes a long list
+ * usable. */
+int wg_scroll_drag_v(int y, int by, int bh, int page, int span);
+int wg_scroll_drag_h(int x, int bx, int bw, int page, int span);

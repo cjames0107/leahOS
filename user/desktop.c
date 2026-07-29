@@ -136,7 +136,9 @@ static void draw(void)
         wg_text_clipped(x, y + 36, g_items[i].d_name, WG_PAPER, CELL_W - 10);
     }
 
-    wg_text(10, (int)g_h - 18, g_note, WG_PAPER);
+    /* Nothing is written on the desktop itself. A status line here is a caption
+     * on a backdrop: it belongs to no window, cannot be dismissed, and is in
+     * the way of the one thing the desktop is for. */
 }
 
 static void launch(const char* app, const char* doc)
@@ -247,8 +249,15 @@ int main(void)
                     g_sel = -1;
                 }
             } else if (e.type == WIN_EVENT_KEY) {
+                const int cols = ((int)g_w - 16) / CELL_W;
                 if (e.key == '\n' || e.key == '\r') open_selected();
                 else if (e.key == 'r') rescan();
+                else if (e.key == WIN_KEY_RIGHT && g_sel + 1 < g_n) ++g_sel;
+                else if (e.key == WIN_KEY_LEFT && g_sel > 0) --g_sel;
+                else if (e.key == WIN_KEY_DOWN && g_sel + cols < g_n)
+                    g_sel += cols;
+                else if (e.key == WIN_KEY_UP && g_sel - cols >= 0)
+                    g_sel -= cols;
             } else {
                 continue;
             }

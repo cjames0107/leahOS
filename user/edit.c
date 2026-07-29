@@ -34,6 +34,7 @@ static int  g_caret;            /* byte offset of the insertion point */
  * dragging backwards works without a special case. */
 static int  g_anchor = -1;
 static int  g_hcol;             /* first visible column, for wide lines */
+static int  g_bar_v, g_bar_h;   /* which thumb, if either, is being dragged */
 static int  g_dirty;
 static int  g_scroll;           /* first visible line */
 static char g_file[256];
@@ -395,17 +396,26 @@ int main(int argc, char** argv)
                     if (g_scroll > 0) --g_scroll;
                 } else if (inside(&g_down, event.x, event.y)) {
                     if (g_scroll + 1 < g_lines) ++g_scroll;
-                } else if (event.x >= (int)g_w - 4 - WG_SCROLL_W) {
-                    g_scroll = wg_scroll_hit_v(event.x, event.y,
-                        (int)g_w - 4 - WG_SCROLL_W, TOOLBAR_H,
-                        (int)g_h - TOOLBAR_H - STATUS_H - WG_SCROLL_W,
-                        g_scroll, text_rows(), g_lines);
+                } else if (event.x >= (int)g_w - 4 - WG_SCROLL_W &&
+                           event.y >= TOOLBAR_H) {
+                    const int bh = (int)g_h - TOOLBAR_H - STATUS_H - WG_SCROLL_W;
+                    if (wg_scroll_on_thumb_v(event.y, TOOLBAR_H, bh, g_scroll,
+                                             text_rows(), g_lines))
+                        g_bar_v = 1;
+                    else
+                        g_scroll = wg_scroll_hit_v(event.x, event.y,
+                            (int)g_w - 4 - WG_SCROLL_W, TOOLBAR_H, bh,
+                            g_scroll, text_rows(), g_lines);
                 } else if (event.y >= (int)g_h - STATUS_H - WG_SCROLL_W &&
                            event.y < (int)g_h - STATUS_H) {
-                    g_hcol = wg_scroll_hit_h(event.x, event.y, 4,
-                        (int)g_h - STATUS_H - WG_SCROLL_W,
-                        (int)g_w - 8 - WG_SCROLL_W,
-                        g_hcol, text_cols(), widest());
+                    const int bw = (int)g_w - 8 - WG_SCROLL_W;
+                    if (wg_scroll_on_thumb_h(event.x, 4, bw, g_hcol,
+                                             text_cols(), widest()))
+                        g_bar_h = 1;
+                    else
+                        g_hcol = wg_scroll_hit_h(event.x, event.y, 4,
+                            (int)g_h - STATUS_H - WG_SCROLL_W, bw,
+                            g_hcol, text_cols(), widest());
                 } else if (event.y >= TOOLBAR_H &&
                            event.y < (int)g_h - STATUS_H) {
                     if (event.button == 2) {
@@ -416,6 +426,18 @@ int main(int argc, char** argv)
                         g_anchor = g_caret;
                     }
                 }
+            } else if (event.type == WIN_EVENT_MOUSE_UP) {
+                g_bar_v = g_bar_h = 0;
+                /* A click that selected nothing means nothing is selected. */
+                if (g_anchor == g_caret)
+                    g_anchor = -1;
+            } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_bar_v) {
+                g_scroll = wg_scroll_drag_v(event.y, TOOLBAR_H,
+                    (int)g_h - TOOLBAR_H - STATUS_H - WG_SCROLL_W,
+                    text_rows(), g_lines);
+            } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_bar_h) {
+                g_hcol = wg_scroll_drag_h(event.x, 4,
+                    (int)g_w - 8 - WG_SCROLL_W, text_cols(), widest());
             } else if (event.type == WIN_EVENT_MOUSE_MOVE) {
                 if (g_anchor >= 0 && event.y >= TOOLBAR_H &&
                     event.y < (int)g_h - STATUS_H - WG_SCROLL_W)
@@ -424,6 +446,26 @@ int main(int argc, char** argv)
                 const char c = (char)event.key;
                 if (c == 19) {                  /* ctrl+s */
                     save();
+                } else if (c == WIN_KEY_UP || c == WIN_KEY_DOWN ||
+                           c == WIN_KEY_LEFT || c == WIN_KEY_RIGHT) {
+                    /* Arrows move the caret and drop any selection, which is
+                     * what an unshifted arrow means everywhere. */
+                    const int line = line_of(g_caret);
+                    if (c == WIN_KEY_LEFT && g_caret > 0) --g_caret;
+                    else if (c == WIN_KEY_RIGHT && g_caret < g_len) ++g_caret;
+                    else if (c == WIN_KEY_UP && line > 0) {
+                        const int col = g_caret - g_line_start[line];
+                        const int end = line_end(line - 1);
+                        g_caret = g_line_start[line - 1] + col;
+                        if (g_caret > end) g_caret = end;
+                    } else if (c == WIN_KEY_DOWN && line + 1 < g_lines) {
+                        const int col = g_caret - g_line_start[line];
+                        const int end = line_end(line + 1);
+                        g_caret = g_line_start[line + 1] + col;
+                        if (g_caret > end) g_caret = end;
+                    }
+                    g_anchor = -1;
+                    follow_caret();
                 } else if (c == 1) {            /* ctrl+a */
                     g_anchor = 0;
                     g_caret = g_len;

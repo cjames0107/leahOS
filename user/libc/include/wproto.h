@@ -74,6 +74,13 @@
  * already has. */
 #define WIN_KEY_CLOSE 0x11
 
+/* The arrows, as the console driver delivers them - control characters chosen
+ * from the range Ctrl+letter does not occupy, so a key event stays one byte. */
+#define WIN_KEY_UP    0x1C
+#define WIN_KEY_DOWN  0x1D
+#define WIN_KEY_LEFT  0x1E
+#define WIN_KEY_RIGHT 0x1F
+
 /* The window has been resized. x and y carry the new content width and height;
  * the pixel buffer has already been replaced, so re-fetch it with win_map and
  * redraw everything - the new one starts blank. */

@@ -50,6 +50,7 @@ static int g_selected = -1;
  * genuinely different questions - opening uses the first, copying the second. */
 static char g_marked[MAX_ENTRIES];
 static int  g_band;             /* a rubber band is being dragged */
+static int  g_bar_drag;         /* the scrollbar's thumb is being dragged */
 static int  g_band_x, g_band_y, g_band_x2, g_band_y2;
 static int g_view = VIEW_ICON;
 static int g_scroll;
@@ -278,6 +279,18 @@ static void file_icon(int x, int y, int program)
 
 static int content_top(void)  { return TOOLBAR_H + PATH_H; }
 static int content_h(void)    { return (int)g_h - content_top() - STATUS_H; }
+static int bar_x(void)        { return (int)g_w - 4 - WG_SCROLL_W; }
+static int visible_rows(void)
+{
+    const int per = (g_view == VIEW_ICON) ? CELL_H : ROW_H;
+    const int n = content_h() / per;
+    return n > 0 ? n : 1;
+}
+static int scroll_span(void)
+{
+    const int n = (g_view == VIEW_TREE) ? g_row_count : g_count;
+    return n > 0 ? n : 1;
+}
 
 static void draw_toolbar(void)
 {
@@ -404,12 +417,8 @@ static void draw(void)
     }
 
     /* A vertical bar, since a directory rarely fits. */
-    {
-        const int rows = content_h() / ROW_H;
-        const int span = (g_view == VIEW_TREE) ? g_row_count : g_count;
-        wg_scrollbar_v((int)g_w - 4 - WG_SCROLL_W, content_top(), content_h(),
-                       g_scroll, rows > 0 ? rows : 1, span > 0 ? span : 1);
-    }
+    wg_scrollbar_v(bar_x(), content_top(), content_h(),
+                   g_scroll, visible_rows(), scroll_span());
 
     wg_fill(0, (int)g_h - STATUS_H, (int)g_w, STATUS_H, WG_FACE);
     wg_text_clipped(8, (int)g_h - STATUS_H + 2, g_status, WG_INK, (int)g_w - 16);
@@ -727,14 +736,32 @@ int main(int argc, char** argv)
                     scroll_by(-1);
                 } else if (inside(&g_dnline, event.x, event.y)) {
                     scroll_by(1);
+                } else if (event.x >= bar_x() && event.y >= content_top() &&
+                           event.y < content_top() + content_h()) {
+                    /* The bar was drawn but never listened to, which made it
+                     * look broken rather than absent. */
+                    if (wg_scroll_on_thumb_v(event.y, content_top(), content_h(),
+                                             g_scroll, visible_rows(),
+                                             scroll_span()))
+                        g_bar_drag = 1;
+                    else
+                        g_scroll = wg_scroll_hit_v(event.x, event.y, bar_x(),
+                            content_top(), content_h(), g_scroll,
+                            visible_rows(), scroll_span());
                 } else if (event.button == 1 && event.y >= content_top() &&
                            hit_test(event.x, event.y) < 0) {
                     /* A press on empty space starts a rubber band rather than
                      * doing nothing. */
+                    /* Clicking the empty space around the items lets go of
+                     * them - which is the only way to end up with nothing
+                     * selected once something is. */
                     g_band = 1;
                     g_band_x = g_band_x2 = event.x;
                     g_band_y = g_band_y2 = event.y;
+                    g_selected = -1;
                     memset(g_marked, 0, sizeof(g_marked));
+                    snprintf(g_status, sizeof(g_status), "%d item%s", g_count,
+                             g_count == 1 ? "" : "s");
                 } else if (event.button == 2) {
                     const int hit = hit_test(event.x, event.y);
                     if (hit >= 0) {
@@ -752,6 +779,9 @@ int main(int argc, char** argv)
                             g_selected = hit;
                     }
                 }
+            } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_bar_drag) {
+                g_scroll = wg_scroll_drag_v(event.y, content_top(), content_h(),
+                                            visible_rows(), scroll_span());
             } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_band) {
                 g_band_x2 = event.x;
                 g_band_y2 = event.y;
@@ -769,10 +799,22 @@ int main(int argc, char** argv)
                         if (i >= 0 && i < MAX_ENTRIES)
                             g_marked[i] = 1;
                     }
-            } else if (event.type == WIN_EVENT_MOUSE_UP && g_band) {
+            } else if (event.type == WIN_EVENT_MOUSE_UP) {
                 g_band = 0;
+                g_bar_drag = 0;
             } else if (event.type == WIN_EVENT_KEY) {
-                if (event.key == 1) {           /* ctrl+a */
+                if (event.key == WIN_KEY_DOWN) {
+                    if (g_scroll + visible_rows() < scroll_span()) ++g_scroll;
+                } else if (event.key == WIN_KEY_UP) {
+                    if (g_scroll > 0) --g_scroll;
+                } else if (event.key == WIN_KEY_RIGHT) {
+                    g_scroll += visible_rows();
+                    if (g_scroll > scroll_span() - 1) g_scroll = scroll_span() - 1;
+                    if (g_scroll < 0) g_scroll = 0;
+                } else if (event.key == WIN_KEY_LEFT) {
+                    g_scroll -= visible_rows();
+                    if (g_scroll < 0) g_scroll = 0;
+                } else if (event.key == 1) {    /* ctrl+a */
                     select_all();
                 } else if (event.key == 3) {    /* ctrl+c */
                     copy_marked();

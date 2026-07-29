@@ -224,3 +224,59 @@ int wg_scroll_hit_h(int x, int y, int bx, int by, int bw,
     if (at >= pos + len) return clamp_first(first + page, page, span);
     return first;
 }
+
+int wg_scroll_on_thumb_v(int y, int by, int bh, int first, int page, int span)
+{
+    const int track = bh - WG_SCROLL_W * 2;
+    if (track <= 0 || span <= page)
+        return 0;
+    int pos, len;
+    thumb_of(track, first, page, span, &pos, &len);
+    const int at = y - (by + WG_SCROLL_W);
+    return at >= pos && at < pos + len;
+}
+
+int wg_scroll_on_thumb_h(int x, int bx, int bw, int first, int page, int span)
+{
+    const int track = bw - WG_SCROLL_W * 2;
+    if (track <= 0 || span <= page)
+        return 0;
+    int pos, len;
+    thumb_of(track, first, page, span, &pos, &len);
+    const int at = x - (bx + WG_SCROLL_W);
+    return at >= pos && at < pos + len;
+}
+
+int wg_scroll_drag_v(int y, int by, int bh, int page, int span)
+{
+    const int track = bh - WG_SCROLL_W * 2;
+    if (track <= 0 || span <= page)
+        return 0;
+    int pos, len;
+    thumb_of(track, 0, page, span, &pos, &len);
+    const int usable = track - len;
+    if (usable <= 0)
+        return 0;
+    /* Take the pointer as the middle of the thumb, so the thing under the
+     * cursor is the thing that moves. */
+    int at = y - (by + WG_SCROLL_W) - len / 2;
+    if (at < 0) at = 0;
+    if (at > usable) at = usable;
+    return clamp_first(at * (span - page) / usable, page, span);
+}
+
+int wg_scroll_drag_h(int x, int bx, int bw, int page, int span)
+{
+    const int track = bw - WG_SCROLL_W * 2;
+    if (track <= 0 || span <= page)
+        return 0;
+    int pos, len;
+    thumb_of(track, 0, page, span, &pos, &len);
+    const int usable = track - len;
+    if (usable <= 0)
+        return 0;
+    int at = x - (bx + WG_SCROLL_W) - len / 2;
+    if (at < 0) at = 0;
+    if (at > usable) at = usable;
+    return clamp_first(at * (span - page) / usable, page, span);
+}
