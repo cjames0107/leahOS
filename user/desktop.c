@@ -11,6 +11,7 @@
  * drawing over each other.
  */
 
+#include <bundle.h>
 #include <clipboard.h>
 #include <display.h>
 #include <dialog.h>
@@ -128,10 +129,11 @@ static void draw(void)
             break;
         if (i == g_sel || g_marked[i])
             wg_fill(x - 2, y - 2, CELL_W - 6, CELL_H - 12, 0x4060A0);
-        if (g_items[i].d_type == S_IFDIR)
+        const int app = bundle_is_app(g_items[i].d_name);
+        if (g_items[i].d_type == S_IFDIR && !app)
             folder_icon(x + 22, y);
         else
-            file_icon(x + 22, y, ends_elf(g_items[i].d_name));
+            file_icon(x + 22, y, app || ends_elf(g_items[i].d_name));
         /* Labels are white with a dark shadow, so they stay readable over a
          * wallpaper of any brightness. */
         wg_text_clipped(x + 1, y + 37, g_items[i].d_name, 0x202020, CELL_W - 10);
@@ -161,12 +163,26 @@ static void open_selected(void)
         return;
     char full[256];
     snprintf(full, sizeof(full), "%s/%s", g_dir, g_items[g_sel].d_name);
-    if (g_items[g_sel].d_type == S_IFDIR)
+    struct bundle b;
+    if (bundle_is_app(full)) {
+        char exec[256];
+        if (bundle_load(full, &b) == 0) {
+            bundle_exec(&b, exec, sizeof(exec));
+            launch(exec, 0);
+        }
+    } else if (g_items[g_sel].d_type == S_IFDIR) {
         launch("/BIN/BROWSE.ELF", full);
-    else if (ends_elf(full))
+    } else if (ends_elf(full)) {
         launch(full, 0);
-    else
+    } else if (bundle_for_document("/Apps", full, &b) == 0) {
+        /* Whichever application claims this kind, rather than a name written
+         * into the desktop. */
+        char exec[256];
+        bundle_exec(&b, exec, sizeof(exec));
+        launch(exec, full);
+    } else {
         launch("/BIN/EDIT.ELF", full);
+    }
     snprintf(g_note, sizeof(g_note), "opened %s", g_items[g_sel].d_name);
 }
 

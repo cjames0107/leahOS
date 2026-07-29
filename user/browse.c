@@ -13,6 +13,7 @@
  * the filesystem that records a type.
  */
 
+#include <bundle.h>
 #include <clipboard.h>
 #include <fcntl.h>
 #include <dialog.h>
@@ -370,11 +371,15 @@ static void draw_icons(void)
             continue;
         if (i == g_selected || g_marked[i])
             wg_fill(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6, 0xB0C4DE);
-        const int dir = (g_entries[i].d_type == S_IFDIR);
+        /* A bundle is drawn as the application it is, not as the directory it
+         * happens to be made of. */
+        const int app = bundle_is_app(g_entries[i].d_name);
+        const int dir = (g_entries[i].d_type == S_IFDIR) && !app;
         if (dir)
             folder_icon(cx + 26, cy);
         else
-            file_icon(cx + 26, cy, ends_with(g_entries[i].d_name, ".ELF"));
+            file_icon(cx + 26, cy,
+                      app || ends_with(g_entries[i].d_name, ".ELF"));
         wg_text_clipped(cx, cy + 32, g_entries[i].d_name, WG_INK, CELL_W - 8);
     }
 }
@@ -396,7 +401,8 @@ static void draw_list(void)
             continue;               /* under the column headings */
         if (i == g_selected || g_marked[i])
             wg_fill(8, y, (int)g_w - 16, ROW_H, 0xB0C4DE);
-        const int dir = (g_entries[i].d_type == S_IFDIR);
+        const int dir = (g_entries[i].d_type == S_IFDIR) &&
+                        !bundle_is_app(g_entries[i].d_name);
         wg_text_clipped(12, y + 1, g_entries[i].d_name, WG_INK, 280);
         char size[24];
         if (dir)
@@ -406,7 +412,8 @@ static void draw_list(void)
                      (unsigned long long)g_entries[i].d_size);
         wg_text(300, y + 1, size, WG_INK);
         wg_text(400, y + 1,
-                dir ? "folder"
+                bundle_is_app(g_entries[i].d_name) ? "application"
+                    : dir ? "folder"
                     : (ends_with(g_entries[i].d_name, ".ELF") ? "program"
                                                               : "document"),
                 WG_INK);
@@ -560,6 +567,24 @@ static void remember(const char* path, const char* app)
 
 static void open_path(const char* path, int is_dir)
 {
+    /* A bundle is entered by running it, not by descending into it - which is
+     * the whole difference between an application and the directory it is made
+     * of. Its contents are still reachable: nothing hides them, they are simply
+     * not what opening it means. */
+    if (bundle_is_app(path)) {
+        struct bundle b;
+        if (bundle_load(path, &b) == 0) {
+            char exec[256];
+            bundle_exec(&b, exec, sizeof(exec));
+            launch(exec, 0);
+            snprintf(g_status, sizeof(g_status), "launched %s", b.name);
+        } else {
+            snprintf(g_status, sizeof(g_status),
+                     "%s has no usable Info", path);
+        }
+        return;
+    }
+
     if (is_dir) {
         int n = 0;
         while (path[n] != '\0' && n < 255) {
@@ -576,9 +601,21 @@ static void open_path(const char* path, int is_dir)
     while (path[n] != '\0' && n < 255) { g_opening[n] = path[n]; ++n; }
     g_opening[n] = '\0';
 
-    /* If the user has already said "always", honour it and do not ask again -
-     * that is the entire point of having ticked the box. */
+    /* An application that says it opens this kind is asked first: the bundle
+     * declaring `opens .txt` is the system's only actual knowledge of what a
+     * document is for, and it beats guessing. A remembered choice still wins
+     * over it, because that was the user saying so explicitly. */
     const char* known = remembered(g_opening);
+    if (known == 0) {
+        struct bundle b;
+        if (bundle_for_document("/Apps", g_opening, &b) == 0) {
+            char exec[256];
+            bundle_exec(&b, exec, sizeof(exec));
+            launch(exec, g_opening);
+            snprintf(g_status, sizeof(g_status), "opened with %s", b.name);
+            return;
+        }
+    }
     if (known != 0) {
         launch(known, g_opening);
         snprintf(g_status, sizeof(g_status), "opened with %s", known);

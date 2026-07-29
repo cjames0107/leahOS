@@ -35,6 +35,24 @@ trap 'rm -rf "$STAGING"' EXIT
 # one 4 KiB block so reading it exercises multi-block mapping (an extent that
 # spans several blocks), mirroring the FAT32 image's cluster-chain file.
 mkdir -p "$STAGING/BIN" "$STAGING/docs"
+
+# Application bundles. A .app is a directory that carries its own description,
+# so the shell no longer needs a built-in table of which program opens what -
+# see user/libc/include/bundle.h. These are staged here rather than assembled at
+# runtime because a bundle is a filesystem layout, and the image is where the
+# filesystem gets laid out.
+stage_bundle() {           # name exec-src opens... 
+    local app="$1"; local src="$2"; shift 2
+    mkdir -p "$STAGING/Apps/$app.app"
+    cp "$src" "$STAGING/Apps/$app.app/$(basename "$src")"
+    {
+        printf 'name %s\n' "$app"
+        printf 'exec %s\n' "$(basename "$src")"
+        # An `if`, not `[ ... ] &&`: under `set -e` the && form makes the whole
+        # function fail for a bundle that opens nothing.
+        if [ "$#" -gt 0 ]; then printf 'opens %s\n' "$*"; fi
+    } > "$STAGING/Apps/$app.app/Info"
+}
 printf 'Hello from ext4.\n' > "$STAGING/HELLO.TXT"
 printf 'Notes live in a subdirectory.\n' > "$STAGING/docs/notes.txt"
 {
@@ -55,6 +73,13 @@ for pair in "$@"; do
     mkdir -p "$STAGING/$(dirname "$dest")"
     cp "$src" "$STAGING/$dest"
 done
+
+# The bundles, from the same binaries that go into BIN. Three are enough to
+# show the mechanism: two that claim documents by extension, one that claims
+# none and is only ever launched directly.
+stage_bundle Paint "$STAGING/BIN/PAINT.ELF" ".PNG .GIF"
+stage_bundle Edit  "$STAGING/BIN/EDIT.ELF"  ".TXT .MD"
+stage_bundle Calculator "$STAGING/BIN/CALC.ELF"
 
 dd if=/dev/zero of="$OUT" bs=1048576 count="$SIZE_MIB" status=none
 

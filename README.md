@@ -743,6 +743,35 @@ size. There is no widget toolkit behind it - a client owns a rectangle of
 pixels and draws it itself - and showing that plainly is more useful than
 hiding it.
 
+### Application bundles
+
+A `.app` is an ordinary directory whose name carries the extension:
+
+    /Apps/Paint.app/
+        Info            name, exec, opens, menu
+        PAINT.ELF
+
+The point is not the packaging. It is that an application had been "a binary in
+`/BIN` plus rules scattered through whoever launched it": the browser carried a
+hardcoded rule that a `.ELF` runs and everything else goes to the editor, and
+each client wrote its own context menu. Both of those facts belong to the
+application, and a bundle is where they now live. Nothing outside reads one
+except through `bundle.h`.
+
+`Info` is the same `key value` line format as `~/.leahrc`, for the same reason -
+`cat` reads it and the editor repairs it. `opens .PNG .GIF` is how a document
+finds its application without the browser knowing anything about file types; a
+remembered "always open with" still wins, because that was the user saying so
+explicitly rather than the system inferring it.
+
+Opening a bundle runs it rather than descending into it, which is the whole
+difference between an application and the directory it is made of. Its contents
+are not hidden - nothing pretends the directory is a file - they are simply not
+what opening it means.
+
+The bundles are staged into the ext image by `tools/mkext.sh`, because a bundle
+is a filesystem layout and the image is where the filesystem is laid out.
+
 ### Browsing and editing
 
 `browse` shows one directory three ways, because they answer different
@@ -1359,5 +1388,8 @@ process still mapped them.
 - [x] per-user preferences in ~/.leahrc, and appearance restored from it
 - [ ] drag and drop between windows, which needs the server to carry a drag
 - [ ] a per-session clipboard, so two logged-in users cannot read each other's
+- [x] application bundles: a `.app` directory that carries its own description
+- [ ] bundle `menu` entries consumed by the shell's context menus
+- [ ] a bundle's icon drawn from its own `Icon.png`
 - [ ] a real type for a file, so opening one need not guess from its name
 - [ ] reflowing a terminal's scrollback when it is resized
