@@ -171,7 +171,7 @@ static void open_selected(void)
             launch(exec, 0);
         }
     } else if (g_items[g_sel].d_type == S_IFDIR) {
-        launch("/BIN/BROWSE.ELF", full);
+        launch(app_path("Files"), full);
     } else if (ends_elf(full)) {
         launch(full, 0);
     } else if (bundle_for_document("/Apps", full, &b) == 0) {
@@ -181,7 +181,7 @@ static void open_selected(void)
         bundle_exec(&b, exec, sizeof(exec));
         launch(exec, full);
     } else {
-        launch("/BIN/EDIT.ELF", full);
+        launch(app_path("Edit"), full);
     }
     snprintf(g_note, sizeof(g_note), "opened %s", g_items[g_sel].d_name);
 }
@@ -233,11 +233,11 @@ int main(void)
                 case 0: open_selected(); break;
                 case 2:
                     snprintf(full, sizeof(full), "%s/untitled.txt", g_dir);
-                    launch("/BIN/EDIT.ELF", full);
+                    launch(app_path("Edit"), full);
                     break;
-                case 3: launch("/BIN/BROWSE.ELF", g_dir); break;
-                case 4: launch("/BIN/TERM.ELF", 0); break;
-                case 5: launch("/BIN/SETTINGS.ELF", 0); break;
+                case 3: launch(app_path("Files"), g_dir); break;
+                case 4: launch(app_path("Terminal"), 0); break;
+                case 5: launch(app_path("Settings"), 0); break;
                 case 7: rescan(); break;
                 }
                 draw();

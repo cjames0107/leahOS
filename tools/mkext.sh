@@ -37,21 +37,33 @@ trap 'rm -rf "$STAGING"' EXIT
 mkdir -p "$STAGING/BIN" "$STAGING/docs"
 
 # Application bundles. A .app is a directory that carries its own description,
-# so the shell no longer needs a built-in table of which program opens what -
-# see user/libc/include/bundle.h. These are staged here rather than assembled at
+# Application bundles. A .app is a directory that carries its own description,
+# so nothing else needs a built-in table of which program opens what - see
+# user/libc/include/bundle.h. They are staged here rather than assembled at
 # runtime because a bundle is a filesystem layout, and the image is where the
 # filesystem gets laid out.
-stage_bundle() {           # name exec-src opens... 
-    local app="$1"; local src="$2"; shift 2
-    mkdir -p "$STAGING/Apps/$app.app"
-    cp "$src" "$STAGING/Apps/$app.app/$(basename "$src")"
+#
+# Stage one application bundle: the directory, its binary, its Info, and an
+# icon. Everything an application declares about itself is written here, which
+# is the point - there is no second copy of these facts anywhere in the system.
+#
+#   stage_bundle <Name> <src.elf> <opens> <menu...>
+stage_bundle() {
+    local app="$1"; local src="$2"; local opens="$3"; shift 3
+    local dir="$STAGING/Apps/$app.app"
+    local exe
+    exe="$(basename "$src")"
+    mkdir -p "$dir"
+    cp "$src" "$dir/$exe"
     {
         printf 'name %s\n' "$app"
-        printf 'exec %s\n' "$(basename "$src")"
-        # An `if`, not `[ ... ] &&`: under `set -e` the && form makes the whole
-        # function fail for a bundle that opens nothing.
-        if [ "$#" -gt 0 ]; then printf 'opens %s\n' "$*"; fi
-    } > "$STAGING/Apps/$app.app/Info"
+        printf 'exec %s\n' "$exe"
+        printf 'icon Icon.png\n'
+        if [ -n "$opens" ]; then printf 'opens %s\n' "$opens"; fi
+        local item
+        for item in "$@"; do printf 'menu %s\n' "$item"; done
+    } > "$dir/Info"
+    python3 tools/mkicon.py "$dir/Icon.png" "$app"
 }
 printf 'Hello from ext4.\n' > "$STAGING/HELLO.TXT"
 printf 'Notes live in a subdirectory.\n' > "$STAGING/docs/notes.txt"
@@ -74,12 +86,29 @@ for pair in "$@"; do
     cp "$src" "$STAGING/$dest"
 done
 
-# The bundles, from the same binaries that go into BIN. Three are enough to
-# show the mechanism: two that claim documents by extension, one that claims
-# none and is only ever launched directly.
-stage_bundle Paint "$STAGING/BIN/PAINT.ELF" ".PNG .GIF"
-stage_bundle Edit  "$STAGING/BIN/EDIT.ELF"  ".TXT .MD"
-stage_bundle Calculator "$STAGING/BIN/CALC.ELF"
+# Every application, as a complete bundle. The binaries come straight from the
+# build rather than from the staged /BIN, because these deliberately do not go
+# into /BIN at all - see APP_PROGRAMS in the Makefile.
+#
+# The table is here rather than in the Makefile because everything on a line is
+# a fact about the application: what it is called, what it opens, and what it
+# offers when right-clicked.
+stage_app() {                       # <Name> <make-name> <opens> <menu...>
+    local name="$1"; local prog="$2"; shift 2
+    local src="$BUILD_DIR/$prog.elf"
+    if [ -f "$src" ]; then stage_bundle "$name" "$src" "$@"; fi
+}
+BUILD_DIR="${BUILD_DIR:-build}"
+stage_app Files     browse   ""              "New window" "New folder"
+stage_app Terminal  term     ""              "New terminal"
+stage_app Edit      edit     ".TXT .MD .C .H .LEAHRC" "New document"
+stage_app Paint     paint    ".PNG .GIF"     "New drawing"
+stage_app Images    imgview  ".PNG"          "Open picture..."
+stage_app Calculator calc    ""              ""
+stage_app Settings  settings ""              "Appearance" "Users"
+stage_app Tasks     taskman  ""              "End task"
+stage_app Clock     clock    ""              ""
+stage_app Elements  uitest   ""              ""
 
 dd if=/dev/zero of="$OUT" bs=1048576 count="$SIZE_MIB" status=none
 

@@ -1,4 +1,6 @@
+#include <bundle.h>
 #include <dialog.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <widget.h>
@@ -82,13 +84,28 @@ static void list_dirs(void)
 
 /* The openers this system has. Kept as a table rather than discovered, because
  * "which programs can open a file" is not something the filesystem records. */
+/* The installed applications, asked for by walking /Apps - not a list written
+ * here. A dialogue that hardcoded three names would be wrong the moment an
+ * eleventh application was installed, and would be the last place anyone
+ * thought to look. */
+static char g_opener_exec[16][192];
+
 static void list_openers(const char* path)
 {
-    static const char* kApps[] = { "Text editor", "Image viewer", "Paint" };
+    static struct dirent kids[64];
     g_items_n = 0;
     g_scroll = 0;
-    for (unsigned i = 0; i < sizeof(kApps) / sizeof(kApps[0]); ++i) {
-        copy(g_items[g_items_n], kApps[i], 64);
+    const int n = getdents(BUNDLE_DIR, kids, 64);
+    for (int i = 0; i < n && g_items_n < 15; ++i) {
+        if (!bundle_is_app(kids[i].d_name))
+            continue;
+        char dir[256];
+        snprintf(dir, sizeof(dir), "%s/%s", BUNDLE_DIR, kids[i].d_name);
+        struct bundle b;
+        if (bundle_load(dir, &b) != 0)
+            continue;
+        copy(g_items[g_items_n], b.name, 64);
+        bundle_exec(&b, g_opener_exec[g_items_n], 192);
         g_item_dir[g_items_n++] = 0;
     }
     /* A program can also just be run. Offered last so it is a deliberate
@@ -97,6 +114,7 @@ static void list_openers(const char* path)
     if (len > 4 && (path[len-4] == '.') &&
         (path[len-3] == 'E' || path[len-3] == 'e')) {
         copy(g_items[g_items_n], "Run it", 64);
+        copy(g_opener_exec[g_items_n], path, 192);
         g_item_dir[g_items_n++] = 0;
     }
     g_sel = 0;
@@ -129,11 +147,11 @@ static void accept(void)
     if (g_kind == KIND_SAVE) {
         join(g_dir, g_name, g_result, sizeof(g_result));
     } else {
-        const char* app = "/BIN/EDIT.ELF";
-        if (g_sel == 1) app = "/BIN/IMGVIEW.ELF";
-        else if (g_sel == 2) app = "/BIN/PAINT.ELF";
-        else if (g_sel == 3) app = g_subject;      /* run it directly */
-        copy(g_result, app, sizeof(g_result));
+        /* Whatever the chosen row resolved to when the list was built. */
+        if (g_sel >= 0 && g_sel < g_items_n && g_opener_exec[g_sel][0] != '\0')
+            copy(g_result, g_opener_exec[g_sel], sizeof(g_result));
+        else
+            copy(g_result, g_subject, sizeof(g_result));
     }
     g_kind = KIND_NONE;
 }

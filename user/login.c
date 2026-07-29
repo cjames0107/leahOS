@@ -6,6 +6,7 @@
  * a logout.
  */
 
+#include <bundle.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -57,8 +58,8 @@ static void session(void)
         char* browse[] = { "browse", "40", "40", 0 };
         char* term[]   = { "term", "60", "300", 0 };
         char* setts[]  = { "settings", "430", "60", 0 };
-        const char* which[] = { "/BIN/DESKTOP.ELF", "/BIN/BROWSE.ELF",
-                                "/BIN/TERM.ELF", "/BIN/SETTINGS.ELF" };
+        const char* which[] = { "/BIN/DESKTOP.ELF", app_path("Files"),
+                                app_path("Terminal"), app_path("Settings") };
         char** argv[] = { desk, browse, term, setts };
         int started = 0;
         for (int i = 0; i < 4; ++i) {

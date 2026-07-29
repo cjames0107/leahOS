@@ -59,6 +59,25 @@ int bundle_load(const char* path, struct bundle* out);
 /* The full path of the program to execute. */
 void bundle_exec(const struct bundle* b, char* out, int max);
 
+/* Where the system's applications live. A single place, so that "which
+ * application is called Edit" has one answer rather than one per caller. */
+#define BUNDLE_DIR "/Apps"
+
+/* The bundle named `name` (its Info `name`, or its directory), or -1. This is
+ * how one application launches another without knowing a path: nothing outside
+ * a bundle should contain the string "/BIN/EDIT.ELF" again. */
+int bundle_find(const char* name, struct bundle* out);
+
+/* Load a bundle and hand back the command to run, in one step. Returns 0. */
+int bundle_command(const char* name, char* out, int max);
+
+/* The same, as a string that can be passed straight to execve. Returns an empty
+ * string when there is no such application, which every caller here treats as
+ * "then do not launch it" - a missing application should be a launch that does
+ * nothing, not a launch of the wrong thing. The buffer is reused, so use it
+ * before asking again. */
+const char* app_path(const char* name);
+
 /* The bundle in `dir` that claims `document`'s extension, or -1. `dir` is
  * searched for .app directories - normally /Apps. */
 int bundle_for_document(const char* dir, const char* document,

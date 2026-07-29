@@ -58,6 +58,7 @@ static int  g_bar_drag;         /* the scrollbar's thumb is being dragged */
  * from the same place instead of creeping. */
 static int  g_anchor = -1;
 static int  g_blank_menu;   /* which menu is showing */
+static int  g_app_menu_on;
 static int  g_new_kind = -1; /* 0 file, 1 folder, once the name is chosen */
 static int  g_band_x, g_band_y, g_band_x2, g_band_y2;
 static int g_view = VIEW_ICON;
@@ -757,6 +758,35 @@ static const char* const kMenu[] = {
     "Open", "Open with...", "Copy", "Select all", "-", "Refresh"
 };
 
+/* A right-click menu for a bundle: the standard entries, then whatever the
+ * application itself declares. This is what makes `menu` in an Info file real
+ * rather than decorative - the application extends the shell, instead of the
+ * shell knowing about applications. */
+static char g_app_menu[4 + BUNDLE_MAX_MENU][32];
+static const char* g_app_menu_p[4 + BUNDLE_MAX_MENU];
+static int g_app_menu_n;
+static struct bundle g_app_menu_bundle;
+
+static int build_app_menu(const char* path)
+{
+    if (bundle_load(path, &g_app_menu_bundle) != 0)
+        return 0;
+    static const char* base[] = { "Open", "-" };
+    g_app_menu_n = 0;
+    for (unsigned i = 0; i < 2; ++i) {
+        snprintf(g_app_menu[g_app_menu_n], 32, "%s", base[i]);
+        g_app_menu_p[g_app_menu_n] = g_app_menu[g_app_menu_n];
+        ++g_app_menu_n;
+    }
+    for (int i = 0; i < g_app_menu_bundle.menu_n; ++i) {
+        snprintf(g_app_menu[g_app_menu_n], 32, "%s",
+                 g_app_menu_bundle.menu[i]);
+        g_app_menu_p[g_app_menu_n] = g_app_menu[g_app_menu_n];
+        ++g_app_menu_n;
+    }
+    return g_app_menu_n;
+}
+
 /* The menu for the empty space around the items. Right-clicking nothing is
  * still a question - "what can I do here?" - and answering it with silence is
  * the difference between a window and a picture of one. */
@@ -797,6 +827,28 @@ int main(int argc, char** argv)
             }
             if (menu_active() && event.type != WIN_EVENT_RESIZE) {
                 const int pick = menu_event(&event);
+                if (g_app_menu_on) {
+                    if (pick == 0) {
+                        open_selected();
+                    } else if (pick > 1) {
+                        /* An application's own entry. The system does not know
+                         * what it means - only the application does - so it is
+                         * launched with the entry as an argument and left to
+                         * decide. */
+                        char exec[256];
+                        bundle_exec(&g_app_menu_bundle, exec, sizeof(exec));
+                        launch(exec, g_app_menu[pick]);
+                        snprintf(g_status, sizeof(g_status), "%s: %s",
+                                 g_app_menu_bundle.name, g_app_menu[pick]);
+                    }
+                    if (pick != -1)
+                        g_app_menu_on = 0;
+                    draw();
+                    dlg_draw((int)g_w, (int)g_h);
+                    menu_draw();
+                    win_present(id);
+                    continue;
+                }
                 if (g_blank_menu) {
                     char full[300];
                     if (pick == 0 || pick == 1) {
@@ -956,7 +1008,15 @@ int main(int argc, char** argv)
                     if (hit >= 0) {
                         if (!g_marked[hit])
                             select_at(hit, 0);
-                        menu_open(event.x, event.y, kMenu, 6);
+                        char full[256];
+                        join(g_path, g_entries[hit].d_name, full, sizeof(full));
+                        if (bundle_is_app(full) && build_app_menu(full) > 0) {
+                            menu_open(event.x, event.y, g_app_menu_p,
+                                      g_app_menu_n);
+                            g_app_menu_on = 1;
+                        } else {
+                            menu_open(event.x, event.y, kMenu, 6);
+                        }
                     } else {
                         menu_open(event.x, event.y, kBlankMenu, 7);
                         g_blank_menu = 1;

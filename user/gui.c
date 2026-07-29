@@ -9,6 +9,7 @@
  * failing.
  */
 
+#include <bundle.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -56,9 +57,9 @@ int main(void)
     char* paint1[] = { "paint", "80", "90", 0 };
     char* paint2[] = { "paint", "420", "150", 0 };
     char* clock[]  = { "clock", 0 };
-    launch("/BIN/PAINT.ELF", paint1);
-    launch("/BIN/PAINT.ELF", paint2);
-    launch("/BIN/CLOCK.ELF", clock);
+    launch(app_path("Paint"), paint1);
+    launch(app_path("Paint"), paint2);
+    launch(app_path("Clock"), clock);
 
     wait(0);
     wait(0);

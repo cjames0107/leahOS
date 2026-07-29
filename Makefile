@@ -98,8 +98,21 @@ KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
 # Userland programs. Each user/<name>.c links into $(BUILD)/<name>.elf and is
 # placed on the image at /BIN/<NAME>.ELF (upper-cased for FAT's 8.3 names).
-USER_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear \
-                 ifconfig ping arp nslookup tests id chmod chown su fetch whoami login useradd passwd stat paint clock gui wserver term uitest browse edit calc settings imgview taskman desktop
+# Two kinds of program, and the difference is where they end up.
+#
+# BIN_PROGRAMS are the command-line tools and the pieces the system starts
+# itself - init, login, the shell, the window server, the desktop. They live in
+# /BIN because something has to launch them by path before any of this is up.
+#
+# APP_PROGRAMS are the applications. They ship only as bundles under /Apps, and
+# deliberately not in /BIN as well: two copies of a binary is two things to keep
+# in step, and the second one is exactly what lets a caller keep hardcoding a
+# path instead of asking which application does the job.
+BIN_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear \
+                 ifconfig ping arp nslookup tests id chmod chown su fetch whoami \
+                 login useradd passwd stat gui wserver desktop
+APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman
+USER_PROGRAMS := $(BIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
 STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
@@ -205,10 +218,12 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_ELFS) | $
 
 # The ext4 root filesystem (disk 1). BIN/NAME.ELF=build/name.elf for every
 # program, upper-cased to match the paths the kernel loads today.
-EXT_ADDS := $(foreach p,$(USER_PROGRAMS),BIN/$(shell echo $(p) | tr a-z A-Z).ELF=$(BUILD)/$(p).elf)
+# Only the tools go to /BIN; the applications are placed as bundles by mkext.sh.
+EXT_ADDS := $(foreach p,$(BIN_PROGRAMS),BIN/$(shell echo $(p) | tr a-z A-Z).ELF=$(BUILD)/$(p).elf)
+EXT_APPS := $(foreach p,$(APP_PROGRAMS),$(p)=$(BUILD)/$(p).elf)
 
 $(EXT_IMG): $(USER_ELFS) tools/mkext.sh | $(DIST)
-	@tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
+	@APPS="$(EXT_APPS)" tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
 
 $(SATA_IMG): | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=16 status=none

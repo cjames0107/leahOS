@@ -139,3 +139,44 @@ int bundle_for_document(const char* dir, const char* document,
     }
     return -1;
 }
+
+int bundle_find(const char* name, struct bundle* out)
+{
+    static struct dirent kids[64];
+    const int n = getdents(BUNDLE_DIR, kids, 64);
+    for (int i = 0; i < n; ++i) {
+        if (!bundle_is_app(kids[i].d_name))
+            continue;
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s", BUNDLE_DIR, kids[i].d_name);
+        struct bundle b;
+        if (bundle_load(path, &b) != 0)
+            continue;
+        /* By its declared name, or by the directory - either is what someone
+         * would reasonably call it. */
+        if (strcmp(b.name, name) == 0 || strcmp(kids[i].d_name, name) == 0) {
+            *out = b;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int bundle_command(const char* name, char* out, int max)
+{
+    struct bundle b;
+    if (bundle_find(name, &b) != 0) {
+        out[0] = '\0';
+        return -1;
+    }
+    bundle_exec(&b, out, max);
+    return 0;
+}
+
+const char* app_path(const char* name)
+{
+    static char buf[256];
+    if (bundle_command(name, buf, sizeof(buf)) != 0)
+        buf[0] = '\0';
+    return buf;
+}
