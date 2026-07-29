@@ -871,6 +871,19 @@ about its type, and a hint is not good enough to decide for someone, so the
 browser offers the editor, the image viewer, paint, and - when the file is a
 program - running it directly.
 
+### Shortcuts
+
+There are no symbolic links in this filesystem, so a shortcut is a small text
+file whose first line is the path it stands for, named `.alias`. Opening one
+opens what it names, and the extension is hidden in the label because the point
+of a shortcut is the thing, not the file.
+
+A file rather than a filesystem feature deliberately: a link needs the kernel
+and the on-disk format to agree about it, and this needs neither. It is readable
+with `cat` and repairable with the editor - the same bargain `Info` and
+`~/.leahrc` make. Every account's desktop starts with three: Files, Notepad and
+the README.
+
 ### Watching the system
 
 `taskman` shows a snapshot the kernel copies out under its own lock - a reader
@@ -1412,6 +1425,7 @@ process still mapped them.
 - [x] application bundles: a `.app` directory that carries its own description
 - [x] every application ships only as a bundle, with no copy left in `/BIN`
 - [x] bundle `menu` entries in the browser's right-click menu
+- [x] shortcuts on the desktop, as `.alias` files
 - [ ] a bundle's `Icon.png` drawn in place of the generic application glyph
 - [ ] a real type for a file, so opening one need not guess from its name
 - [ ] reflowing a terminal's scrollback when it is resized

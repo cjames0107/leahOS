@@ -130,14 +130,21 @@ static void draw(void)
         if (i == g_sel || g_marked[i])
             wg_fill(x - 2, y - 2, CELL_W - 6, CELL_H - 12, 0x4060A0);
         const int app = bundle_is_app(g_items[i].d_name);
+        const int link = alias_is(g_items[i].d_name);
         if (g_items[i].d_type == S_IFDIR && !app)
             folder_icon(x + 22, y);
         else
-            file_icon(x + 22, y, app || ends_elf(g_items[i].d_name));
+            file_icon(x + 22, y, app || link || ends_elf(g_items[i].d_name));
         /* Labels are white with a dark shadow, so they stay readable over a
          * wallpaper of any brightness. */
-        wg_text_clipped(x + 1, y + 37, g_items[i].d_name, 0x202020, CELL_W - 10);
-        wg_text_clipped(x, y + 36, g_items[i].d_name, WG_PAPER, CELL_W - 10);
+        char label[64];
+        snprintf(label, sizeof(label), "%s", g_items[i].d_name);
+        if (link) {
+            const int n = (int)strlen(label);
+            if (n > 6) label[n - 6] = '\0';     /* drop ".alias" */
+        }
+        wg_text_clipped(x + 1, y + 37, label, 0x202020, CELL_W - 10);
+        wg_text_clipped(x, y + 36, label, WG_PAPER, CELL_W - 10);
     }
 
     /* Nothing is written on the desktop itself. A status line here is a caption
@@ -163,6 +170,16 @@ static void open_selected(void)
         return;
     char full[256];
     snprintf(full, sizeof(full), "%s/%s", g_dir, g_items[g_sel].d_name);
+    /* An alias stands for something else; follow it before deciding what
+     * opening it means. One hop only - an alias to an alias is a mistake worth
+     * seeing rather than quietly chasing. */
+    char target[256];
+    if (alias_target(full, target, sizeof(target)) == 0) {
+        int k = 0;
+        while (target[k] != '\0' && k < 255) { full[k] = target[k]; ++k; }
+        full[k] = '\0';
+    }
+
     struct bundle b;
     if (bundle_is_app(full)) {
         char exec[256];
@@ -303,12 +320,20 @@ int main(void)
         }
 
         /* The folder is shared with everything else; noticing a change costs
-         * one directory read a second and saves needing to be told. */
-        if (++tick >= 66) {
+         * one directory read a second and saves needing to be told.
+         *
+         * Not while a menu is open, though. This refresh repainted and
+         * presented without redrawing the menu, so an open menu was wiped off
+         * the screen roughly once a second - which looks random from the
+         * outside and is not: it is this timer. Holding the refresh is the
+         * better fix than repainting the menu over it, because rescanning would
+         * also move the selection the menu was opened about. */
+        if (++tick >= 66 && !menu_active()) {
             tick = 0;
             reload_paper();
             rescan();
             draw();
+            menu_draw();
             win_present(id);
         }
         msleep(15);

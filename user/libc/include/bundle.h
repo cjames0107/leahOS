@@ -83,4 +83,21 @@ const char* app_path(const char* name);
 int bundle_for_document(const char* dir, const char* document,
                         struct bundle* out);
 
+/* --- aliases ---------------------------------------------------------------
+ *
+ * There are no symbolic links in this filesystem, so a shortcut is a small text
+ * file whose single line is the path it stands for, named with a ".alias"
+ * extension. Opening one opens what it names.
+ *
+ * A file rather than a filesystem feature on purpose: a link needs the kernel
+ * and the on-disk format to agree about it, and this needs neither. It is
+ * readable with cat and repairable with the editor, which is the same bargain
+ * Info and ~/.leahrc make.
+ */
+int alias_is(const char* name);
+
+/* Read the target out of an alias. Returns 0, or -1 if it is not one or cannot
+ * be read. */
+int alias_target(const char* path, char* out, int max);
+
 #endif /* _BUNDLE_H */

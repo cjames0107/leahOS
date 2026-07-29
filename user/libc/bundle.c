@@ -180,3 +180,35 @@ const char* app_path(const char* name)
         buf[0] = '\0';
     return buf;
 }
+
+int alias_is(const char* name)
+{
+    char ext[12];
+    upper_ext(name, ext, sizeof(ext));
+    return strcmp(ext, ".ALIAS") == 0;
+}
+
+int alias_target(const char* path, char* out, int max)
+{
+    out[0] = '\0';
+    if (!alias_is(path))
+        return -1;
+    const int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    char buf[256];
+    const int n = (int)read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    buf[n] = '\0';
+    /* The first line only: anything after it is a comment as far as this is
+     * concerned, which leaves room to say what an alias is for. */
+    int k = 0;
+    while (buf[k] != '\0' && buf[k] != '\n' && buf[k] != '\r' && k < max - 1) {
+        out[k] = buf[k];
+        ++k;
+    }
+    out[k] = '\0';
+    return out[0] != '\0' ? 0 : -1;
+}

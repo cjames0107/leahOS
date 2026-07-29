@@ -110,6 +110,24 @@ stage_app Tasks     taskman  ""              "End task"
 stage_app Clock     clock    ""              ""
 stage_app Elements  uitest   ""              ""
 
+# A desktop with three things on it, for every account that has one. An empty
+# desktop is a correct desktop and a poor first impression: these say what is
+# here and give somewhere to start.
+#
+# A shortcut is a ".alias" file holding the path it stands for - there are no
+# symbolic links in this filesystem, and a text file needs neither the kernel
+# nor the on-disk format to know anything new. See bundle.h.
+stage_desktop() {                   # <home>
+    local home="$1"
+    mkdir -p "$STAGING/$home/Desktop"
+    printf '/Apps/Files.app\n' > "$STAGING/$home/Desktop/Files.alias"
+    printf '/Apps/Edit.app\n'  > "$STAGING/$home/Desktop/Notepad.alias"
+    printf '/README.MD\n'      > "$STAGING/$home/Desktop/Readme.alias"
+}
+stage_desktop root
+stage_desktop home/leah
+stage_desktop home/guest
+
 dd if=/dev/zero of="$OUT" bs=1048576 count="$SIZE_MIB" status=none
 
 # The feature set / block / inode size can be overridden to build read-only
@@ -153,12 +171,25 @@ if [ -x "$DEBUGFS" ]; then
         echo "sif /home/leah/readme.txt uid 1000"
         echo "sif /home/leah/readme.txt gid 1000"
         echo "sif /home/leah/readme.txt mode 0100600"
+        # The desktop belongs to the account too - mke2fs -d copies the host's
+        # ownership, so without this a user's own Desktop is owned by whoever
+        # built the image and is read-only to them inside their own home.
+        for f in "" /Files.alias /Notepad.alias /Readme.alias; do
+            echo "sif /home/leah/Desktop$f uid 1000"
+            echo "sif /home/leah/Desktop$f gid 1000"
+        done
+        echo "sif /home/leah/Desktop mode 040700"
         echo "sif /home/guest uid 1001"
         echo "sif /home/guest gid 1001"
         echo "sif /home/guest mode 040700"
         echo "sif /home/guest/readme.txt uid 1001"
         echo "sif /home/guest/readme.txt gid 1001"
         echo "sif /home/guest/readme.txt mode 0100600"
+        for f in "" /Files.alias /Notepad.alias /Readme.alias; do
+            echo "sif /home/guest/Desktop$f uid 1001"
+            echo "sif /home/guest/Desktop$f gid 1001"
+        done
+        echo "sif /home/guest/Desktop mode 040700"
     } | "$DEBUGFS" -w "$OUT" >/dev/null 2>&1
 fi
 
