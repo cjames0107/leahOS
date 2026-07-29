@@ -57,7 +57,7 @@ static void session(void)
         char* desk[]   = { "desktop", 0 };
         char* browse[] = { "browse", "40", "40", 0 };
         char* term[]   = { "term", "60", "300", 0 };
-        char* setts[]  = { "settings", "430", "60", 0 };
+        char* setts[]  = { "settings", "380", "60", 0 };
         const char* which[] = { "/BIN/DESKTOP.ELF", app_path("Files"),
                                 app_path("Terminal"), app_path("Settings") };
         char** argv[] = { desk, browse, term, setts };

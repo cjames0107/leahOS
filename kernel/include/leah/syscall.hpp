@@ -81,6 +81,7 @@ enum Number : u64 {
     ThreadExit = 56,
     ProcList   = 57,   // snapshot of the task table
     MemInfo    = 58,   // physical memory: used, free, usable
+    CpuInfo    = 59,   // per-processor slice counts
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

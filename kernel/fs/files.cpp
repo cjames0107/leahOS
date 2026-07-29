@@ -473,9 +473,20 @@ i64 getdents(const char* path, void* buffer, usize max_entries)
     char resolved[kPathMax];
     resolve(path, resolved);
 
-    // vfs::Entry is large (256-byte names); a page holds plenty for one dir.
-    static vfs::Entry entries[64];
+    // vfs::Entry is large (256-byte names), so 64 of them will not go on the
+    // stack - but they must not be one shared static either. Listing a
+    // directory waits on the disk, the kernel lock is handed on while it waits,
+    // and a second program listing something in the meantime writes its answer
+    // over the first one's. Two windows opening at once was enough: whichever
+    // asked first came back with an empty folder.
     const usize cap = max_entries < 64 ? max_entries : 64;
+    auto* entries = static_cast<vfs::Entry*>(kmalloc(cap * sizeof(vfs::Entry)));
+    if (entries == nullptr)
+        return -1;
+    struct Free {
+        vfs::Entry* p;
+        ~Free() { kfree(p); }
+    } release{entries};
 
     usize count = 0;
     if (!vfs::list(resolved, entries, cap, count))

@@ -31,9 +31,14 @@ fi
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 
-# Fixed files the kernel self-test reads. README.MD is deliberately larger than
+# Fixed files the kernel self-test reads. readme.md is deliberately larger than
 # one 4 KiB block so reading it exercises multi-block mapping (an extent that
 # spans several blocks), mirroring the FAT32 image's cluster-chain file.
+#
+# They live under /docs rather than in the root: the root is for what a person
+# put there, and two test fixtures sitting in it were the first thing anyone saw
+# when they opened the file browser. Moving them meant moving the paths the
+# kernel checks, which is the whole reason they had been left where they were.
 mkdir -p "$STAGING/BIN" "$STAGING/docs"
 
 # Application bundles. A .app is a directory that carries its own description,
@@ -65,7 +70,7 @@ stage_bundle() {
     } > "$dir/Info"
     python3 tools/mkicon.py "$dir/Icon.png" "$app"
 }
-printf 'Hello from ext4.\n' > "$STAGING/HELLO.TXT"
+printf 'Hello from ext4.\n' > "$STAGING/docs/hello.txt"
 printf 'Notes live in a subdirectory.\n' > "$STAGING/docs/notes.txt"
 {
     printf '# leahOS\n\n'
@@ -73,7 +78,7 @@ printf 'Notes live in a subdirectory.\n' > "$STAGING/docs/notes.txt"
         printf 'leahOS reads this file back through the ext driver, block by block. '
     done
     printf '\n'
-} > "$STAGING/README.MD"
+} > "$STAGING/docs/readme.md"
 
 # Accounts, home directories and the shadow file.
 python3 "$(dirname "$0")/mkaccounts.py" "$STAGING"
@@ -119,10 +124,14 @@ stage_app Elements  uitest   ""              ""
 # nor the on-disk format to know anything new. See bundle.h.
 stage_desktop() {                   # <home>
     local home="$1"
-    mkdir -p "$STAGING/$home/Desktop"
+    # A home is a place to keep things, so it arrives with somewhere to keep
+    # them. Public is the only one whose mode differs, and the only one that
+    # needs explaining: it is the one other people may look in.
+    mkdir -p "$STAGING/$home/Desktop" "$STAGING/$home/Documents" \
+             "$STAGING/$home/Apps" "$STAGING/$home/Public"
     printf '/Apps/Files.app\n' > "$STAGING/$home/Desktop/Files.alias"
     printf '/Apps/Edit.app\n'  > "$STAGING/$home/Desktop/Notepad.alias"
-    printf '/README.MD\n'      > "$STAGING/$home/Desktop/Readme.alias"
+    printf '/docs/readme.md\n' > "$STAGING/$home/Desktop/Readme.alias"
 }
 stage_desktop root
 stage_desktop home/leah
@@ -162,15 +171,20 @@ if [ -x "$DEBUGFS" ]; then
         echo "sif /root uid 0"
         echo "sif /root gid 0"
         echo "sif /root mode 040700"
-        echo "sif /root/readme.txt uid 0"
-        echo "sif /root/readme.txt gid 0"
-        echo "sif /root/readme.txt mode 0100600"
+        # root's folders and desktop are root's too - mke2fs -d gave them to
+        # whoever built the image.
+        for d in Desktop Documents Apps Public; do
+            echo "sif /root/$d uid 0"
+            echo "sif /root/$d gid 0"
+        done
+        for f in Files.alias Notepad.alias Readme.alias; do
+            echo "sif /root/Desktop/$f uid 0"
+            echo "sif /root/Desktop/$f gid 0"
+        done
+        echo "sif /root/Public mode 040755"
         echo "sif /home/leah uid 1000"
         echo "sif /home/leah gid 1000"
         echo "sif /home/leah mode 040700"
-        echo "sif /home/leah/readme.txt uid 1000"
-        echo "sif /home/leah/readme.txt gid 1000"
-        echo "sif /home/leah/readme.txt mode 0100600"
         # The desktop belongs to the account too - mke2fs -d copies the host's
         # ownership, so without this a user's own Desktop is owned by whoever
         # built the image and is read-only to them inside their own home.
@@ -178,17 +192,32 @@ if [ -x "$DEBUGFS" ]; then
             echo "sif /home/leah/Desktop$f uid 1000"
             echo "sif /home/leah/Desktop$f gid 1000"
         done
+        # The folders a home arrives with belong to the account too. Public is
+        # 0755 on purpose - it is the one that is meant to be readable.
+        for d in Documents Apps Public; do
+            echo "sif /home/leah/$d uid 1000"
+            echo "sif /home/leah/$d gid 1000"
+        done
+        echo "sif /home/leah/Documents mode 040700"
+        echo "sif /home/leah/Apps mode 040700"
+        echo "sif /home/leah/Public mode 040755"
         echo "sif /home/leah/Desktop mode 040700"
         echo "sif /home/guest uid 1001"
         echo "sif /home/guest gid 1001"
         echo "sif /home/guest mode 040700"
-        echo "sif /home/guest/readme.txt uid 1001"
-        echo "sif /home/guest/readme.txt gid 1001"
-        echo "sif /home/guest/readme.txt mode 0100600"
         for f in "" /Files.alias /Notepad.alias /Readme.alias; do
             echo "sif /home/guest/Desktop$f uid 1001"
             echo "sif /home/guest/Desktop$f gid 1001"
         done
+        # The folders a home arrives with belong to the account too. Public is
+        # 0755 on purpose - it is the one that is meant to be readable.
+        for d in Documents Apps Public; do
+            echo "sif /home/guest/$d uid 1001"
+            echo "sif /home/guest/$d gid 1001"
+        done
+        echo "sif /home/guest/Documents mode 040700"
+        echo "sif /home/guest/Apps mode 040700"
+        echo "sif /home/guest/Public mode 040755"
         echo "sif /home/guest/Desktop mode 040700"
     } | "$DEBUGFS" -w "$OUT" >/dev/null 2>&1
 fi

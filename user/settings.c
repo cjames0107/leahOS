@@ -90,12 +90,13 @@ static const char* kPatterns[WS_PATTERN_COUNT] = {
 };
 static int g_element;
 
-static const uint32_t kSwatch[16] = {
-    0x000000, 0x404040, 0x808080, 0xC0C0C0,
-    0xFFFFFF, 0x800000, 0xFF0000, 0x804000,
-    0x808000, 0x008000, 0x00C000, 0x008080,
-    0x000080, 0x0000FF, 0x800080, 0xC08040,
-};
+/* Where the RGB picker sits on the Appearance page, and which of its sliders
+ * is being dragged. Dragging matters more than clicking here: you find a
+ * colour by sweeping until it looks right, not by landing on a number. */
+#define PICK_X (SIDEBAR + 90)
+#define PICK_Y 118
+#define PICK_W 300
+static int g_pick_drag = -1;
 
 /* Written through to the user's file as well as to the running desktop, so a
  * choice survives the session that made it. */
@@ -142,6 +143,23 @@ static void apply_saved_theme(void)
     while (paper[n] != '\0' && n < 126) { g_ws->theme.wallpaper[n] = paper[n]; ++n; }
     g_ws->theme.wallpaper[n] = '\0';
     __atomic_add_fetch(&g_ws->theme.generation, 1, __ATOMIC_RELEASE);
+}
+
+/* What the sliders should start at: whatever the chosen element is already,
+ * so opening the picker never throws away the current colour. */
+static uint32_t element_colour(void)
+{
+    if (g_ws == 0)
+        return 0x808080;
+    switch (g_element) {
+    case EL_DESKTOP: return g_ws->theme.desktop;
+    case EL_FACE:    return g_ws->theme.face;
+    case EL_TITLE:   return g_ws->theme.title_active;
+    case EL_CURSOR:  return g_ws->theme.cursor;
+    case EL_SEL:     return g_ws->theme.selection;
+    case EL_BODY:    return g_ws->theme.body;
+    }
+    return 0x808080;
 }
 
 static void set_colour(uint32_t c)
@@ -356,52 +374,47 @@ static void draw_appearance(void)
                   kElements[i], g_element == i);
 
     wg_text(SIDEBAR + 14, 122, "colour", WG_DIM);
-    for (int i = 0; i < 16; ++i) {
-        const int x = SIDEBAR + 90 + (i % 8) * 30;
-        const int y = 118 + (i / 8) * 30;
-        wg_fill(x, y, 26, 26, kSwatch[i]);
-        wg_bevel(x, y, 26, 26, 1);
-    }
+    wg_rgb_draw(PICK_X, PICK_Y, PICK_W, element_colour());
 
-    wg_text(SIDEBAR + 14, 182, "text", WG_DIM);
-    wg_button(SIDEBAR + 90, 178, 74, 22, "normal",
+    wg_text(SIDEBAR + 14, 196, "text", WG_DIM);
+    wg_button(SIDEBAR + 90, 192, 74, 22, "normal",
               g_ws && g_ws->theme.text_scale != 2);
-    wg_button(SIDEBAR + 168, 178, 74, 22, "large",
+    wg_button(SIDEBAR + 168, 192, 74, 22, "large",
               g_ws && g_ws->theme.text_scale == 2);
 
-    wg_text(SIDEBAR + 14, 210, "contrast", WG_DIM);
-    wg_button(SIDEBAR + 90, 206, 34, 22, "-", 0);
-    wg_button(SIDEBAR + 126, 206, 34, 22, "+", 0);
+    wg_text(SIDEBAR + 14, 224, "contrast", WG_DIM);
+    wg_button(SIDEBAR + 90, 220, 34, 22, "-", 0);
+    wg_button(SIDEBAR + 126, 220, 34, 22, "+", 0);
     {
         char c[24];
         snprintf(c, sizeof(c), "%d", g_ws ? (int)g_ws->theme.contrast : 0);
-        wg_text(SIDEBAR + 166, 209, c, WG_INK);
+        wg_text(SIDEBAR + 166, 223, c, WG_INK);
     }
 
-    wg_text(SIDEBAR + 14, 238, "pattern", WG_DIM);
+    wg_text(SIDEBAR + 14, 252, "pattern", WG_DIM);
     for (int i = 0; i < WS_PATTERN_COUNT; ++i)
-        wg_button(SIDEBAR + 90 + i * 62, 234, 58, 22, kPatterns[i],
+        wg_button(SIDEBAR + 90 + i * 62, 248, 58, 22, kPatterns[i],
                   g_ws && (int)g_ws->theme.pattern == i);
 
     /* A live preview, so a choice can be judged before it is made. */
-    wg_text(SIDEBAR + 320, 182, "preview", WG_DIM);
-    const int px = SIDEBAR + 320, py = 200;
+    wg_text(SIDEBAR + 320, 196, "preview", WG_DIM);
+    const int px = SIDEBAR + 320, py = 214;
     wg_fill(px, py, 150, 60, g_ws ? g_ws->theme.desktop : 0x008080);
     wg_fill(px + 12, py + 10, 110, 40, g_ws ? g_ws->theme.face : 0xC0C0C0);
     wg_bevel(px + 12, py + 10, 110, 40, 1);
     wg_fill(px + 15, py + 13, 104, 12, g_ws ? g_ws->theme.title_active : 0x000080);
     wg_bevel(px, py, 150, 60, 0);
 
-    wg_text(SIDEBAR + 14, 266, "wallpaper", WG_DIM);
-    wg_button(SIDEBAR + 90, 262, 130, 24, "Choose a PNG...", 0);
-    wg_button(SIDEBAR + 228, 262, 96, 24, "Remove", 0);
+    wg_text(SIDEBAR + 14, 280, "wallpaper", WG_DIM);
+    wg_button(SIDEBAR + 90, 276, 130, 24, "Choose a PNG...", 0);
+    wg_button(SIDEBAR + 228, 276, 96, 24, "Remove", 0);
     if (g_ws != 0 && g_ws->theme.wallpaper[0] != '\0')
-        wg_text_clipped(SIDEBAR + 90, 290, (const char*)g_ws->theme.wallpaper,
+        wg_text_clipped(SIDEBAR + 90, 304, (const char*)g_ws->theme.wallpaper,
                         WG_INK, (int)g_w - SIDEBAR - 105);
     else
-        wg_text(SIDEBAR + 90, 290, "none - the pattern shows", WG_DIM);
+        wg_text(SIDEBAR + 90, 304, "none - the pattern shows", WG_DIM);
 
-    wg_text_clipped(SIDEBAR + 14, 314,
+    wg_text_clipped(SIDEBAR + 14, 328,
                     "saved to ~/.leahrc and restored when settings next starts",
                     WG_DIM, (int)g_w - SIDEBAR - 28);
 }
@@ -557,6 +570,11 @@ int main(int argc, char** argv)
                 g_px = win_map(id);
                 if (g_px == 0) return 1;
                 wg_target(g_px, g_w, g_h);
+            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_pick_drag >= 0) {
+                set_colour(wg_rgb_move(element_colour(), g_pick_drag,
+                                       PICK_X, PICK_W, e.x));
+            } else if (e.type == WIN_EVENT_MOUSE_UP) {
+                g_pick_drag = -1;
             } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
                 if (e.x < SIDEBAR) {
                     const int i = (e.y - 10) / ROW_H;
@@ -574,19 +592,17 @@ int main(int argc, char** argv)
                             e.y >= by && e.y < by + 22)
                             g_element = i;
                     }
-                    for (int i = 0; i < 16; ++i) {
-                        const int x = SIDEBAR + 90 + (i % 8) * 30;
-                        const int y = 118 + (i / 8) * 30;
-                        if (e.x >= x && e.x < x + 26 && e.y >= y && e.y < y + 26)
-                            set_colour(kSwatch[i]);
-                    }
-                    if (g_ws != 0 && e.y >= 178 && e.y < 200) {
+                    g_pick_drag = wg_rgb_hit(PICK_X, PICK_Y, PICK_W, e.x, e.y);
+                    if (g_pick_drag >= 0)
+                        set_colour(wg_rgb_move(element_colour(), g_pick_drag,
+                                               PICK_X, PICK_W, e.x));
+                    if (g_ws != 0 && e.y >= 192 && e.y < 214) {
                         if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 164)
                             { g_ws->theme.text_scale = 1; theme_changed(); }
                         else if (e.x >= SIDEBAR + 168 && e.x < SIDEBAR + 242)
                             { g_ws->theme.text_scale = 2; theme_changed(); }
                     }
-                    if (g_ws != 0 && e.y >= 206 && e.y < 228) {
+                    if (g_ws != 0 && e.y >= 220 && e.y < 242) {
                         int c = g_ws->theme.contrast;
                         if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 124) c -= 10;
                         else if (e.x >= SIDEBAR + 126 && e.x < SIDEBAR + 160) c += 10;
@@ -595,7 +611,7 @@ int main(int argc, char** argv)
                         if (c != g_ws->theme.contrast)
                             { g_ws->theme.contrast = c; theme_changed(); }
                     }
-                    if (g_ws != 0 && e.y >= 234 && e.y < 256) {
+                    if (g_ws != 0 && e.y >= 248 && e.y < 270) {
                         for (int i = 0; i < WS_PATTERN_COUNT; ++i)
                             if (e.x >= SIDEBAR + 90 + i * 62 &&
                                 e.x < SIDEBAR + 148 + i * 62)
@@ -603,10 +619,10 @@ int main(int argc, char** argv)
                                   theme_changed(); }
                     }
                     if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 220 &&
-                        e.y >= 262 && e.y < 286)
+                        e.y >= 276 && e.y < 300)
                         dlg_save("/", "wallpaper.png");   /* a picker, reused */
                     else if (e.x >= SIDEBAR + 228 && e.x < SIDEBAR + 324 &&
-                             e.y >= 262 && e.y < 286)
+                             e.y >= 276 && e.y < 300)
                         set_wallpaper("");
                 } else if (g_page == PAGE_USERS) {
                     if (inside(&g_f_name, e.x, e.y))      g_ufield = 1;
@@ -617,6 +633,11 @@ int main(int argc, char** argv)
                     else if (inside(&g_b_open, e.x, e.y)) set_home_mode(0755);
                     else g_ufield = 0;
                 }
+            } else if (e.type == WIN_EVENT_KEY &&
+                       (e.key == WIN_KEY_UP || e.key == WIN_KEY_DOWN)) {
+                /* The sidebar is a list, so it walks like one. */
+                const int to = g_page + (e.key == WIN_KEY_DOWN ? 1 : -1);
+                if (to >= 0 && to < PAGES) { g_page = to; g_note[0] = '\0'; }
             } else if (e.type == WIN_EVENT_KEY && g_page == PAGE_USERS) {
                 char* f = g_ufield == 1 ? g_uname : g_ufield == 2 ? g_upass : 0;
                 if (f == 0)

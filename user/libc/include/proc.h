@@ -40,4 +40,11 @@ struct mem_info {
 
 int mem_info(struct mem_info* out);
 
+/* Per-processor slice counts. Returns how many processors were reported. */
+struct cpu_stat {
+    uint64_t busy;
+    uint64_t idle;
+};
+int cpu_info(struct cpu_stat* out, int max);
+
 #endif /* _PROC_H */

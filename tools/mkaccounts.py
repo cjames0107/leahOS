@@ -55,12 +55,12 @@ def main() -> int:
             digest = password_hash(salt, password, ITERATIONS)
             handle.write(f"{name}:{uid}:{gid}:{home}:{salt}:{ITERATIONS}:{digest}\n")
 
-    # Home directories, with a file in each so there is something to see.
-    for name, _uid, _gid, home, _salt, _password in ACCOUNTS:
-        path = os.path.join(staging, home.lstrip("/"))
-        os.makedirs(path, exist_ok=True)
-        with open(os.path.join(path, "readme.txt"), "w") as handle:
-            handle.write(f"This is {name}'s home directory.\n")
+    # Home directories. Empty of files on purpose: mkext.sh gives each one a
+    # Desktop, Documents, Apps and Public, which is something to see and
+    # somewhere to put things. A readme explaining whose directory you are
+    # already standing in was neither.
+    for _name, _uid, _gid, home, _salt, _password in ACCOUNTS:
+        os.makedirs(os.path.join(staging, home.lstrip("/")), exist_ok=True)
 
     print(f"accounts: {len(ACCOUNTS)} users, {ITERATIONS} hash iterations")
     return 0

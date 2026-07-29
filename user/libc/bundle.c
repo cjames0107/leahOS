@@ -173,10 +173,25 @@ int bundle_command(const char* name, char* out, int max)
     return 0;
 }
 
+/* A small ring of buffers rather than one.
+ *
+ * Returning a pointer into a single static means two calls in one expression
+ * both see the second answer - and the natural way to write this is exactly
+ * that:
+ *
+ *     const char* which[] = { app_path("Files"), app_path("Terminal") };
+ *
+ * which quietly started two terminals and no file manager. Four slots is
+ * enough for every list this system builds, and the alternative - making every
+ * caller pass a buffer - would be a worse function that gets this wrong in a
+ * new place each time. */
 const char* app_path(const char* name)
 {
-    static char buf[256];
-    if (bundle_command(name, buf, sizeof(buf)) != 0)
+    static char ring[4][256];
+    static int next;
+    char* buf = ring[next];
+    next = (next + 1) & 3;
+    if (bundle_command(name, buf, sizeof(ring[0])) != 0)
         buf[0] = '\0';
     return buf;
 }

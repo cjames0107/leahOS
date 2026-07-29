@@ -1,6 +1,7 @@
 #include <leah/heap.hpp>
 #include <leah/memory.hpp>
 #include <leah/pmm.hpp>
+#include <leah/scheduler.hpp>
 #include <leah/shm.hpp>
 #include <leah/string.hpp>
 #include <leah/vmm.hpp>
@@ -81,6 +82,14 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
         // it public.
         if (!accessible(static_cast<i32>(i), uid))
             return -1;
+        // The slot is claimed before its frames exist, so a segment can be
+        // found here while it is still being built. pages is set last and is
+        // therefore the signal that it is finished; waiting is right, because
+        // the answer is about to be yes.
+        for (u32 spin = 0; g_segments[i].pages == 0 && spin < 10000; ++spin)
+            scheduler::yield();
+        if (g_segments[i].pages == 0)
+            return -1;
         return static_cast<i32>(i);
     }
 
@@ -94,14 +103,27 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
         Segment& segment = g_segments[i];
         if (segment.used)
             continue;
+        // Claim the slot before filling it, not after.
+        //
+        // allocate() asks the page allocator for a frame per page, and a window
+        // is hundreds of pages; a task holding the kernel lock that long will be
+        // preempted, and the lock is handed on when that happens. So another
+        // task can arrive here in the middle - and if the slot still says it is
+        // free it picks the same one, zeroes the Segment, and the first task
+        // resumes writing frames through a pointer that is now null. That is a
+        // kernel panic a few hundred pages into whichever window happened to be
+        // second, which is to say: whenever two programs opened a window at
+        // once.
         memset(&segment, 0, sizeof(segment));
-        if (!allocate(segment, pages))
-            return -1;
         segment.used      = true;
         segment.key       = key;
         segment.owner_uid = uid;
         segment.bytes     = bytes;
         segment.flags     = flags;
+        if (!allocate(segment, pages)) {
+            segment.used = false;
+            return -1;
+        }
         return static_cast<i32>(i);
     }
     return -1;

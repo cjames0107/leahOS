@@ -467,16 +467,37 @@ bool handle_cow_fault(vaddr_t virt)
         return false;
 
     const u64 entry = *pt_entry;
-    if ((entry & Present) == 0 || (entry & CopyOnWrite) == 0)
+    if ((entry & Present) == 0)
+        return false;
+
+    // The page is already writable, so the write that faulted was legal and the
+    // fault is stale: this CPU cached the read-only translation from before the
+    // page was made private, and nothing has flushed it since. Dropping the one
+    // entry and letting the instruction run again is the whole repair.
+    //
+    // This is not a rare corner. A task that resolves a copy-on-write fault on
+    // one processor and is then rescheduled onto another finds exactly this,
+    // and without the case it was killed for a protection violation on its own
+    // stack - which is how the desktop died a few seconds into a session on any
+    // machine with more than one processor.
+    if ((entry & Write) != 0) {
+        invalidate(virt);
+        return true;
+    }
+
+    if ((entry & CopyOnWrite) == 0)
         return false;
 
     const paddr_t source = entry & kAddressMask;
     const u64 flags = (entry & (User | NoExecute)) | Present | Write;
 
     if (!pmm::is_shared(source)) {
-        // Everyone else has already copied away; reclaim it in place.
+        // Everyone else has already copied away; reclaim it in place. The
+        // permissions still widen, so the other processors have to be told:
+        // theirs would otherwise keep the read-only entry that caused this.
         *pt_entry = source | flags;
         invalidate(virt);
+        shootdown();
         return true;
     }
 

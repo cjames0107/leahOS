@@ -431,20 +431,20 @@ void self_test_fs()
         panic("vfs: no filesystem mounted");
 
     u64 size = 0;
-    char* hello = vfs::read_entire_file("/HELLO.TXT", &size);
+    char* hello = vfs::read_entire_file("/docs/hello.txt", &size);
     if (hello == nullptr || size != 17)
-        panic("ext: /HELLO.TXT did not read back at its stated size");
+        panic("ext: /docs/hello.txt did not read back at its stated size");
     if (memcmp(hello, "Hello from ext4.\n", 17) != 0)
-        panic("ext: /HELLO.TXT contents are wrong");
+        panic("ext: /docs/hello.txt contents are wrong");
     kfree(hello);
 
     // Larger than one 4 KiB block, so this only passes if the block map walks
     // past the first block correctly.
     vfs::Stat readme{};
-    if (!vfs::stat("/README.MD", readme) || readme.size < 4096)
-        panic("ext: /README.MD is missing or unexpectedly small");
+    if (!vfs::stat("/docs/readme.md", readme) || readme.size < 4096)
+        panic("ext: /docs/readme.md is missing or unexpectedly small");
 
-    char* text = vfs::read_entire_file("/README.MD", &size);
+    char* text = vfs::read_entire_file("/docs/readme.md", &size);
     if (text == nullptr || size != readme.size)
         panic("ext: short read on a multi-block file");
     if (memcmp(text, "# leahOS", 8) != 0)

@@ -13,6 +13,7 @@
 
 #include <dialog.h>
 #include <proc.h>
+#include <wproto.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,11 +40,17 @@ static int g_scroll;
 static struct mem_info g_mem;
 static char g_note[96] = "right-click a task for actions";
 
-/* A history of total scheduling activity, drawn as a strip chart - the shape
- * over time says more than any single number. */
+/* A history per processor, drawn as one strip chart each - which is the whole
+ * reason for showing them separately. One combined line cannot tell "every core
+ * half busy" from "one core pinned and the rest asleep", and those are different
+ * problems. */
 #define HIST 120
-static unsigned char g_hist[HIST];
+#define MAX_CPU 8
+static unsigned char g_hist[MAX_CPU][HIST];
 static int g_hist_at;
+static int g_cpus;
+static struct cpu_stat g_cpu[MAX_CPU], g_cpu_last[MAX_CPU];
+static int g_bar_drag;
 
 static const char* state_name(uint32_t s)
 {
@@ -78,22 +85,39 @@ static void refresh(void)
         g_last_ticks[i] = i < g_n ? g_procs[i].ticks : 0;
     }
 
-    /* The idle tasks are most of the slices on a quiet machine; charting them
-     * would show a flat 100% and say nothing. */
-    uint64_t busy = 0;
-    for (int i = 0; i < g_n; ++i)
-        if (strcmp(g_procs[i].name, "idle") != 0)
-            busy += g_delta[i];
-    unsigned char bar = 0;
-    if (g_delta_total > 0) {
-        const uint64_t pct = busy * 100 / g_delta_total;
-        bar = (unsigned char)(pct > 100 ? 100 : pct);
+    /* Per processor, from the kernel's own counters rather than inferred from
+     * the task list: a slice is attributed where it was actually run. */
+    g_cpus = cpu_info(g_cpu, MAX_CPU);
+    if (g_cpus < 0)
+        g_cpus = 0;
+    for (int c = 0; c < g_cpus; ++c) {
+        const uint64_t db = g_cpu[c].busy > g_cpu_last[c].busy
+                          ? g_cpu[c].busy - g_cpu_last[c].busy : 0;
+        const uint64_t di = g_cpu[c].idle > g_cpu_last[c].idle
+                          ? g_cpu[c].idle - g_cpu_last[c].idle : 0;
+        const uint64_t tot = db + di;
+        g_hist[c][g_hist_at] = (unsigned char)(tot > 0 ? db * 100 / tot : 0);
+        g_cpu_last[c] = g_cpu[c];
     }
-    g_hist[g_hist_at] = bar;
     g_hist_at = (g_hist_at + 1) % HIST;
 }
 
-static int rows_visible(void) { return ((int)g_h - HEAD_H - 20) / ROW_H; }
+static int rows_visible(void)
+{
+    const int n = ((int)g_h - HEAD_H - 20) / ROW_H;
+    return n > 0 ? n : 1;
+}
+
+static int bar_x(void) { return (int)g_w - 6 - WG_SCROLL_W; }
+static int list_h(void) { return (int)g_h - HEAD_H - 20; }
+
+static void scroll_to(int first)
+{
+    const int most = g_n - rows_visible();
+    if (first > most) first = most;
+    if (first < 0) first = 0;
+    g_scroll = first;
+}
 
 static void meter(int x, int y, int w, int h, uint64_t part, uint64_t whole,
                   const char* label)
@@ -123,17 +147,32 @@ static void draw(void)
              (unsigned long long)(g_mem.usable / 1024));
     meter(10, 26, 160, 14, g_mem.used, g_mem.usable, line);
 
-    /* The strip chart: oldest on the left. */
-    const int cx = (int)g_w - HIST - 14, cy = 8, ch = 46;
-    wg_fill(cx, cy, HIST, ch, 0x101820);
-    wg_bevel(cx, cy, HIST, ch, 0);
-    for (int i = 0; i < HIST; ++i) {
-        const int v = g_hist[(g_hist_at + i) % HIST];
-        const int bar = v * (ch - 2) / 100;
-        if (bar > 0)
-            wg_fill(cx + i, cy + ch - 1 - bar, 1, bar, 0x40D040);
+    /* One strip chart per processor, side by side and oldest on the left. They
+     * are narrower the more there are, which keeps the header one height
+     * whatever the machine turns out to have. */
+    const int n = g_cpus > 0 ? g_cpus : 1;
+    const int total_w = HIST + 60;
+    const int each = (total_w / n) - 4;
+    const int cy = 8, ch = 46;
+    for (int c = 0; c < n; ++c) {
+        const int cx = (int)g_w - total_w - 10 + c * (each + 4);
+        if (each < 8)
+            break;
+        wg_fill(cx, cy, each, ch, 0x101820);
+        wg_bevel(cx, cy, each, ch, 0);
+        for (int i = 0; i < each; ++i) {
+            /* Take the most recent `each` samples, so a narrow chart shows the
+             * recent past rather than a squashed whole history. */
+            const int s_i = (g_hist_at - each + i + 2 * HIST) % HIST;
+            const int v = g_hist[c][s_i];
+            const int bar = v * (ch - 2) / 100;
+            if (bar > 0)
+                wg_fill(cx + i, cy + ch - 1 - bar, 1, bar, 0x40D040);
+        }
+        char lab[16];
+        snprintf(lab, sizeof(lab), "cpu %d", c);
+        wg_text(cx, cy + ch + 2, lab, WG_DIM);
     }
-    wg_text(cx, cy + ch + 2, "scheduler activity", WG_DIM);
 
     const int top = HEAD_H;
     wg_text(10, top - 16, "pid", WG_DIM);
@@ -143,8 +182,10 @@ static void draw(void)
     wg_text(320, top - 16, "memory", WG_DIM);
     wg_text(420, top - 16, "uid", WG_DIM);
 
-    wg_fill(4, top, (int)g_w - 8, (int)g_h - top - 20, WG_PAPER);
-    wg_bevel(4, top, (int)g_w - 8, (int)g_h - top - 20, 0);
+    wg_fill(4, top, (int)g_w - 8, list_h(), wg_body_colour());
+    wg_bevel(4, top, (int)g_w - 8, list_h(), 0);
+    wg_scrollbar_v(bar_x(), top, list_h(), g_scroll, rows_visible(),
+                   g_n > 0 ? g_n : 1);
 
     const int rows = rows_visible();
     for (int r = 0; r < rows; ++r) {
@@ -238,13 +279,41 @@ int main(int argc, char** argv)
                 if (g_px == 0) return 1;
                 wg_target(g_px, g_w, g_h);
             } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
+                if (e.x >= bar_x() && e.y >= HEAD_H) {
+                    if (wg_scroll_on_thumb_v(e.y, HEAD_H, list_h(), g_scroll,
+                                             rows_visible(), g_n > 0 ? g_n : 1))
+                        g_bar_drag = 1;
+                    else
+                        scroll_to(wg_scroll_hit_v(e.x, e.y, bar_x(), HEAD_H,
+                            list_h(), g_scroll, rows_visible(),
+                            g_n > 0 ? g_n : 1));
+                    draw(); menu_draw(); win_present(id);
+                    continue;
+                }
                 const int hit = g_scroll + (e.y - HEAD_H - 2) / ROW_H;
                 if (e.y >= HEAD_H && hit >= 0 && hit < g_n)
                     g_sel = hit;
                 if (e.button == 2 && g_sel >= 0)
                     menu_open(e.x, e.y, kMenu, 3);
+            } else if (e.type == WIN_EVENT_MOUSE_UP) {
+                g_bar_drag = 0;
+            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_bar_drag) {
+                scroll_to(wg_scroll_drag_v(e.y, HEAD_H, list_h(),
+                                           rows_visible(), g_n > 0 ? g_n : 1));
             } else if (e.type == WIN_EVENT_KEY) {
-                if (e.key == 'r') refresh();
+                /* Arrows move the selection and drag the view along with it,
+                 * which is what makes a long list navigable without a mouse. */
+                if (e.key == WIN_KEY_DOWN || e.key == WIN_KEY_UP) {
+                    if (e.key == WIN_KEY_DOWN && g_sel + 1 < g_n) ++g_sel;
+                    else if (e.key == WIN_KEY_UP && g_sel > 0) --g_sel;
+                    if (g_sel < g_scroll) scroll_to(g_sel);
+                    else if (g_sel >= g_scroll + rows_visible())
+                        scroll_to(g_sel - rows_visible() + 1);
+                } else if (e.key == WIN_KEY_RIGHT) {
+                    scroll_to(g_scroll + rows_visible());
+                } else if (e.key == WIN_KEY_LEFT) {
+                    scroll_to(g_scroll - rows_visible());
+                } else if (e.key == 'r') refresh();
                 else if (e.key == 'k' && g_sel >= 0 && g_sel < g_n)
                     kill((int)g_procs[g_sel].pid, SIGTERM);
             } else {

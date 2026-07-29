@@ -484,6 +484,18 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
     }
 
+    case CpuInfo: {
+        const u32 max = static_cast<u32>(frame->rsi);
+        const u64 bytes = static_cast<u64>(max) * sizeof(scheduler::CpuStat);
+        if (max == 0 || max > 32 || !user_range_ok(frame->rdi, bytes)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = scheduler::cpu_stats(
+            reinterpret_cast<scheduler::CpuStat*>(frame->rdi), max);
+        break;
+    }
+
     case ThreadExit:
         scheduler::exit_current(static_cast<i32>(frame->rdi));   // never returns
 

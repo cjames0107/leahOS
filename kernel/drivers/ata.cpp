@@ -1,5 +1,6 @@
 #include <leah/ata.hpp>
 #include <leah/io.hpp>
+#include <leah/spinlock.hpp>
 #include <leah/string.hpp>
 
 namespace ata {
@@ -53,6 +54,22 @@ struct DriveInfo {
 
 DriveInfo g_drives[kMaxDrives]{};
 usize g_count = 0;
+
+// One lock per channel, held across the whole command.
+//
+// A channel has one set of registers, so a transfer is not a sequence of
+// independent steps - it is one conversation, and a second command issued
+// part-way through ends the first. Nothing enforced that: the caller selected a
+// drive, issued READ, and then spun reading sectors, and if it was preempted in
+// the middle (the kernel lock is handed on when that happens) another task could
+// walk straight into the same registers. Both then got someone else's sectors,
+// or nothing at all.
+//
+// Interrupts are masked while it is held for the reason the header gives: a
+// holder that is preempted leaves anyone spinning with interrupts already off
+// waiting forever. Both wait loops here are bounded, so a dead drive costs a
+// bounded stall rather than the machine.
+sync::Spinlock g_channel_lock[2];
 
 const Channel& channel_of(const DriveInfo& d) { return kChannels[d.channel]; }
 
@@ -245,6 +262,7 @@ bool read(usize index, u64 lba, u32 count, void* buffer)
 
     const DriveInfo& d = g_drives[index];
     const Channel& channel = channel_of(d);
+    sync::IrqScopedLock guard(g_channel_lock[d.channel]);
 
     if (!begin_transfer(d, lba, count, false))
         return false;
@@ -266,6 +284,7 @@ bool write(usize index, u64 lba, u32 count, const void* buffer)
 
     const DriveInfo& d = g_drives[index];
     const Channel& channel = channel_of(d);
+    sync::IrqScopedLock guard(g_channel_lock[d.channel]);
 
     if (!begin_transfer(d, lba, count, true))
         return false;

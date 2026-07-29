@@ -19,7 +19,7 @@
 #include <widget.h>
 #include <window.h>
 
-#define TOOLBAR_H 56
+#define TOOLBAR_H 92
 #define STATUS_H  18
 
 #define T_PENCIL 0
@@ -39,20 +39,21 @@ static char g_note[96] = "click a tool, drag on the canvas";
 
 static int g_drawing, g_ax, g_ay, g_lx, g_ly;
 
-static const uint32_t kPalette[12] = {
-    0x000000, 0xFFFFFF, 0x808080, 0xC0C0C0,
-    0x800000, 0xFF0000, 0x808000, 0xFFFF00,
-    0x008000, 0x00FF00, 0x000080, 0x0000FF,
-};
 static const char* kToolName[TOOLS] = { "Pencil", "Line", "Rect", "Fill", "Eraser" };
+
+/* The ink is mixed rather than chosen from a tray. Twelve fixed colours are
+ * twelve pictures you can paint; three sliders are all of them. */
+#define PICK_X 6
+#define PICK_Y 28
+#define PICK_W 288
+static int g_pick_drag = -1;
 
 struct box { int x, y, w, h; };
 static struct box g_tool_box[TOOLS];
-static struct box g_pal[12];
 static struct box g_size_box[3];
-static struct box g_png = { 300, 30, 64, 20 };
-static struct box g_gif = { 368, 30, 64, 20 };
-static struct box g_clr = { 240, 30, 56, 20 };
+static struct box g_png = { 306, 30, 64, 20 };
+static struct box g_gif = { 306, 54, 64, 20 };
+static struct box g_clr = { 376, 30, 64, 20 };
 
 static int inside(const struct box* b, int x, int y)
 {
@@ -65,12 +66,8 @@ static void layout(void)
         g_tool_box[i].x = 6 + i * 58; g_tool_box[i].y = 5;
         g_tool_box[i].w = 56; g_tool_box[i].h = 20;
     }
-    for (int i = 0; i < 12; ++i) {
-        g_pal[i].x = 6 + i * 18; g_pal[i].y = 30;
-        g_pal[i].w = 16; g_pal[i].h = 20;
-    }
     for (int i = 0; i < 3; ++i) {
-        g_size_box[i].x = 300 + i * 26; g_size_box[i].y = 5;
+        g_size_box[i].x = 306 + i * 26; g_size_box[i].y = 5;
         g_size_box[i].w = 24; g_size_box[i].h = 20;
     }
 }
@@ -182,11 +179,7 @@ static void draw_chrome(void)
     for (int i = 0; i < TOOLS; ++i)
         wg_button(g_tool_box[i].x, g_tool_box[i].y, g_tool_box[i].w,
                   g_tool_box[i].h, kToolName[i], g_tool == i);
-    for (int i = 0; i < 12; ++i) {
-        wg_fill(g_pal[i].x, g_pal[i].y, g_pal[i].w, g_pal[i].h, kPalette[i]);
-        wg_bevel(g_pal[i].x, g_pal[i].y, g_pal[i].w, g_pal[i].h,
-                 kPalette[i] != g_colour);
-    }
+    wg_rgb_draw(PICK_X, PICK_Y, PICK_W, g_colour);
     for (int i = 0; i < 3; ++i) {
         char s[4] = { (char)('1' + i), 0 };
         wg_button(g_size_box[i].x, g_size_box[i].y, g_size_box[i].w,
@@ -214,7 +207,7 @@ int main(int argc, char** argv)
     g_px = win_map(id);
     if (g_px == 0)
         return 1;
-    win_set_min_size(id, 440, 240);
+    win_set_min_size(id, 450, 260);
     wg_target(g_px, g_w, g_h);
 
     layout();
@@ -249,8 +242,12 @@ int main(int argc, char** argv)
                 int handled = 0;
                 for (int i = 0; i < TOOLS; ++i)
                     if (inside(&g_tool_box[i], e.x, e.y)) { g_tool = i; handled = 1; }
-                for (int i = 0; i < 12; ++i)
-                    if (inside(&g_pal[i], e.x, e.y)) { g_colour = kPalette[i]; handled = 1; }
+                g_pick_drag = wg_rgb_hit(PICK_X, PICK_Y, PICK_W, e.x, e.y);
+                if (g_pick_drag >= 0) {
+                    g_colour = wg_rgb_move(g_colour, g_pick_drag, PICK_X,
+                                           PICK_W, e.x);
+                    handled = 1;
+                }
                 for (int i = 0; i < 3; ++i)
                     if (inside(&g_size_box[i], e.x, e.y)) { g_size = i + 1; handled = 1; }
                 if (inside(&g_clr, e.x, e.y)) { clear_canvas(); handled = 1; }
@@ -269,6 +266,9 @@ int main(int argc, char** argv)
                         g_drawing = 1;      /* line and rect commit on release */
                     }
                 }
+            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_pick_drag >= 0) {
+                g_colour = wg_rgb_move(g_colour, g_pick_drag, PICK_X, PICK_W,
+                                       e.x);
             } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_drawing) {
                 if (g_tool == T_PENCIL || g_tool == T_ERASE) {
                     const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
@@ -276,6 +276,7 @@ int main(int argc, char** argv)
                     g_lx = e.x; g_ly = e.y;
                 }
             } else if (e.type == WIN_EVENT_MOUSE_UP) {
+                g_pick_drag = -1;
                 if (g_drawing && g_tool == T_LINE)
                     line(g_ax, g_ay, e.x, e.y, g_colour);
                 else if (g_drawing && g_tool == T_RECT)

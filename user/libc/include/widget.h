@@ -32,6 +32,14 @@ void wg_target(uint32_t* pixels, unsigned width, unsigned height);
 void wg_theme(void);
 
 uint32_t wg_sel_colour(void);   /* the selection highlight   */
+
+/* An RGB picker: three sliders and a preview, occupying WG_RGB_H pixels.
+ * A grid of ready-made colours can only ever offer the colours somebody
+ * thought of; this offers all of them, and shows the one being made. */
+#define WG_RGB_H 62
+void     wg_rgb_draw(int x, int y, int w, uint32_t colour);
+int      wg_rgb_hit(int x, int y, int w, int mx, int my);   /* channel or -1 */
+uint32_t wg_rgb_move(uint32_t colour, int channel, int x, int w, int mx);
 uint32_t wg_body_colour(void);  /* a content-area background */
 uint32_t wg_ink_colour(void);   /* ink on that background    */
 unsigned wg_scale(void);        /* 1 or 2 - the text scale   */

@@ -192,6 +192,16 @@ struct TaskInfo {
 // live task, threads as well as processes - a thread is a task here.
 u32 snapshot(TaskInfo* out, u32 max);
 
+// Per-processor slice counts, for a monitor that wants to show more than one
+// bar. `busy` counts slices given to real work and `idle` those given to that
+// CPU's idle task; the difference between them is the only notion of "load"
+// this system has, and it is a share rather than a duty cycle.
+struct CpuStat {
+    u64 busy;
+    u64 idle;
+};
+u32 cpu_stats(CpuStat* out, u32 max);
+
 // The running task's address space, and a setter execve uses to swap in a
 // freshly loaded image's space (the caller frees the old one).
 vmm::AddressSpace current_task_space();

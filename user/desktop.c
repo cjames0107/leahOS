@@ -37,6 +37,7 @@ static struct ws_shared* g_ws;
 static struct dirent g_items[MAX_ICONS];
 static int g_n;
 static int g_sel = -1;
+static int g_enter_armed;   /* the first Enter of a double press */
 static char g_marked[MAX_ICONS];
 static int  g_anchor = -1;
 static char g_dir[128];
@@ -204,8 +205,24 @@ static void open_selected(void)
 }
 
 static const char* const kMenu[] = {
-    "Open", "-", "New file", "Files here", "Terminal", "Settings", "-", "Refresh"
+    "Open", "Rename", "-", "New file", "Files here", "Terminal", "Settings",
+    "-", "Refresh"
 };
+
+/* Renaming borrows the save dialogue: it already asks "which folder, what
+ * name", which is exactly the question. */
+static int  g_renaming;
+static char g_rename_from[256];
+
+static void begin_rename(void)
+{
+    if (g_sel < 0 || g_sel >= g_n)
+        return;
+    snprintf(g_rename_from, sizeof(g_rename_from), "%s/%s", g_dir,
+             g_items[g_sel].d_name);
+    g_renaming = 1;
+    dlg_save(g_dir, g_items[g_sel].d_name);
+}
 
 int main(void)
 {
@@ -244,21 +261,40 @@ int main(void)
         while (win_poll(id, &e)) {
             if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
 
+            /* While a dialogue is up it takes the input: a click meant for it
+             * must not also land on whatever icon is underneath. */
+            if (dlg_active()) {
+                const int answer = dlg_event(&e);
+                if (answer == DLG_ACCEPT && g_renaming) {
+                    g_renaming = 0;
+                    rename(g_rename_from, dlg_path());
+                    rescan();
+                } else if (answer == DLG_CANCEL) {
+                    g_renaming = 0;
+                }
+                draw();
+                dlg_draw((int)g_w, (int)g_h);
+                win_present(id);
+                continue;
+            }
+
             if (menu_active()) {
                 char full[256];
                 switch (menu_event(&e)) {
                 case 0: open_selected(); break;
-                case 2:
+                case 1: begin_rename(); break;
+                case 3:
                     snprintf(full, sizeof(full), "%s/untitled.txt", g_dir);
                     launch(app_path("Edit"), full);
                     break;
-                case 3: launch(app_path("Files"), g_dir); break;
-                case 4: launch(app_path("Terminal"), 0); break;
-                case 5: launch(app_path("Settings"), 0); break;
-                case 7: rescan(); break;
+                case 4: launch(app_path("Files"), g_dir); break;
+                case 5: launch(app_path("Terminal"), 0); break;
+                case 6: launch(app_path("Settings"), 0); break;
+                case 8: rescan(); break;
                 }
                 draw();
                 menu_draw();
+                dlg_draw((int)g_w, (int)g_h);
                 win_present(id);
                 continue;
             }
@@ -276,7 +312,7 @@ int main(void)
                     /* A menu either way: right-clicking bare desktop is still a
                      * question worth answering. */
                     if (hit >= 0 && !g_marked[hit]) { g_sel = hit; g_anchor = hit; }
-                    menu_open(e.x, e.y, kMenu, 8);
+                    menu_open(e.x, e.y, kMenu, 9);
                 } else if (hit >= 0) {
                     const uint32_t m = e.modifiers;
                     if (m & WIN_MOD_CTRL) {
@@ -303,7 +339,15 @@ int main(void)
                 }
             } else if (e.type == WIN_EVENT_KEY) {
                 const int cols = ((int)g_w - 16) / CELL_W;
-                if (e.key == '\n' || e.key == '\r') open_selected();
+                if (e.key != '\n' && e.key != '\r')
+                    g_enter_armed = 0;
+                /* Two presses to open, one to settle on an icon: the same rule
+                 * the mouse follows, so the keyboard needs no rule of its own
+                 * and a stray Enter cannot launch something. */
+                if (e.key == '\n' || e.key == '\r') {
+                    if (g_enter_armed) { g_enter_armed = 0; open_selected(); }
+                    else                 g_enter_armed = 1;
+                }
                 else if (e.key == 'r') rescan();
                 else if (e.key == WIN_KEY_RIGHT && g_sel + 1 < g_n) ++g_sel;
                 else if (e.key == WIN_KEY_LEFT && g_sel > 0) --g_sel;
@@ -316,6 +360,7 @@ int main(void)
             }
             draw();
             menu_draw();
+            dlg_draw((int)g_w, (int)g_h);
             win_present(id);
         }
 
@@ -328,12 +373,13 @@ int main(void)
          * outside and is not: it is this timer. Holding the refresh is the
          * better fix than repainting the menu over it, because rescanning would
          * also move the selection the menu was opened about. */
-        if (++tick >= 66 && !menu_active()) {
+        if (++tick >= 66 && !menu_active() && !dlg_active()) {
             tick = 0;
             reload_paper();
             rescan();
             draw();
             menu_draw();
+            dlg_draw((int)g_w, (int)g_h);
             win_present(id);
         }
         msleep(15);

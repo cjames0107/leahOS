@@ -1,6 +1,7 @@
 #include <display.h>
 #include <shm.h>
 #include <wproto.h>
+#include <stdio.h>
 #include <string.h>
 #include <widget.h>
 
@@ -75,6 +76,83 @@ void wg_fill(int x, int y, int w, int h, uint32_t colour)
     for (int row = y0; row < y1; ++row)
         for (int col = x0; col < x1; ++col)
             g_px[(unsigned)row * g_w + (unsigned)col] = colour;
+}
+
+/* --- the RGB picker -------------------------------------------------------
+ *
+ * Three tracks, each showing what its own channel does to the colour being
+ * built while the other two hold still. That is the whole trick: you can see
+ * the effect of a slider before you touch it, so choosing is looking rather
+ * than guessing.
+ */
+#define RGB_TRACK_X 22          /* room for the R/G/B letter */
+#define RGB_ROW     18
+#define RGB_SWATCH  54
+
+static int rgb_track_w(int w) { return w - RGB_TRACK_X - RGB_SWATCH - 12; }
+
+static unsigned rgb_channel(uint32_t colour, int ch)
+{
+    return (colour >> (16 - 8 * ch)) & 0xFFu;
+}
+
+static uint32_t rgb_with(uint32_t colour, int ch, unsigned v)
+{
+    const unsigned shift = (unsigned)(16 - 8 * ch);
+    return (colour & ~(0xFFu << shift)) | ((v & 0xFFu) << shift);
+}
+
+void wg_rgb_draw(int x, int y, int w, uint32_t colour)
+{
+    const int tw = rgb_track_w(w);
+    static const char kLabel[3] = { 'R', 'G', 'B' };
+    for (int ch = 0; ch < 3; ++ch) {
+        const int ty = y + ch * RGB_ROW;
+        const char lbl[2] = { kLabel[ch], 0 };
+        wg_text(x, ty + 1, lbl, WG_INK);
+        /* The gradient is the colour itself swept along one axis. */
+        for (int i = 0; i < tw; ++i) {
+            const unsigned v = (unsigned)(i * 255 / (tw > 1 ? tw - 1 : 1));
+            wg_fill(x + RGB_TRACK_X + i, ty + 2, 1, 12, rgb_with(colour, ch, v));
+        }
+        wg_bevel(x + RGB_TRACK_X - 1, ty + 1, tw + 2, 14, 0);
+        const int at = (int)(rgb_channel(colour, ch)) * (tw - 1) / 255;
+        wg_fill(x + RGB_TRACK_X + at - 2, ty, 5, 16, WG_FACE);
+        wg_bevel(x + RGB_TRACK_X + at - 2, ty, 5, 16, 1);
+    }
+    const int sx = x + RGB_TRACK_X + tw + 8;
+    wg_fill(sx, y, RGB_SWATCH, 3 * RGB_ROW - 4, colour);
+    wg_bevel(sx, y, RGB_SWATCH, 3 * RGB_ROW - 4, 0);
+    char v[24];
+    snprintf(v, sizeof(v), "%u %u %u", rgb_channel(colour, 0),
+             rgb_channel(colour, 1), rgb_channel(colour, 2));
+    wg_text_clipped(x + RGB_TRACK_X, y + 3 * RGB_ROW, v, WG_DIM, w - RGB_TRACK_X);
+}
+
+int wg_rgb_hit(int x, int y, int w, int mx, int my)
+{
+    const int tw = rgb_track_w(w);
+    /* Generous vertically: a 14-pixel track is hard to hit exactly, and the
+     * rows are far enough apart that being loose cannot pick the wrong one. */
+    for (int ch = 0; ch < 3; ++ch) {
+        const int ty = y + ch * RGB_ROW;
+        if (my >= ty && my < ty + RGB_ROW &&
+            mx >= x + RGB_TRACK_X - 4 && mx < x + RGB_TRACK_X + tw + 4)
+            return ch;
+    }
+    return -1;
+}
+
+uint32_t wg_rgb_move(uint32_t colour, int channel, int x, int w, int mx)
+{
+    if (channel < 0 || channel > 2)
+        return colour;
+    const int tw = rgb_track_w(w);
+    int at = mx - (x + RGB_TRACK_X);
+    if (at < 0) at = 0;
+    if (at > tw - 1) at = tw - 1;
+    return rgb_with(colour, channel,
+                    (unsigned)(at * 255 / (tw > 1 ? tw - 1 : 1)));
 }
 
 void wg_bevel(int x, int y, int w, int h, int raised)

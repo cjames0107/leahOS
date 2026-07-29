@@ -60,6 +60,9 @@ static int  g_anchor = -1;
 static int  g_blank_menu;   /* which menu is showing */
 static int  g_app_menu_on;
 static int  g_new_kind = -1; /* 0 file, 1 folder, once the name is chosen */
+static int  g_renaming;      /* the save dialogue is being used to rename */
+static int  g_enter_armed;   /* the first Enter of a double press */
+static char g_rename_from[256];
 static int  g_band_x, g_band_y, g_band_x2, g_band_y2;
 static int g_view = VIEW_ICON;
 /* Measured in pixels down the content, not in items.
@@ -90,13 +93,24 @@ static int g_expand_count;
 
 /* Toolbar hit boxes, in window coordinates. */
 struct box { int x, y, w, h; };
-static struct box g_up      = { 8,   5, 44, 20 };
-static struct box g_vicon   = { 60,  5, 52, 20 };
-static struct box g_vlist   = { 116, 5, 52, 20 };
-static struct box g_vtree   = { 172, 5, 52, 20 };
-static struct box g_open    = { 232, 5, 56, 20 };
-static struct box g_upline  = { 296, 5, 24, 20 };
-static struct box g_dnline  = { 322, 5, 24, 20 };
+/* Where you have been, so back and forward mean something. A stack with a
+ * cursor rather than two stacks: going somewhere new from the middle discards
+ * what was ahead, which is what every browser does and what people expect. */
+#define MAX_HISTORY 32
+static char g_hist[MAX_HISTORY][256];
+static int  g_hist_n;
+static int  g_hist_at = -1;
+
+static struct box g_back    = { 8,   5, 26, 20 };
+static struct box g_fwd     = { 36,  5, 26, 20 };
+static struct box g_up      = { 64,  5, 26, 20 };
+static struct box g_vicon   = { 100, 5, 46, 20 };
+static struct box g_vlist   = { 150, 5, 46, 20 };
+static struct box g_vtree   = { 200, 5, 46, 20 };
+static struct box g_open    = { 254, 5, 50, 20 };
+static struct box g_rename  = { 308, 5, 62, 20 };
+static struct box g_upline  = { 378, 5, 22, 20 };
+static struct box g_dnline  = { 402, 5, 22, 20 };
 
 static int inside(const struct box* b, int x, int y)
 {
@@ -323,6 +337,8 @@ static int scroll_step(void)
     return (g_view == VIEW_ICON) ? CELL_H / 4 : ROW_H;
 }
 
+static void reveal_selected(void);
+
 static void scroll_to(int px)
 {
     const int most = content_span() - content_h();
@@ -331,10 +347,61 @@ static void scroll_to(int px)
     g_scroll = px;
 }
 
+/* Bring the selection into view after the keyboard moves it. */
+static void reveal_selected(void)
+{
+    if (g_selected < 0)
+        return;
+    int top, bottom;
+    if (g_view == VIEW_ICON) {
+        const int row = g_selected / icon_cols();
+        top = row * CELL_H;
+        bottom = top + CELL_H;
+    } else if (g_view == VIEW_LIST) {
+        top = ROW_H + 2 + g_selected * ROW_H;
+        bottom = top + ROW_H;
+    } else {
+        top = 2 + g_selected * ROW_H;
+        bottom = top + ROW_H;
+    }
+    if (top < g_scroll)
+        scroll_to(top);
+    else if (bottom > g_scroll + content_h())
+        scroll_to(bottom - content_h());
+}
+
+
+/* A triangle, filled by rows. dir: 0 left, 1 right, 2 up. */
+static void arrow_glyph(const struct box* b, int dir, int enabled)
+{
+    const uint32_t ink = enabled ? WG_INK : WG_DIM;
+    const int cx = b->x + b->w / 2, cy = b->y + b->h / 2;
+    for (int i = 0; i < 5; ++i) {
+        const int run = i * 2 + 1;
+        for (int k = -i; k <= i; ++k) {
+            (void)run;
+            /* i is the distance from the apex, so the apex leads and the
+             * base trails: that is which way the arrow points. */
+            if (dir == 0)      wg_plot(cx - 2 + i, cy + k, ink);
+            else if (dir == 1) wg_plot(cx + 2 - i, cy + k, ink);
+            else               wg_plot(cx + k, cy - 2 + i, ink);
+        }
+    }
+}
+
 static void draw_toolbar(void)
 {
     wg_fill(0, 0, (int)g_w, TOOLBAR_H, WG_FACE);
-    wg_button(g_up.x, g_up.y, g_up.w, g_up.h, "Up", 0);
+    /* Back and forward are icons because they are the two controls used most
+     * and the two whose meaning a word does not improve. Up keeps a glyph of
+     * its own rather than a label for the same reason. */
+    wg_button(g_back.x, g_back.y, g_back.w, g_back.h, "", 0);
+    arrow_glyph(&g_back, 0, g_hist_at > 0);
+    wg_button(g_fwd.x, g_fwd.y, g_fwd.w, g_fwd.h, "", 0);
+    arrow_glyph(&g_fwd, 1, g_hist_at + 1 < g_hist_n);
+    wg_button(g_up.x, g_up.y, g_up.w, g_up.h, "", 0);
+    arrow_glyph(&g_up, 2, strcmp(g_path, "/") != 0);
+    wg_button(g_rename.x, g_rename.y, g_rename.w, g_rename.h, "Rename", 0);
     wg_button(g_vicon.x, g_vicon.y, g_vicon.w, g_vicon.h, "Icon",
               g_view == VIEW_ICON);
     wg_button(g_vlist.x, g_vlist.y, g_vlist.w, g_vlist.h, "List",
@@ -567,6 +634,20 @@ static void remember(const char* path, const char* app)
     ++g_assoc_n;
 }
 
+static void remember_place(const char* path);
+
+static void goto_path(const char* path, int record)
+{
+    int n = 0;
+    while (path[n] != '\0' && n < 255) { g_path[n] = path[n]; ++n; }
+    g_path[n] = '\0';
+    if (record)
+        remember_place(g_path);
+    read_dir();
+    if (g_view == VIEW_TREE)
+        rebuild_tree();
+}
+
 static void open_path(const char* path, int is_dir)
 {
     /* A bundle is entered by running it, not by descending into it - which is
@@ -588,15 +669,7 @@ static void open_path(const char* path, int is_dir)
     }
 
     if (is_dir) {
-        int n = 0;
-        while (path[n] != '\0' && n < 255) {
-            g_path[n] = path[n];
-            ++n;
-        }
-        g_path[n] = '\0';
-        read_dir();
-        if (g_view == VIEW_TREE)
-            rebuild_tree();
+        goto_path(path, 1);
         return;
     }
     int n = 0;
@@ -718,6 +791,36 @@ static void select_all(void)
     snprintf(g_status, sizeof(g_status), "selected %d", g_count);
 }
 
+static void remember_place(const char* path)
+{
+    if (g_hist_at >= 0 && strcmp(g_hist[g_hist_at], path) == 0)
+        return;                     /* already here */
+    /* Going somewhere new from the middle drops what was ahead. */
+    if (g_hist_at + 1 < g_hist_n)
+        g_hist_n = g_hist_at + 1;
+    if (g_hist_n >= MAX_HISTORY) {
+        for (int i = 1; i < MAX_HISTORY; ++i)
+            memcpy(g_hist[i - 1], g_hist[i], sizeof(g_hist[0]));
+        --g_hist_n;
+        --g_hist_at;
+    }
+    int k = 0;
+    while (path[k] != '\0' && k < 255) { g_hist[g_hist_n][k] = path[k]; ++k; }
+    g_hist[g_hist_n][k] = '\0';
+    g_hist_at = g_hist_n++;
+}
+
+static void goto_path(const char* path, int record);
+
+static void go_history(int delta)
+{
+    const int to = g_hist_at + delta;
+    if (to < 0 || to >= g_hist_n)
+        return;
+    g_hist_at = to;
+    goto_path(g_hist[to], 0);
+}
+
 static void go_up(void)
 {
     char up[256];
@@ -756,8 +859,25 @@ static void scroll_by(int steps)
 }
 
 static const char* const kMenu[] = {
-    "Open", "Open with...", "Copy", "Select all", "-", "Refresh"
+    "Open", "Open with...", "Rename", "Copy", "Select all", "-", "Refresh"
 };
+
+/* Renaming reuses the save dialogue: it is already "choose a directory and a
+ * name", which is exactly what a rename is. The old path is remembered so the
+ * move can be made when a name comes back. */
+static void begin_rename(void)
+{
+    if (g_selected < 0 || g_selected >= g_count) {
+        snprintf(g_status, sizeof(g_status), "select something to rename");
+        return;
+    }
+    join(g_path, g_entries[g_selected].d_name, g_rename_from,
+         sizeof(g_rename_from));
+    g_renaming = 1;
+    dlg_save(g_path, g_entries[g_selected].d_name);
+    snprintf(g_status, sizeof(g_status), "rename %s to...",
+             g_entries[g_selected].d_name);
+}
 
 /* A right-click menu for a bundle: the standard entries, then whatever the
  * application itself declares. This is what makes `menu` in an Info file real
@@ -812,9 +932,11 @@ int main(int argc, char** argv)
     g_px = win_map(id);
     if (g_px == 0)
         return 1;
-    win_set_min_size(id, 380, 260);
+    win_set_min_size(id, 440, 260);
     wg_target(g_px, g_w, g_h);
 
+    /* Where we start is somewhere we have been, so back can come home to it. */
+    remember_place(g_path);
     read_dir();
     draw();
     win_present(id);
@@ -900,10 +1022,12 @@ int main(int argc, char** argv)
                     g_opening[k] = '\0';
                     dlg_open_with(g_opening);
                 } else if (pick == 2) {
-                    copy_marked();
+                    begin_rename();
                 } else if (pick == 3) {
+                    copy_marked();
+                } else if (pick == 4) {
                     select_all();
-                } else if (pick == 5) {
+                } else if (pick == 6) {
                     read_dir();
                 }
                 draw();
@@ -917,7 +1041,18 @@ int main(int argc, char** argv)
                  * so asking it twice would leave the second caller looking at
                  * a dialogue that is no longer there. */
                 const int answer = dlg_event(&event);
-                if (answer == DLG_ACCEPT && g_new_kind >= 0) {
+                if (answer == DLG_ACCEPT && g_renaming) {
+                    g_renaming = 0;
+                    if (rename(g_rename_from, dlg_path()) < 0)
+                        snprintf(g_status, sizeof(g_status),
+                                 "could not rename to %s", dlg_path());
+                    else
+                        snprintf(g_status, sizeof(g_status), "renamed to %s",
+                                 dlg_path());
+                    read_dir();
+                } else if (answer == DLG_CANCEL && g_renaming) {
+                    g_renaming = 0;
+                } else if (answer == DLG_ACCEPT && g_new_kind >= 0) {
                     const char* where = dlg_path();
                     if (g_new_kind == 1) {
                         if (mkdir(where) < 0)
@@ -963,7 +1098,13 @@ int main(int argc, char** argv)
                     return 1;
                 wg_target(g_px, g_w, g_h);
             } else if (event.type == WIN_EVENT_MOUSE_DOWN) {
-                if (inside(&g_up, event.x, event.y)) {
+                if (inside(&g_back, event.x, event.y)) {
+                    go_history(-1);
+                } else if (inside(&g_fwd, event.x, event.y)) {
+                    go_history(1);
+                } else if (inside(&g_rename, event.x, event.y)) {
+                    begin_rename();
+                } else if (inside(&g_up, event.x, event.y)) {
                     go_up();
                 } else if (inside(&g_vicon, event.x, event.y)) {
                     g_view = VIEW_ICON; g_scroll = 0;
@@ -1016,7 +1157,7 @@ int main(int argc, char** argv)
                                       g_app_menu_n);
                             g_app_menu_on = 1;
                         } else {
-                            menu_open(event.x, event.y, kMenu, 6);
+                            menu_open(event.x, event.y, kMenu, 7);
                         }
                     } else {
                         menu_open(event.x, event.y, kBlankMenu, 7);
@@ -1060,10 +1201,24 @@ int main(int argc, char** argv)
                 g_band = 0;
                 g_bar_drag = 0;
             } else if (event.type == WIN_EVENT_KEY) {
-                if (event.key == WIN_KEY_DOWN) {
-                    scroll_to(g_scroll + scroll_step());
-                } else if (event.key == WIN_KEY_UP) {
-                    scroll_to(g_scroll - scroll_step());
+                /* Arrows move the selection, not the view: moving the view and
+                 * leaving the selection behind is how you lose your place. The
+                 * view follows whatever is chosen. */
+                if (event.key != '\n' && event.key != '\r')
+                    g_enter_armed = 0;
+                const int limit = (g_view == VIEW_TREE) ? g_row_count : g_count;
+                const int per_row = (g_view == VIEW_ICON) ? icon_cols() : 1;
+                if (event.key == WIN_KEY_DOWN || event.key == WIN_KEY_UP ||
+                    (g_view == VIEW_ICON &&
+                     (event.key == WIN_KEY_LEFT || event.key == WIN_KEY_RIGHT))) {
+                    int to = g_selected < 0 ? 0 : g_selected;
+                    if (event.key == WIN_KEY_DOWN)       to += per_row;
+                    else if (event.key == WIN_KEY_UP)    to -= per_row;
+                    else if (event.key == WIN_KEY_RIGHT) to += 1;
+                    else                                 to -= 1;
+                    if (to >= 0 && to < limit)
+                        select_at(to, 0);
+                    reveal_selected();
                 } else if (event.key == WIN_KEY_RIGHT) {
                     scroll_to(g_scroll + content_h());      /* a page */
                 } else if (event.key == WIN_KEY_LEFT) {
@@ -1072,8 +1227,19 @@ int main(int argc, char** argv)
                     select_all();
                 } else if (event.key == 3) {    /* ctrl+c */
                     copy_marked();
-                } else if (event.key == '\n' || event.key == '\r')
-                    open_selected();
+                } else if (event.key == '\n' || event.key == '\r') {
+                    /* Two presses to open, one to settle on a thing - the same
+                     * rule the mouse follows, so the keyboard needs no rule of
+                     * its own. Any other key disarms it. */
+                    if (g_enter_armed) {
+                        g_enter_armed = 0;
+                        open_selected();
+                    } else {
+                        g_enter_armed = 1;
+                        snprintf(g_status, sizeof(g_status),
+                                 "press enter again to open");
+                    }
+                }
                 else if (event.key == 'u')
                     go_up();
                 else if (event.key == 'i')

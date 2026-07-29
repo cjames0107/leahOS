@@ -7,6 +7,7 @@
 #include <leah/percpu.hpp>
 #include <leah/file.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/smp.hpp>
 #include <leah/signal.hpp>
 #include <leah/spinlock.hpp>
 #include <leah/timer.hpp>
@@ -89,6 +90,10 @@ u32  g_task_count = 0;
 // the corruption SMP invites.
 constexpr usize kMaxCpuSlots = 32;
 u32  g_current_by_cpu[kMaxCpuSlots]{};   // index into g_tasks, per CPU
+// Counted where the decision is made, so a slice is attributed to the CPU that
+// actually ran it rather than to whoever asked about it later.
+u64  g_busy_by_cpu[kMaxCpuSlots]{};
+u64  g_idle_by_cpu_ticks[kMaxCpuSlots]{};
 u32  g_next_pid = 1;
 
 constexpr u32 kNoIdle = 0xFFFFFFFF;
@@ -283,6 +288,15 @@ void switch_to(u32 next_index)
     // saved.
     next->state = State::Running;
     ++next->ticks;
+    {
+        const u32 cpu = percpu::active();
+        if (cpu < kMaxCpuSlots) {
+            if (is_idle_task(next_index))
+                ++g_idle_by_cpu_ticks[cpu];
+            else
+                ++g_busy_by_cpu[cpu];
+        }
+    }
     __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELEASE);
     percpu::current().previous_task = current_index();
     current_index() = next_index;
@@ -937,6 +951,17 @@ u32 snapshot(TaskInfo* out, u32 max)
     return n;
 }
 
+u32 cpu_stats(CpuStat* out, u32 max)
+{
+    const u32 n = static_cast<u32>(smp::cpu_count());
+    const u32 give = n < max ? n : max;
+    for (u32 i = 0; i < give; ++i) {
+        out[i].busy = g_busy_by_cpu[i];
+        out[i].idle = g_idle_by_cpu_ticks[i];
+    }
+    return give;
+}
+
 u32 alive_count()
 {
     u32 n = 0;
@@ -977,6 +1002,28 @@ void on_irq_return()
 {
     if (!g_preemption || !g_need_resched)
         return;
+
+    // Not while the interrupted code was itself inside the kernel.
+    //
+    // The kernel lock is handed to whichever task is switched to, so preempting
+    // a task that holds it does not keep the other processors out - it lets
+    // them straight in, on top of work that is halfway done. Every shared
+    // structure in the kernel is exposed by that: a heap block being split, an
+    // ATA channel mid-transfer, a shared-memory slot chosen but not yet filled.
+    // Each of those was a real crash, and each looked like a different bug.
+    //
+    // A big kernel lock only means anything if holding it is a promise to
+    // finish, so involuntary preemption has to wait. g_need_resched stays set
+    // and the next tick after the syscall returns acts on it, which costs a
+    // task at most one extra tick of its turn. Yielding on purpose is still
+    // allowed and still switches: code that calls yield() has chosen a moment
+    // where its own invariants hold.
+    //
+    // Depth is 1 when the interrupted task was in user mode - that one acquire
+    // is this handler's own. Anything above that was already in the kernel.
+    if (sync::bkl::depth() > 1)
+        return;
+
     g_need_resched = false;
     switch_to(pick_next());
 }

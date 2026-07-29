@@ -61,6 +61,7 @@
 #define SYS_threadexit 56
 #define SYS_proclist   57
 #define SYS_meminfo    58
+#define SYS_cpuinfo    59
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

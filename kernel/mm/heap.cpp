@@ -2,11 +2,29 @@
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
 #include <leah/pmm.hpp>
+#include <leah/spinlock.hpp>
 #include <leah/string.hpp>
 #include <leah/vmm.hpp>
 
 namespace heap {
 namespace {
+
+// The free list is one linked list shared by everything in the kernel, and
+// splitting or coalescing a block is several pointer writes that are only
+// meaningful together. Nothing guarded them. The big kernel lock looks like it
+// would, but it is handed on when its holder is preempted - so a task halfway
+// through split() could be suspended and a second one could walk a list whose
+// blocks do not yet agree with each other. What comes back is a pointer into
+// somebody's data, and the first free() of it takes the machine down.
+//
+// Interrupts are masked while it is held, for the reason IrqScopedLock exists:
+// these sections are short, and a preempted holder would strand every other
+// processor spinning here.
+//
+// grow() is inside the lock and stays safe there: it asks the physical
+// allocator and the page tables for memory, and neither of those comes back
+// through the heap.
+sync::Spinlock g_lock;
 
 // Well clear of both the identity map and anything the firmware described, so
 // a stray heap pointer lands somewhere obviously wrong rather than quietly on
@@ -155,6 +173,7 @@ void* allocate(usize bytes)
     if (bytes == 0)
         return nullptr;
 
+    sync::IrqScopedLock guard(g_lock);
     const usize wanted = align_up(bytes, 16);
 
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -194,6 +213,7 @@ void release(void* pointer)
     if (pointer == nullptr)
         return;
 
+    sync::IrqScopedLock guard(g_lock);
     Block* block = payload_to_block(pointer);
     if (block->magic != kMagic) {
         // Probably an aligned allocation; step back to the real header.

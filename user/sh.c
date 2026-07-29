@@ -122,7 +122,7 @@ static _Noreturn void child(char** argv, char* infile, char* outfile, int append
 
 int main(void)
 {
-    printf("\nleahOS shell - try: ls /, cat /README.MD, ls / | cat, echo hi > /F\n");
+    printf("\nleahOS shell - try: ls /, cat /docs/readme.md, ls / | cat, echo hi > /F\n");
     printf("builtins: cd, exit, logout, help. put spaces around | < > >>\n");
 
     char line[256];
