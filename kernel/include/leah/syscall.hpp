@@ -82,6 +82,17 @@ enum Number : u64 {
     ProcList   = 57,   // snapshot of the task table
     MemInfo    = 58,   // physical memory: used, free, usable
     CpuInfo    = 59,   // per-processor slice counts
+
+    // Audio. Queueing samples and setting the volume are separate calls
+    // because they are asked at completely different rates: one every few
+    // milliseconds while something is playing, one when a person moves a
+    // slider.
+    AudioPlay   = 60,  // queue interleaved 16-bit stereo samples
+    AudioSpace  = 61,  // how many samples would be taken right now
+    AudioVolume = 62,  // rdi < 0 reads, otherwise sets 0..100
+    AudioStop   = 63,  // drop what is queued and silence the output
+    AudioFlush  = 64,  // hand over a part-filled buffer
+    AudioInfo   = 65,  // what the output device is, for an about page
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

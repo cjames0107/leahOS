@@ -37,6 +37,14 @@ uint32_t wg_sel_colour(void);   /* the selection highlight   */
  * A grid of ready-made colours can only ever offer the colours somebody
  * thought of; this offers all of them, and shows the one being made. */
 #define WG_RGB_H 62
+
+/* A plain horizontal slider: a track, a filled part, and a thumb. Separate
+ * from the RGB picker because a quantity is not a colour - there is nothing
+ * to show along the track but how far along it you are. */
+#define WG_SLIDER_H 18
+void wg_slider_draw(int x, int y, int w, int value, int max);
+int  wg_slider_hit(int x, int y, int w, int mx, int my);      /* 1 or 0 */
+int  wg_slider_value(int x, int w, int mx, int max);
 void     wg_rgb_draw(int x, int y, int w, uint32_t colour);
 int      wg_rgb_hit(int x, int y, int w, int mx, int my);   /* channel or -1 */
 uint32_t wg_rgb_move(uint32_t colour, int channel, int x, int w, int mx);

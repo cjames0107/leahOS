@@ -155,6 +155,46 @@ uint32_t wg_rgb_move(uint32_t colour, int channel, int x, int w, int mx)
                     (unsigned)(at * 255 / (tw > 1 ? tw - 1 : 1)));
 }
 
+/* --- a plain slider ------------------------------------------------------- */
+
+#define SLIDER_THUMB 9
+
+static int slider_span(int w) { return w - SLIDER_THUMB; }
+
+void wg_slider_draw(int x, int y, int w, int value, int max)
+{
+    if (max <= 0) max = 1;
+    if (value < 0) value = 0;
+    if (value > max) value = max;
+    const int span = slider_span(w);
+    const int at = value * span / max;
+
+    /* The track is sunken and the part behind the thumb is filled, so the
+     * setting reads at a glance without having to find the thumb first. */
+    wg_fill(x, y + 6, w, 6, WG_PAPER);
+    wg_bevel(x, y + 6, w, 6, 0);
+    if (at > 0)
+        wg_fill(x + 1, y + 7, at, 4, wg_sel_colour());
+
+    wg_fill(x + at, y, SLIDER_THUMB, WG_SLIDER_H, WG_FACE);
+    wg_bevel(x + at, y, SLIDER_THUMB, WG_SLIDER_H, 1);
+}
+
+int wg_slider_hit(int x, int y, int w, int mx, int my)
+{
+    /* Generous vertically: the track is six pixels and nobody aims at that. */
+    return mx >= x - 4 && mx < x + w + 4 && my >= y - 2 && my < y + WG_SLIDER_H + 2;
+}
+
+int wg_slider_value(int x, int w, int mx, int max)
+{
+    const int span = slider_span(w);
+    int at = mx - x - SLIDER_THUMB / 2;
+    if (at < 0) at = 0;
+    if (at > span) at = span;
+    return span > 0 ? at * max / span : 0;
+}
+
 void wg_bevel(int x, int y, int w, int h, int raised)
 {
     const uint32_t tl = raised ? WG_LIGHT : WG_SHADOW;

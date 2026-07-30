@@ -18,6 +18,7 @@
 #include <leah/keyboard.hpp>
 #include <leah/memory.hpp>
 #include <leah/mouse.hpp>
+#include <leah/ac97.hpp>
 #include <leah/e1000.hpp>
 #include <leah/net.hpp>
 #include <leah/panic.hpp>
@@ -647,6 +648,69 @@ void worker_thread(void* arg)
     scheduler::exit_current(0);
 }
 
+// Queue a short tone and watch the card eat it.
+//
+// "The controller was found and reset" is not the same claim as "it plays", and
+// the difference is silence. So this hands over real samples and then looks at
+// the position register: if the descriptor index or the position within it has
+// moved, DMA is running and the samples are going somewhere.
+void self_test_audio()
+{
+    if (!audio::available())
+        return;
+
+    // A quarter of a second of 440 Hz, as a square wave. A table-driven sine
+    // would sound better and prove nothing more.
+    constexpr u32 kFrames = 8192;      // eight buffers, about a sixth of a second
+    constexpr u32 kPeriod = audio::kSampleRate / 440;
+    static i16 tone[512];
+    u32 written = 0;
+    u32 phase = 0;
+    while (written < kFrames) {
+        u32 n = 0;
+        while (n < 256 && written + n < kFrames) {
+            const i16 v = (phase % kPeriod) < (kPeriod / 2) ? 6000 : -6000;
+            tone[n * 2] = tone[n * 2 + 1] = v;
+            ++phase;
+            ++n;
+        }
+        const usize took = audio::play(tone, n * 2);
+        if (took == 0)
+            break;                  // the ring is full, which is enough to test
+        written += static_cast<u32>(took / 2);
+        if ((written % 24000) == 0) {
+            const audio::Status st = audio::status();
+            console::printf("    audio: %u frames in at %llu ms, civ %u lvi %u "
+                            "sr %02x picb %u\n", written,
+                            timer::ticks() * 10, st.current_index,
+                            st.last_valid, st.status_reg, st.position);
+        }
+    }
+
+    audio::flush();
+    console::printf("    audio: wrote %u frames (%u ms of sound) by %llu ms\n",
+                    written, written * 1000 / audio::kSampleRate,
+                    timer::ticks() * 10);
+    const audio::Status before = audio::status();
+    timer::sleep_ms(500);
+    const audio::Status after = audio::status();
+
+    const bool moved = after.current_index != before.current_index ||
+                       after.position < before.position ||
+                       after.queued_buffers < before.queued_buffers;
+    if (moved) {
+        console::printf("  [ ok ] AC'97 DMA running: %u buffers queued, "
+                        "index %u -> %u\n", before.queued_buffers,
+                        before.current_index, after.current_index);
+    } else {
+        console::printf("  [    ] AC'97 queued %u buffers but the card did not "
+                        "move (sr %02x cr %02x picb %u)\n",
+                        before.queued_buffers, after.status_reg,
+                        after.control_reg, after.position);
+    }
+    audio::stop();
+}
+
 void self_test_scheduler()
 {
     // The scheduler is initialised once, early, before any application
@@ -925,6 +989,16 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     shm::init();
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");
+
+    if (audio::init()) {
+        console::printf("  [ ok ] %s, %u Hz stereo, volume %u%%\n",
+                        audio::device_name(), audio::kSampleRate,
+                        audio::volume());
+    } else {
+        step("no AC'97 controller found - audio disabled");
+    }
+
+    self_test_audio();
 
     if (net::init()) {
         const u8* m = net::mac();

@@ -43,6 +43,11 @@ EXT_MIB         := 64             # the ext4 root filesystem on disk 1
 MEM        ?= 2048M
 CPUS       ?= 1
 TIMEOUT    ?= 6
+# Where the AC'97 controller's output goes. `coreaudio` is the host's speakers;
+# `none` still presents the device to the guest but throws the samples away,
+# which is what the headless runs want. `wav` writes a file, which is the only
+# way to check from a script that the right samples came out.
+AUDIODEV   ?= coreaudio
 QEMU_EXTRA ?=
 
 # --- toolchain check --------------------------------------------------------
@@ -110,7 +115,7 @@ KERNEL_BIN := $(BUILD)/kernel.bin
 # path instead of asking which application does the job.
 BIN_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear \
                  ifconfig ping arp nslookup tests id chmod chown su fetch whoami \
-                 login useradd passwd stat gui wserver desktop
+                 login useradd passwd stat gui wserver desktop tone
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman
 USER_PROGRAMS := $(BIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
@@ -257,6 +262,7 @@ QEMUFLAGS := -machine pc,hpet=on \
              -drive format=raw,file=$(USB_IMG),if=none,id=usbdisk \
              -device usb-storage,drive=usbdisk,bus=xhci0.0 \
              -device usb-kbd,bus=xhci0.0 \
+             -audiodev $(AUDIODEV),id=snd0 -device AC97,audiodev=snd0 \
              -device ahci,id=sata0 \
              -drive format=raw,file=$(SATA_IMG),if=none,id=satadisk \
              -device ide-hd,drive=satadisk,bus=sata0.0 \

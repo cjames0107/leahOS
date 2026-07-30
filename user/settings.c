@@ -12,6 +12,7 @@
 
 #include <dialog.h>
 #include <display.h>
+#include <audio.h>
 #include <net.h>
 #include <prefs.h>
 #include <proc.h>
@@ -27,10 +28,11 @@
 
 #define PAGE_GENERAL 0
 #define PAGE_APPEAR  1
-#define PAGE_NETWORK 2
-#define PAGE_USERS   3
-#define PAGE_ABOUT   4
-#define PAGES        5
+#define PAGE_SOUND   2
+#define PAGE_NETWORK 3
+#define PAGE_USERS   4
+#define PAGE_ABOUT   5
+#define PAGES        6
 
 #define SIDEBAR 118
 #define ROW_H   22
@@ -38,10 +40,16 @@
 static uint32_t* g_px;
 static unsigned  g_w = 660, g_h = 400;
 static int g_page = PAGE_GENERAL;
+
+/* The output device, asked about once, and the volume to come back to when
+ * mute is switched off. */
+static struct audio_info g_audio;
+static int g_vol_drag;
+static int g_vol_before_mute = 70;
 static char g_note[128] = "";
 
 static const char* kPages[PAGES] = {
-    "General", "Appearance", "Network", "Users", "About"
+    "General", "Appearance", "Sound", "Network", "Users", "About"
 };
 
 /* --- the desktop's appearance ---------------------------------------------
@@ -123,6 +131,19 @@ static void theme_changed(void)
 
 /* Put back what this user chose last time. Done once, at startup, because the
  * server starts from its own defaults and has no idea whose desktop it is. */
+/* The volume the user last chose. The kernel starts every boot at its own
+ * default, because it has no idea whose desktop this is going to be. */
+static void apply_saved_audio(void)
+{
+    audio_info(&g_audio);
+    if (!g_audio.present)
+        return;
+    const int saved = (int)prefs_get_u32("audio.volume", 80);
+    audio_set_volume(saved);
+    if (saved > 0)
+        g_vol_before_mute = saved;
+}
+
 static void apply_saved_theme(void)
 {
     if (g_ws == 0)
@@ -419,6 +440,104 @@ static void draw_appearance(void)
                     WG_DIM, (int)g_w - SIDEBAR - 28);
 }
 
+/* --- sound ----------------------------------------------------------------
+ *
+ * One control that matters and a way to hear the effect of moving it. Volume
+ * without a test tone is a setting you have to go and find something else to
+ * check, which is how a volume slider ends up being adjusted by trial against
+ * whatever happens to be playing.
+ */
+#define VOL_X (SIDEBAR + 90)
+#define VOL_Y 62
+#define VOL_W 260
+/* A quarter-second of A above middle C, generated here rather than launched as
+ * a program: a test tone that takes a fork and an exec to make a sound is
+ * testing the wrong thing. */
+static void test_tone(void)
+{
+    if (!g_audio.present) {
+        snprintf(g_note, sizeof(g_note), "no output device");
+        return;
+    }
+    static short chunk[512];
+    const long frames = AUDIO_RATE / 4;
+    const long period = AUDIO_RATE / 440;
+    long done = 0;
+    while (done < frames) {
+        long n = 0;
+        while (n < 256 && done + n < frames) {
+            /* Fade the ends, or the start and stop are louder than the note. */
+            const long i = done + n;
+            const long fade = AUDIO_RATE / 100;
+            long gain = 256;
+            if (i < fade)              gain = i * 256 / fade;
+            else if (i > frames - fade) gain = (frames - i) * 256 / fade;
+            if (gain < 0) gain = 0;
+            const short v = (short)((((i % period) < period / 2) ? 7000 : -7000)
+                                    * gain / 256);
+            chunk[n * 2] = chunk[n * 2 + 1] = v;
+            ++n;
+        }
+        long off = 0;
+        while (off < n) {
+            const long took = audio_play(&chunk[off * 2], (n - off) * 2);
+            if (took <= 0) { msleep(5); continue; }
+            off += took / 2;
+        }
+        done += n;
+    }
+    audio_flush();
+    snprintf(g_note, sizeof(g_note), "played a 440 Hz tone");
+}
+
+static void set_audio_volume(int percent)
+{
+    if (percent < 0)   percent = 0;
+    if (percent > 100) percent = 100;
+    audio_set_volume(percent);
+    prefs_set_u32("audio.volume", (uint32_t)percent);
+    prefs_save();
+}
+
+static void draw_sound(void)
+{
+    wg_text(SIDEBAR + 14, 16, "Sound", WG_INK);
+    wg_fill(SIDEBAR + 14, 34, (int)g_w - SIDEBAR - 28, 1, WG_DIM);
+
+    if (!g_audio.present) {
+        wg_text(SIDEBAR + 14, 62, "no audio device found", WG_DIM);
+        return;
+    }
+
+    const int vol = audio_volume();
+    wg_text(SIDEBAR + 14, VOL_Y + 4, "volume", WG_DIM);
+    wg_slider_draw(VOL_X, VOL_Y, VOL_W, vol, 100);
+    {
+        char v[16];
+        snprintf(v, sizeof(v), "%d%%", vol);
+        wg_text(VOL_X + VOL_W + 12, VOL_Y + 4, v, WG_INK);
+    }
+
+    wg_button(VOL_X, VOL_Y + 30, 74, 22, vol == 0 ? "Unmute" : "Mute", vol == 0);
+    wg_button(VOL_X + 82, VOL_Y + 30, 90, 22, "Test tone", 0);
+
+    wg_text(SIDEBAR + 14, VOL_Y + 74, "output", WG_DIM);
+    wg_text_clipped(VOL_X, VOL_Y + 74, g_audio.name, WG_INK,
+                    (int)g_w - VOL_X - 20);
+
+    wg_text(SIDEBAR + 14, VOL_Y + 96, "format", WG_DIM);
+    {
+        char f[64];
+        snprintf(f, sizeof(f), "%u Hz, %u channels, 16-bit",
+                 g_audio.rate, g_audio.channels);
+        wg_text(VOL_X, VOL_Y + 96, f, WG_INK);
+    }
+
+    wg_text_clipped(SIDEBAR + 14, VOL_Y + 130,
+                    "the volume is saved to ~/.leahrc and restored at login",
+                    WG_DIM, (int)g_w - SIDEBAR - 28);
+}
+
 static void draw_network(void)
 {
     wg_text(SIDEBAR + 14, 16, "Network", WG_INK);
@@ -515,6 +634,7 @@ static void draw(void)
     switch (g_page) {
     case PAGE_GENERAL: draw_general();    break;
     case PAGE_APPEAR:  draw_appearance(); break;
+    case PAGE_SOUND:   draw_sound();      break;
     case PAGE_NETWORK: draw_network();    break;
     case PAGE_USERS:   draw_users();      break;
     default:           draw_about();      break;
@@ -537,6 +657,7 @@ int main(int argc, char** argv)
     if (cid >= 0)
         g_ws = (struct ws_shared*)shm_map(cid);
     apply_saved_theme();
+    apply_saved_audio();
 
     const int id = win_create(wx, wy, g_w, g_h, "Settings");
     if (id < 0) {
@@ -570,15 +691,38 @@ int main(int argc, char** argv)
                 g_px = win_map(id);
                 if (g_px == 0) return 1;
                 wg_target(g_px, g_w, g_h);
+            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_vol_drag) {
+                set_audio_volume(wg_slider_value(VOL_X, VOL_W, e.x, 100));
             } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_pick_drag >= 0) {
                 set_colour(wg_rgb_move(element_colour(), g_pick_drag,
                                        PICK_X, PICK_W, e.x));
             } else if (e.type == WIN_EVENT_MOUSE_UP) {
                 g_pick_drag = -1;
+                g_vol_drag = 0;
             } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
                 if (e.x < SIDEBAR) {
                     const int i = (e.y - 10) / ROW_H;
                     if (i >= 0 && i < PAGES) { g_page = i; g_note[0] = '\0'; }
+                } else if (g_page == PAGE_SOUND && g_audio.present) {
+                    if (wg_slider_hit(VOL_X, VOL_Y, VOL_W, e.x, e.y)) {
+                        g_vol_drag = 1;
+                        set_audio_volume(
+                            wg_slider_value(VOL_X, VOL_W, e.x, 100));
+                    } else if (e.y >= VOL_Y + 30 && e.y < VOL_Y + 52) {
+                        if (e.x >= VOL_X && e.x < VOL_X + 74) {
+                            /* Mute remembers where it came back to, so it is a
+                             * toggle rather than a trip to zero and a guess. */
+                            const int now = audio_volume();
+                            if (now == 0) {
+                                set_audio_volume(g_vol_before_mute);
+                            } else {
+                                g_vol_before_mute = now;
+                                set_audio_volume(0);
+                            }
+                        } else if (e.x >= VOL_X + 82 && e.x < VOL_X + 172) {
+                            test_tone();
+                        }
+                    }
                 } else if (g_page == PAGE_APPEAR) {
                     for (int i = 0; i < PRESETS; ++i)
                         if (e.x >= SIDEBAR + 90 + i * 78 &&
