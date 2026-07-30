@@ -93,6 +93,16 @@ enum Number : u64 {
     AudioStop   = 63,  // drop what is queued and silence the output
     AudioFlush  = 64,  // hand over a part-filled buffer
     AudioInfo   = 65,  // what the output device is, for an about page
+
+    // Message passing between address spaces. The primitive the drivers, the
+    // filesystem and the network stack are being moved out onto: a server owns
+    // a port, a client calls it, and neither can see the other's memory.
+    PortCreate  = 66,
+    PortOpen    = 67,
+    PortDestroy = 68,
+    IpcCall     = 69,  // send and block for the answer
+    IpcRecv     = 70,  // block for a request; returns a handle to answer with
+    IpcReply    = 71,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

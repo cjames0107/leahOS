@@ -38,6 +38,11 @@
     (WS_PIXEL_KEY_BASE + (unsigned)(slot) * WS_PIXEL_GENS + ((gen) % WS_PIXEL_GENS))
 #define WS_MAGIC          0x5734454cu /* "L4Ws" - the server is up          */
 
+/* The chrome, which both sides have to agree about: the server draws it and a
+ * client needs it to turn its own coordinates into screen ones. */
+#define WS_TITLE_HEIGHT 18
+#define WS_BORDER       3
+
 #define WS_MAX_WINDOWS 16
 #define WS_EVENT_SLOTS 32
 #define WS_TITLE_LEN   32
@@ -80,6 +85,18 @@
 #define WIN_KEY_DOWN  0x1D
 #define WIN_KEY_LEFT  0x1E
 #define WIN_KEY_RIGHT 0x1F
+
+/* Something was dropped on this window. x and y are where, in the window's own
+ * coordinates; what was dropped is in the control block's drag record, which
+ * the server leaves intact until the next drag begins.
+ *
+ * The receiving client decides. It either does the move and calls
+ * win_drop_accept with where the thing ended up on screen, or calls
+ * win_drop_reject - and the server animates the ghost to that place or back to
+ * where it was picked up. Nothing moves on screen until somebody says what
+ * happened, which is what makes a refused drop visibly a refusal rather than
+ * an icon quietly vanishing. */
+#define WIN_EVENT_DROP       7
 
 /* The window has been resized. x and y carry the new content width and height;
  * the pixel buffer has already been replaced, so re-fetch it with win_map and
@@ -139,6 +156,47 @@ struct ws_window {
  * `generation` is bumped by the writer; the server reloads the wallpaper when
  * it moves, so a colour change costs a repaint and a wallpaper change costs a
  * decode - and only when one actually happened. */
+/* A drag in progress.
+ *
+ * It lives in the server because it is the one thing that has to be drawn over
+ * every window at once, including windows belonging to other processes. A
+ * client that started a drag cannot paint outside itself, and the two clients
+ * either end of a drag do not know about each other at all - they only both
+ * know the server.
+ *
+ * The payload is a path. That is the only kind of thing this system drags, and
+ * a general type tag with nothing to distinguish would be a guess about a
+ * second case that does not exist yet.
+ */
+#define WS_DRAG_NONE  0u
+#define WS_DRAG_LIVE  1u   /* following the cursor                     */
+#define WS_DRAG_SNAP  2u   /* let go: sliding to where it ended up     */
+
+/* What to draw for the ghost. The server cannot read a file to find out what it
+ * is, and asking it to would put the filesystem in the compositor. */
+#define WS_DRAG_FILE   0u
+#define WS_DRAG_FOLDER 1u
+#define WS_DRAG_APP    2u
+
+#define WS_DRAG_W 64
+#define WS_DRAG_H 46
+
+struct ws_drag {
+    volatile uint32_t phase;        /* WS_DRAG_*                              */
+    volatile uint32_t source;       /* the slot that started it               */
+    volatile uint32_t icon;         /* WS_DRAG_FILE / FOLDER / APP            */
+    volatile int32_t  x, y;         /* the ghost's top-left, in screen pixels */
+    volatile int32_t  grab_x, grab_y;   /* cursor offset inside the ghost     */
+    volatile int32_t  home_x, home_y;   /* where it was picked up             */
+    volatile int32_t  to_x, to_y;       /* where the snap is heading          */
+    volatile uint32_t step, steps;      /* how far through the snap           */
+    /* Bumped whenever a drag starts. A client redrawing itself uses this to
+     * notice that the thing it is holding has changed without polling paths. */
+    volatile uint32_t seq;
+    char path[256];                 /* what is being dragged                  */
+    char label[64];                 /* and what to write under the ghost      */
+};
+
 struct ws_theme {
     volatile uint32_t desktop;
     volatile uint32_t face;
@@ -175,6 +233,7 @@ struct ws_shared {
     volatile uint32_t quit;         /* set by the server as it exits */
     volatile uint32_t reserved;
     struct ws_theme theme;
+    struct ws_drag  drag;
     struct ws_window windows[WS_MAX_WINDOWS];
 };
 

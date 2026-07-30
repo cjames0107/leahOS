@@ -48,8 +48,8 @@
 #define TITLE_TEXT   (g_control->theme.title_text)
 #define CURSOR_FILL  (g_control->theme.cursor)
 
-#define TITLE_HEIGHT 18
-#define BORDER       3
+#define TITLE_HEIGHT WS_TITLE_HEIGHT
+#define BORDER       WS_BORDER
 #define CLOSE_SIZE   12
 /* The grip bar along the bottom, and the grow box sitting at its right end.
  * A strip of its own rather than a corner overlapping the content, so a click
@@ -427,6 +427,8 @@ static void reload_theme(void)
 }
 
 static void compose_cursor(void);
+static void compose_drag(void);
+static struct rect drag_rect(void);
 
 /* Desktop, then windows back to front so the topmost is drawn last and wins -
  * within one rectangle, and skipping the windows that do not touch it. */
@@ -470,6 +472,13 @@ static void compose_rect(const struct rect* r)
         const struct rect f = frame_rect(g_order[i]);
         if (rects_overlap(&f, r))
             draw_window(g_order[i], i == 0);
+    }
+
+    /* Above the windows and below the cursor: it is being carried. */
+    if (g_control->drag.phase != WS_DRAG_NONE) {
+        const struct rect d = drag_rect();
+        if (rects_overlap(&d, r))
+            compose_drag();
     }
 
     /* Last, and above every window: it is the one thing always on top. */
@@ -528,6 +537,97 @@ static void compose_cursor(void)
 static void damage_cursor(int x, int y)
 {
     damage_rect(x, y, CURSOR_W, CURSOR_H);
+}
+
+/* --- the thing being dragged ---------------------------------------------
+ *
+ * Drawn here rather than by whoever started the drag, because it has to appear
+ * over every window including ones belonging to other processes, and a client
+ * can only paint inside itself.
+ *
+ * Half transparent, by averaging with what is already in the backbuffer. There
+ * is no alpha channel anywhere in this system and adding one for this would
+ * mean touching every surface; averaging two opaque colours is the same
+ * arithmetic where it actually matters. */
+static uint32_t blend_half(uint32_t over, uint32_t under)
+{
+    return (((over >> 16) & 0xFF) + ((under >> 16) & 0xFF)) / 2 << 16 |
+           (((over >> 8) & 0xFF) + ((under >> 8) & 0xFF)) / 2 << 8 |
+           ((over & 0xFF) + (under & 0xFF)) / 2;
+}
+
+static void ghost_plot(int x, int y, uint32_t colour)
+{
+    if (x < g_clip.x || y < g_clip.y ||
+        x >= g_clip.x + g_clip.w || y >= g_clip.y + g_clip.h)
+        return;
+    if (x < 0 || y < 0 || (unsigned)x >= g_fb.width || (unsigned)y >= g_fb.height)
+        return;
+    uint32_t* p = &g_back[(unsigned)y * g_fb.width + (unsigned)x];
+    *p = blend_half(colour, *p);
+}
+
+static void ghost_fill(int x, int y, int w, int h, uint32_t colour)
+{
+    for (int row = 0; row < h; ++row)
+        for (int col = 0; col < w; ++col)
+            ghost_plot(x + col, y + row, colour);
+}
+
+static struct rect drag_rect(void)
+{
+    struct rect r;
+    r.x = g_control->drag.x;
+    r.y = g_control->drag.y;
+    r.w = WS_DRAG_W;
+    r.h = WS_DRAG_H;
+    return r;
+}
+
+static void compose_drag(void)
+{
+    const int x = g_control->drag.x, y = g_control->drag.y;
+    const uint32_t icon = g_control->drag.icon;
+    const uint32_t body = (icon == WS_DRAG_FOLDER) ? 0xE8C86A : 0xF0F0F0;
+    const uint32_t edge = (icon == WS_DRAG_FOLDER) ? 0x8A6D39 : 0x606060;
+
+    /* The same shapes the file manager and the desktop draw, at the same size,
+     * so what follows the cursor is recognisably the thing that was picked up
+     * rather than a generic marker. */
+    if (icon == WS_DRAG_FOLDER) {
+        ghost_fill(x + 12, y + 4, 12, 3, body);
+        ghost_fill(x + 12, y + 7, 28, 20, body);
+        for (int i = 0; i < 28; ++i) {
+            ghost_plot(x + 12 + i, y + 7, edge);
+            ghost_plot(x + 12 + i, y + 26, edge);
+        }
+    } else {
+        ghost_fill(x + 16, y + 3, 20, 25, body);
+        for (int i = 0; i < 25; ++i) {
+            ghost_plot(x + 16, y + 3 + i, edge);
+            ghost_plot(x + 35, y + 3 + i, edge);
+        }
+        for (int i = 0; i < 20; ++i) {
+            ghost_plot(x + 16 + i, y + 3, edge);
+            ghost_plot(x + 16 + i, y + 27, edge);
+        }
+        for (int r = 0; r < 4; ++r)
+            ghost_fill(x + 20, y + 9 + r * 4, 12, 1, edge);
+        if (icon == WS_DRAG_APP)
+            ghost_fill(x + 22, y + 14, 8, 8, 0x4060A0);
+    }
+
+    /* The label, half-strength like the rest of it. Drawn a character at a
+     * time through the same blend so it reads over any background. */
+    const char* label = (const char*)g_control->drag.label;
+    const int span = WS_DRAG_W / 8;
+    for (int i = 0; i < span && label[i] != '\0'; ++i) {
+        const unsigned char* glyph = &g_font[(unsigned char)label[i] * 16];
+        for (int row = 0; row < 16; ++row)
+            for (int col = 0; col < 8; ++col)
+                if ((glyph[row] >> (7 - col)) & 1)
+                    ghost_plot(x + i * 8 + col, y + 30 + row, 0x000000);
+    }
 }
 
 /* --- events -------------------------------------------------------------- */
@@ -761,6 +861,17 @@ static void handle_input(void)
     const int pressed = left && !g_last_left;
     const int released = !left && g_last_left;
 
+    /* A live drag follows the pointer wherever it goes, regardless of which
+     * window the press started in: the whole point is that it can cross from
+     * one process's window into another's. */
+    if (g_control->drag.phase == WS_DRAG_LIVE &&
+        (x != before_x || y != before_y)) {
+        damage_rect(g_control->drag.x, g_control->drag.y, WS_DRAG_W, WS_DRAG_H);
+        g_control->drag.x = x - g_control->drag.grab_x;
+        g_control->drag.y = y - g_control->drag.grab_y;
+        damage_rect(g_control->drag.x, g_control->drag.y, WS_DRAG_W, WS_DRAG_H);
+    }
+
     /* The right button raises a context menu, which is the client's to draw -
      * the server only says where it was asked for. It does not raise or focus
      * the window: a right-click is a question about something, not a decision
@@ -851,6 +962,29 @@ static void handle_input(void)
 
     if (released) {
         g_dragging = -1;
+
+        /* A drop goes to whatever is *under the cursor*, not to whoever the
+         * pointer was grabbed by. Those are the same window for an ordinary
+         * click and different ones for every drag worth making. */
+        if (g_control->drag.phase == WS_DRAG_LIVE) {
+            const int onto = window_at(x, y);
+            if (onto >= 0) {
+                struct ws_window* w = &g_control->windows[onto];
+                const int ox = is_desktop(onto) ? w->x : w->x + BORDER;
+                const int oy = is_desktop(onto) ? w->y
+                                                : w->y + BORDER + TITLE_HEIGHT;
+                push_event(onto, WIN_EVENT_DROP, x - ox, y - oy, 1, 0);
+            } else {
+                /* Dropped on nothing. Send it home rather than leaving the
+                 * ghost stranded waiting for an answer nobody will give. */
+                g_control->drag.to_x = g_control->drag.home_x;
+                g_control->drag.to_y = g_control->drag.home_y;
+                g_control->drag.step = 0;
+                g_control->drag.steps = 16;
+                g_control->drag.phase = WS_DRAG_SNAP;
+            }
+        }
+
         const int slot = g_mouse_grab >= 0 ? g_mouse_grab : window_at(x, y);
         g_mouse_grab = -1;
         if (slot >= 0) {
@@ -1055,6 +1189,37 @@ int main(void)
         /* A pointer move is damage like anything else: where it was, and where
          * it is. Nothing draws to the screen outside the blit below, so the
          * screen only ever shows finished frames. */
+        /* The snap home. One frame per step, which is the only clock the
+         * server has and the right one: the animation is a property of what
+         * is on screen, so it should advance when the screen does. */
+        if (g_control->drag.phase == WS_DRAG_SNAP) {
+            struct ws_drag* d = &g_control->drag;
+            damage_rect(d->x, d->y, WS_DRAG_W, WS_DRAG_H);
+            ++d->step;
+            if (d->step >= d->steps) {
+                d->phase = WS_DRAG_NONE;
+                /* Where it finished and where it was aiming, because integer
+                 * easing stops short and the two are not always the same
+                 * rectangle. Half-transparent pixels that never get recomposed
+                 * stay on the screen as a pale rectangle - the one thing a
+                 * ghost must not leave behind is a ghost. */
+                damage_rect(d->to_x, d->to_y, WS_DRAG_W, WS_DRAG_H);
+                damage_rect(d->home_x, d->home_y, WS_DRAG_W, WS_DRAG_H);
+            } else {
+                /* Ease out: most of the distance early, so it reads as being
+                 * pulled into place rather than sliding at a constant speed.
+                 * The remaining gap is halved and a bit each frame. */
+                /* Ease out: a third of the remaining gap each frame, so it
+                 * moves fastest at the start and settles rather than
+                 * arriving at speed. The last few pixels are covered by the
+                 * step count running out, which is why the target does not
+                 * need to be reached exactly. */
+                d->x += (d->to_x - d->x) / 3;
+                d->y += (d->to_y - d->y) / 3;
+                damage_rect(d->x, d->y, WS_DRAG_W, WS_DRAG_H);
+            }
+        }
+
         if (g_cursor_x != g_last_cursor_x || g_cursor_y != g_last_cursor_y) {
             if (g_last_cursor_x >= 0)
                 damage_cursor(g_last_cursor_x, g_last_cursor_y);

@@ -15,6 +15,7 @@
 #include <clipboard.h>
 #include <display.h>
 #include <dialog.h>
+#include <fcntl.h>
 #include <image.h>
 #include <shm.h>
 #include <stdio.h>
@@ -35,9 +36,22 @@ static unsigned  g_w, g_h;
 static struct ws_shared* g_ws;
 
 static struct dirent g_items[MAX_ICONS];
+/* Where each icon sits, in desktop pixels rather than in a grid.
+ *
+ * A grid is easier to write and worse to use: it decides for you, and the only
+ * arrangement it can express is the one it already chose. Free positions are
+ * saved by name, so a folder that appears and disappears comes back where it
+ * was rather than shuffling everything after it along one place. */
+static int g_ix[MAX_ICONS], g_iy[MAX_ICONS];
 static int g_n;
 static int g_sel = -1;
 static int g_enter_armed;   /* the first Enter of a double press */
+static int g_band, g_band_x, g_band_y, g_band_x2, g_band_y2;
+static int g_press_item = -1;
+static int g_press_x, g_press_y;
+static int g_window_id = -1;
+
+static int being_dragged(int i);
 static char g_marked[MAX_ICONS];
 static int  g_anchor = -1;
 static char g_dir[128];
@@ -57,6 +71,115 @@ static void home_desktop(char* out, unsigned max)
         snprintf(out, max, "/home/%s/Desktop", name);
 }
 
+/* --- where the icons are ---------------------------------------------------
+ *
+ * Kept in a file beside the folder's contents rather than in it: a position is
+ * about this desktop, not about the file, and writing it into the file would
+ * change something the user did not ask to have changed.
+ */
+#define PLACES_MAX 128
+static char g_place_name[PLACES_MAX][64];
+static int  g_place_x[PLACES_MAX], g_place_y[PLACES_MAX];
+static int  g_places;
+
+static void places_path(char* out, unsigned max)
+{
+    char name[64] = "";
+    username(getuid(), name);
+    if (strcmp(name, "root") == 0)
+        snprintf(out, max, "/root/.leahdesk");
+    else
+        snprintf(out, max, "/home/%s/.leahdesk", name);
+}
+
+static int place_find(const char* name)
+{
+    for (int i = 0; i < g_places; ++i)
+        if (strcmp(g_place_name[i], name) == 0)
+            return i;
+    return -1;
+}
+
+static void place_set(const char* name, int x, int y)
+{
+    int i = place_find(name);
+    if (i < 0) {
+        if (g_places >= PLACES_MAX)
+            return;
+        i = g_places++;
+        snprintf(g_place_name[i], sizeof(g_place_name[i]), "%s", name);
+    }
+    g_place_x[i] = x;
+    g_place_y[i] = y;
+}
+
+static void places_load(void)
+{
+    g_places = 0;
+    char path[128];
+    places_path(path, sizeof(path));
+    const int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return;
+    static char buf[4096];
+    const int len = (int)read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (len <= 0)
+        return;
+    buf[len] = '\0';
+
+    int i = 0;
+    while (i < len && g_places < PLACES_MAX) {
+        /* "x y name", name last so it may contain spaces. */
+        int x = 0, y = 0;
+        while (i < len && buf[i] == ' ') ++i;
+        while (i < len && buf[i] >= '0' && buf[i] <= '9') x = x * 10 + buf[i++] - '0';
+        while (i < len && buf[i] == ' ') ++i;
+        while (i < len && buf[i] >= '0' && buf[i] <= '9') y = y * 10 + buf[i++] - '0';
+        while (i < len && buf[i] == ' ') ++i;
+        int k = 0;
+        char name[64];
+        while (i < len && buf[i] != '\n' && k < 63) name[k++] = buf[i++];
+        name[k] = '\0';
+        while (i < len && buf[i] == '\n') ++i;
+        if (k > 0)
+            place_set(name, x, y);
+    }
+}
+
+static void places_save(void)
+{
+    char path[128];
+    places_path(path, sizeof(path));
+    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0)
+        return;
+    for (int i = 0; i < g_places; ++i) {
+        char line[128];
+        const int n = snprintf(line, sizeof(line), "%d %d %s\n",
+                               g_place_x[i], g_place_y[i], g_place_name[i]);
+        write(fd, line, (unsigned)n);
+    }
+    close(fd);
+}
+
+/* Somewhere free for an icon nobody has placed yet. The grid is only used for
+ * this - as a starting suggestion, not as the arrangement. */
+static void auto_place(int index, int* out_x, int* out_y)
+{
+    const int rows = ((int)g_h - 24) / CELL_H;
+    for (int slot = 0; slot < MAX_ICONS; ++slot) {
+        const int x = 12 + (slot / (rows > 0 ? rows : 1)) * CELL_W;
+        const int y = 12 + (slot % (rows > 0 ? rows : 1)) * CELL_H;
+        int taken = 0;
+        for (int j = 0; j < index; ++j)
+            if (g_ix[j] == x && g_iy[j] == y) { taken = 1; break; }
+        if (!taken) { *out_x = x; *out_y = y; return; }
+    }
+    *out_x = 12;
+    *out_y = 12;
+}
+
 static void rescan(void)
 {
     /* Made on demand: a desktop folder that does not exist is a folder nobody
@@ -65,6 +188,22 @@ static void rescan(void)
     g_n = getdents(g_dir, g_items, MAX_ICONS);
     if (g_n < 0)
         g_n = 0;
+
+    int placed = 0;
+    for (int i = 0; i < g_n; ++i) {
+        const int p = place_find(g_items[i].d_name);
+        if (p >= 0) {
+            g_ix[i] = g_place_x[p];
+            g_iy[i] = g_place_y[p];
+        } else {
+            auto_place(i, &g_ix[i], &g_iy[i]);
+            place_set(g_items[i].d_name, g_ix[i], g_iy[i]);
+            placed = 1;
+        }
+    }
+    if (placed)
+        places_save();
+
     snprintf(g_note, sizeof(g_note), "%s - %d item%s", g_dir, g_n,
              g_n == 1 ? "" : "s");
 }
@@ -122,12 +261,11 @@ static void draw(void)
                 g_ws ? g_ws->theme.desktop : 0x008080);
     }
 
-    const int cols = ((int)g_w - 16) / CELL_W;
-    for (int i = 0; i < g_n && cols > 0; ++i) {
-        const int x = 12 + (i % cols) * CELL_W;
-        const int y = 12 + (i / cols) * CELL_H;
-        if (y + CELL_H > (int)g_h)
-            break;
+    for (int i = 0; i < g_n; ++i) {
+        if (being_dragged(i))
+            continue;               /* it is in the air, not on the desktop */
+        const int x = g_ix[i];
+        const int y = g_iy[i];
         if (i == g_sel || g_marked[i])
             wg_fill(x - 2, y - 2, CELL_W - 6, CELL_H - 12, 0x4060A0);
         const int app = bundle_is_app(g_items[i].d_name);
@@ -148,9 +286,54 @@ static void draw(void)
         wg_text_clipped(x, y + 36, label, WG_PAPER, CELL_W - 10);
     }
 
+    /* The rubber band, over the icons it is choosing. */
+    if (g_band) {
+        const int x0 = g_band_x < g_band_x2 ? g_band_x : g_band_x2;
+        const int x1 = g_band_x < g_band_x2 ? g_band_x2 : g_band_x;
+        const int y0 = g_band_y < g_band_y2 ? g_band_y : g_band_y2;
+        const int y1 = g_band_y < g_band_y2 ? g_band_y2 : g_band_y;
+        for (int x = x0; x <= x1; x += 3) {
+            wg_plot(x, y0, WG_PAPER);
+            wg_plot(x, y1, WG_PAPER);
+        }
+        for (int y = y0; y <= y1; y += 3) {
+            wg_plot(x0, y, WG_PAPER);
+            wg_plot(x1, y, WG_PAPER);
+        }
+    }
+
     /* Nothing is written on the desktop itself. A status line here is a caption
      * on a backdrop: it belongs to no window, cannot be dismissed, and is in
      * the way of the one thing the desktop is for. */
+}
+
+/* Which icon is under a point. Free placement means icons can be put close
+ * enough to overlap, so the later one wins - the same rule the drawing uses,
+ * which is what makes "click the one you can see" true. */
+static int icon_at(int x, int y)
+{
+    for (int i = g_n - 1; i >= 0; --i) {
+        if (x >= g_ix[i] - 2 && x < g_ix[i] + CELL_W - 8 &&
+            y >= g_iy[i] - 2 && y < g_iy[i] + CELL_H - 12)
+            return i;
+    }
+    return -1;
+}
+
+static unsigned drag_icon_for(int i)
+{
+    if (bundle_is_app(g_items[i].d_name))
+        return WS_DRAG_APP;
+    return g_items[i].d_type == S_IFDIR ? WS_DRAG_FOLDER : WS_DRAG_FILE;
+}
+
+static int being_dragged(int i)
+{
+    if (!win_dragging() || i < 0 || i >= g_n)
+        return 0;
+    char full[256];
+    snprintf(full, sizeof(full), "%s/%s", g_dir, g_items[i].d_name);
+    return strcmp(full, win_drag_path()) == 0;
 }
 
 static void launch(const char* app, const char* doc)
@@ -243,6 +426,7 @@ int main(void)
         printf("desktop: no window server\n");
         return 1;
     }
+    g_window_id = id;
     win_set_desktop(id);
     g_px = win_map(id);
     if (g_px == 0)
@@ -250,13 +434,25 @@ int main(void)
     wg_target(g_px, g_w, g_h);
 
     home_desktop(g_dir, sizeof(g_dir));
+    places_load();
     rescan();
     reload_paper();
     draw();
     win_present(id);
 
     unsigned tick = 0;
+    int was_dragging = 0;
     for (;;) {
+        /* A drag that ended in another window still took something out of
+         * this one, and nothing tells us but the drag going away. */
+        const int dragging_now = win_dragging();
+        if (was_dragging && !dragging_now) {
+            rescan();
+            draw();
+            win_present(id);
+        }
+        was_dragging = dragging_now;
+
         struct win_event e;
         while (win_poll(id, &e)) {
             if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
@@ -300,14 +496,7 @@ int main(void)
             }
 
             if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                const int cols = ((int)g_w - 16) / CELL_W;
-                int hit = -1;
-                if (cols > 0 && e.x >= 12 && e.y >= 12) {
-                    const int c = (e.x - 12) / CELL_W, r = (e.y - 12) / CELL_H;
-                    const int i = r * cols + c;
-                    if (c < cols && i >= 0 && i < g_n)
-                        hit = i;
-                }
+                const int hit = icon_at(e.x, e.y);
                 if (e.button == 2) {
                     /* A menu either way: right-clicking bare desktop is still a
                      * question worth answering. */
@@ -333,10 +522,97 @@ int main(void)
                         g_sel = hit; g_anchor = hit;
                     }
                 } else {
-                    /* Clicking the bare desktop lets go of everything. */
+                    /* Clicking the bare desktop lets go of everything, and
+                     * dragging from there chooses a region rather than doing
+                     * nothing at all. */
                     memset(g_marked, 0, sizeof(g_marked));
                     g_sel = -1;
+                    g_band = 1;
+                    g_band_x = g_band_x2 = e.x;
+                    g_band_y = g_band_y2 = e.y;
                 }
+                if (hit >= 0 && e.button == 1) {
+                    g_press_item = hit;
+                    g_press_x = e.x;
+                    g_press_y = e.y;
+                }
+            } else if (e.type == WIN_EVENT_MOUSE_MOVE) {
+                if (g_band) {
+                    g_band_x2 = e.x;
+                    g_band_y2 = e.y;
+                    const int x0 = g_band_x < g_band_x2 ? g_band_x : g_band_x2;
+                    const int x1 = g_band_x < g_band_x2 ? g_band_x2 : g_band_x;
+                    const int y0 = g_band_y < g_band_y2 ? g_band_y : g_band_y2;
+                    const int y1 = g_band_y < g_band_y2 ? g_band_y2 : g_band_y;
+                    memset(g_marked, 0, sizeof(g_marked));
+                    for (int i = 0; i < g_n; ++i) {
+                        /* Any overlap counts, rather than requiring the icon
+                         * to be swallowed whole: a band that has to contain
+                         * something is a band you have to be careful with. */
+                        const int ix1 = g_ix[i] + CELL_W - 8;
+                        const int iy1 = g_iy[i] + CELL_H - 12;
+                        if (g_ix[i] <= x1 && ix1 >= x0 &&
+                            g_iy[i] <= y1 && iy1 >= y0)
+                            g_marked[i] = 1;
+                    }
+                } else if (g_press_item >= 0 && !win_dragging()) {
+                    const int dx = e.x - g_press_x, dy = e.y - g_press_y;
+                    if (dx * dx + dy * dy > 25) {
+                        const int i = g_press_item;
+                        char full[256];
+                        snprintf(full, sizeof(full), "%s/%s", g_dir,
+                                 g_items[i].d_name);
+                        int ox, oy;
+                        win_origin(g_window_id, &ox, &oy);
+                        /* Where the press was, not where the pointer had got
+                         * to when the threshold was crossed: otherwise the
+                         * ghost jumps by the length of the first movement. */
+                        win_drag_begin(full, g_items[i].d_name, drag_icon_for(i),
+                                       g_press_x - g_ix[i], g_press_y - g_iy[i],
+                                       ox + g_ix[i], oy + g_iy[i]);
+                        g_press_item = -1;
+                    }
+                }
+            } else if (e.type == WIN_EVENT_MOUSE_UP) {
+                g_band = 0;
+                g_press_item = -1;
+            } else if (e.type == WIN_EVENT_DROP) {
+                /* Two quite different things arrive here. Something already on
+                 * the desktop is being rearranged, and only its position
+                 * changes. Something from elsewhere is being moved in, and
+                 * the file has to follow. */
+                char from[256];
+                snprintf(from, sizeof(from), "%s", win_drop_path());
+
+                int last = -1;
+                for (int i = 0; from[i] != '\0'; ++i)
+                    if (from[i] == '/') last = i;
+                const char* name = last >= 0 ? &from[last + 1] : from;
+
+                char dest[256];
+                snprintf(dest, sizeof(dest), "%s/%s", g_dir, name);
+
+                /* Where the ghost's corner is, not where the cursor is: the
+                 * icon should land under the hand exactly as it was picked
+                 * up, not jump so its corner meets the pointer. */
+                const int nx = e.x - (g_ws ? g_ws->drag.grab_x : 0);
+                const int ny = e.y - (g_ws ? g_ws->drag.grab_y : 0);
+
+                int ok = 1;
+                if (strcmp(from, dest) != 0)
+                    ok = rename(from, dest) == 0;
+                if (ok) {
+                    place_set(name, nx < 0 ? 0 : nx, ny < 0 ? 0 : ny);
+                    places_save();
+                    rescan();
+                    int ox, oy;
+                    win_origin(g_window_id, &ox, &oy);
+                    const int at = place_find(name);
+                    win_drop_accept(ox + g_place_x[at], oy + g_place_y[at]);
+                } else {
+                    win_drop_reject();
+                }
+                g_press_item = -1;
             } else if (e.type == WIN_EVENT_KEY) {
                 const int cols = ((int)g_w - 16) / CELL_W;
                 if (e.key != '\n' && e.key != '\r')
@@ -373,7 +649,8 @@ int main(void)
          * outside and is not: it is this timer. Holding the refresh is the
          * better fix than repainting the menu over it, because rescanning would
          * also move the selection the menu was opened about. */
-        if (++tick >= 66 && !menu_active() && !dlg_active()) {
+        if (++tick >= 66 && !menu_active() && !dlg_active() &&
+            !win_dragging()) {
             tick = 0;
             reload_paper();
             rescan();

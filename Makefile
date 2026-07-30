@@ -40,7 +40,7 @@ EXT_MIB         := 64             # the ext4 root filesystem on disk 1
 # --- knobs ------------------------------------------------------------------
 # Override on the command line, e.g. `make run MEM=2G` or
 # `make headless TIMEOUT=15`.
-MEM        ?= 2048M
+MEM        ?= 64M
 CPUS       ?= 1
 TIMEOUT    ?= 6
 # Where the AC'97 controller's output goes. `coreaudio` is the host's speakers;
@@ -115,7 +115,7 @@ KERNEL_BIN := $(BUILD)/kernel.bin
 # path instead of asking which application does the job.
 BIN_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear \
                  ifconfig ping arp nslookup tests id chmod chown su fetch whoami \
-                 login useradd passwd stat gui wserver desktop tone
+                 login useradd passwd stat gui wserver desktop tone ipctest
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman
 USER_PROGRAMS := $(BIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)

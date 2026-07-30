@@ -20,6 +20,7 @@
 #include <leah/mouse.hpp>
 #include <leah/ac97.hpp>
 #include <leah/e1000.hpp>
+#include <leah/ipc.hpp>
 #include <leah/net.hpp>
 #include <leah/panic.hpp>
 #include <leah/pci.hpp>
@@ -987,6 +988,7 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     step("ext4 write path verified (create, extent grow, mkdir, remove, rename)");
 
     shm::init();
+    ipc::init();
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");
 

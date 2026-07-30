@@ -68,6 +68,12 @@
 #define SYS_audiostop   63
 #define SYS_audioflush  64
 #define SYS_audioinfo   65
+#define SYS_portcreate  66
+#define SYS_portopen    67
+#define SYS_portdestroy 68
+#define SYS_ipccall     69
+#define SYS_ipcrecv     70
+#define SYS_ipcreply    71
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

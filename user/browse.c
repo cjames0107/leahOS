@@ -64,6 +64,14 @@ static int  g_renaming;      /* the save dialogue is being used to rename */
 static int  g_enter_armed;   /* the first Enter of a double press */
 static char g_rename_from[256];
 static int  g_band_x, g_band_y, g_band_x2, g_band_y2;
+
+/* A press on an item is not yet a drag: it becomes one only once the pointer
+ * has moved far enough that it cannot be a click with a shaky hand. */
+static int  g_press_item = -1;
+static int  g_press_x, g_press_y;
+static int  g_window_id = -1;
+
+static int being_dragged(int i);
 static int g_view = VIEW_ICON;
 /* Measured in pixels down the content, not in items.
  *
@@ -430,6 +438,8 @@ static void draw_icons(void)
     const int first = g_scroll / CELL_H;
     const int shift = g_scroll % CELL_H;
     for (int i = first * cols; i < g_count; ++i) {
+        if (being_dragged(i))
+            continue;               /* it is in the air, not in the folder */
         const int slot = i - first * cols;
         const int cx = 8 + (slot % cols) * CELL_W;
         const int cy = top + 6 + (slot / cols) * CELL_H - shift;
@@ -462,6 +472,8 @@ static void draw_list(void)
 
     const int first = (g_scroll > ROW_H + 2) ? (g_scroll - ROW_H - 2) / ROW_H : 0;
     for (int i = first; i < g_count; ++i) {
+        if (being_dragged(i))
+            continue;
         const int y = top + ROW_H + 2 + i * ROW_H - g_scroll;
         if (y >= top + content_h())
             break;
@@ -829,6 +841,44 @@ static void go_up(void)
 }
 
 /* Which item is under the pointer, or -1. */
+/* The top-left of an item's cell, in this window's coordinates. The inverse of
+ * hit_test, and needed for the same reason a drag needs a home: the ghost has
+ * to start where the thing was and land where it went. */
+static void cell_at(int i, int* out_x, int* out_y)
+{
+    const int top = content_top();
+    if (g_view == VIEW_ICON) {
+        const int cols = icon_cols();
+        *out_x = 8 + (i % cols) * CELL_W;
+        *out_y = top + 6 + (i / cols) * CELL_H - g_scroll;
+    } else if (g_view == VIEW_LIST) {
+        *out_x = 8;
+        *out_y = top + ROW_H + 2 + i * ROW_H - g_scroll;
+    } else {
+        *out_x = 8;
+        *out_y = top + 2 + i * ROW_H - g_scroll;
+    }
+}
+
+/* What the server should draw while this is in the air. */
+static unsigned drag_icon_for(const char* name, unsigned char type)
+{
+    if (bundle_is_app(name))
+        return WS_DRAG_APP;
+    return type == S_IFDIR ? WS_DRAG_FOLDER : WS_DRAG_FILE;
+}
+
+/* True when this entry is the one currently being carried, so it can be left
+ * out of the drawing: an icon that is in the air is not also in the folder. */
+static int being_dragged(int i)
+{
+    if (!win_dragging() || i < 0 || i >= g_count)
+        return 0;
+    char full[256];
+    join(g_path, g_entries[i].d_name, full, sizeof(full));
+    return strcmp(full, win_drag_path()) == 0;
+}
+
 static int hit_test(int x, int y)
 {
     const int top = content_top();
@@ -856,6 +906,67 @@ static int hit_test(int x, int y)
 static void scroll_by(int steps)
 {
     scroll_to(g_scroll + steps * scroll_step());
+}
+
+/* Moving something here.
+ *
+ * The whole operation is one rename: within a filesystem that is what a move
+ * is, and doing it as copy-then-delete would be slower, would need twice the
+ * space, and would turn a failure half way through into two half files.
+ */
+static int move_into(const char* from, const char* dir, char* landed, int max)
+{
+    /* The last component of the source is the name it keeps. */
+    int last = -1;
+    for (int i = 0; from[i] != '\0'; ++i)
+        if (from[i] == '/')
+            last = i;
+    const char* name = last >= 0 ? &from[last + 1] : from;
+
+    char dest[256];
+    join(dir, name, dest, sizeof(dest));
+    if (strcmp(from, dest) == 0)
+        return -1;                  /* already where it is being put */
+
+    /* A folder cannot be moved inside itself: the path would still resolve and
+     * the tree would be detached from the root with no way back to it. */
+    const int flen = (int)strlen(from);
+    int prefix = 1;
+    for (int i = 0; i < flen; ++i)
+        if (dir[i] != from[i]) { prefix = 0; break; }
+    if (prefix && (dir[flen] == '/' || dir[flen] == '\0'))
+        return -1;
+
+    if (rename(from, dest) < 0)
+        return -1;
+    if (landed != 0) {
+        int i = 0;
+        while (dest[i] != '\0' && i < max - 1) { landed[i] = dest[i]; ++i; }
+        landed[i] = '\0';
+    }
+    return 0;
+}
+
+/* Where a dropped thing came to rest, so the ghost can be sent there. Its own
+ * new cell if it landed in this folder, or the folder it went into. */
+static void settle_on(const char* dest_name, int over_folder, int folder_index)
+{
+    read_dir();
+    int at = -1;
+    if (over_folder) {
+        at = folder_index;
+    } else {
+        for (int i = 0; i < g_count; ++i)
+            if (strcmp(g_entries[i].d_name, dest_name) == 0) { at = i; break; }
+    }
+    if (at < 0) {
+        win_drop_reject();
+        return;
+    }
+    int cx, cy, ox, oy;
+    cell_at(at, &cx, &cy);
+    win_origin(g_window_id, &ox, &oy);
+    win_drop_accept(ox + cx, oy + cy);
 }
 
 static const char* const kMenu[] = {
@@ -932,6 +1043,7 @@ int main(int argc, char** argv)
     g_px = win_map(id);
     if (g_px == 0)
         return 1;
+    g_window_id = id;
     win_set_min_size(id, 440, 260);
     wg_target(g_px, g_w, g_h);
 
@@ -941,7 +1053,18 @@ int main(int argc, char** argv)
     draw();
     win_present(id);
 
+    int was_dragging = 0;
     for (;;) {
+        /* Something dragged out of this folder into another window leaves no
+         * trace here but the drag ending. */
+        const int dragging_now = win_dragging();
+        if (was_dragging && !dragging_now) {
+            read_dir();
+            draw();
+            win_present(id);
+        }
+        was_dragging = dragging_now;
+
         struct win_event event;
         while (win_poll(id, &event)) {
             if (event.type == WIN_EVENT_CLOSE) {
@@ -1165,6 +1288,14 @@ int main(int argc, char** argv)
                     }
                 } else {
                     const int hit = hit_test(event.x, event.y);
+                    if (hit >= 0 && g_view != VIEW_TREE) {
+                        /* Remember where this began. It becomes a drag only
+                         * once the pointer has travelled far enough that it
+                         * cannot be a click with an unsteady hand. */
+                        g_press_item = hit;
+                        g_press_x = event.x;
+                        g_press_y = event.y;
+                    }
                     if (hit >= 0) {
                         /* Click to select, click again to open - the same
                          * gesture in every view, and no timing to get wrong.
@@ -1176,6 +1307,28 @@ int main(int argc, char** argv)
                         else
                             select_at(hit, m);
                     }
+                }
+            } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_press_item >= 0 &&
+                       !win_dragging()) {
+                const int dx = event.x - g_press_x, dy = event.y - g_press_y;
+                if (dx * dx + dy * dy > 25) {       /* five pixels */
+                    const int i = g_press_item;
+                    char full[256];
+                    join(g_path, g_entries[i].d_name, full, sizeof(full));
+                    int cx, cy, ox, oy;
+                    cell_at(i, &cx, &cy);
+                    win_origin(g_window_id, &ox, &oy);
+                    /* The grab is where the *press* was, not where the
+                     * pointer had got to by the time the threshold was
+                     * crossed. Using the latter makes the ghost jump by
+                     * however far the first movement happened to be - which
+                     * with a quick flick is most of the screen. */
+                    win_drag_begin(full, g_entries[i].d_name,
+                                   drag_icon_for(g_entries[i].d_name,
+                                                 g_entries[i].d_type),
+                                   g_press_x - cx, g_press_y - cy,
+                                   ox + cx, oy + cy);
+                    g_press_item = -1;
                 }
             } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_bar_drag) {
                 scroll_to(wg_scroll_drag_v(event.y, content_top(), content_h(),
@@ -1197,9 +1350,41 @@ int main(int argc, char** argv)
                         if (i >= 0 && i < MAX_ENTRIES)
                             g_marked[i] = 1;
                     }
+            } else if (event.type == WIN_EVENT_DROP) {
+                /* The payload is still in the drag record: the server leaves
+                 * it there until the next drag begins, precisely so the
+                 * receiver can read it when the drop arrives. */
+                char from[256];
+                snprintf(from, sizeof(from), "%s", win_drop_path());
+                const int hit = hit_test(event.x, event.y);
+                const int onto_folder =
+                    hit >= 0 && g_entries[hit].d_type == S_IFDIR &&
+                    !bundle_is_app(g_entries[hit].d_name);
+
+                char dir[256];
+                if (onto_folder)
+                    join(g_path, g_entries[hit].d_name, dir, sizeof(dir));
+                else
+                    snprintf(dir, sizeof(dir), "%s", g_path);
+
+                char landed[256] = "";
+                if (move_into(from, dir, landed, sizeof(landed)) == 0) {
+                    /* The name it kept, for finding where it ended up. */
+                    int last = -1;
+                    for (int i = 0; landed[i] != '\0'; ++i)
+                        if (landed[i] == '/') last = i;
+                    settle_on(last >= 0 ? &landed[last + 1] : landed,
+                              onto_folder, hit);
+                    snprintf(g_status, sizeof(g_status), "moved to %s", dir);
+                } else {
+                    win_drop_reject();
+                    snprintf(g_status, sizeof(g_status), "could not move here");
+                }
+                g_press_item = -1;
             } else if (event.type == WIN_EVENT_MOUSE_UP) {
                 g_band = 0;
                 g_bar_drag = 0;
+                g_press_item = -1;
             } else if (event.type == WIN_EVENT_KEY) {
                 /* Arrows move the selection, not the view: moving the view and
                  * leaving the selection behind is how you lose your place. The

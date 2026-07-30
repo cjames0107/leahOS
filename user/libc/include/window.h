@@ -42,6 +42,39 @@ int win_poll(int id, struct win_event* out);
 
 void win_destroy(int id);
 
+/* --- dragging things between windows --------------------------------------
+ *
+ * The server carries the ghost, because it is the only thing that can draw
+ * over every window at once. A source calls win_drag_begin and then forgets
+ * about it; the drop lands as a WIN_EVENT_DROP on whichever window the cursor
+ * was over, which may well belong to another process. */
+
+/* Start dragging `path`. `icon` is WS_DRAG_FILE / FOLDER / APP, `grab_x/y` is
+ * where inside the ghost the cursor is holding it, and `home_x/y` is where it
+ * came from on screen - the place it slides back to if nobody takes it. */
+void win_drag_begin(const char* path, const char* label, unsigned icon,
+                    int grab_x, int grab_y, int home_x, int home_y);
+
+/* What is being dragged right now, or "" when nothing is. A source uses this
+ * to stop drawing the item it is holding. */
+const char* win_drag_path(void);
+int         win_dragging(void);
+
+/* What was dropped. Unlike win_drag_path this answers after the drag has
+ * ended, which is exactly when a receiver asks: the server leaves the record
+ * intact until the next drag starts. */
+const char* win_drop_path(void);
+
+/* Answer a WIN_EVENT_DROP. Accepting takes a screen position for the ghost to
+ * settle into; rejecting sends it back where it came from. One of the two must
+ * be called, or the ghost stays on screen. */
+void win_drop_accept(int screen_x, int screen_y);
+void win_drop_reject(void);
+
+/* The window's position on screen, so a client can turn its own coordinates
+ * into the screen ones the drag record wants. */
+void win_origin(int id, int* x, int* y);
+
 /* Whether a server is running, so a client can say so rather than just fail. */
 int win_server_running(void);
 

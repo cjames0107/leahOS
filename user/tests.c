@@ -15,6 +15,7 @@
 #include <net.h>
 #include <stdlib.h>
 #include <thread.h>
+#include <ipc.h>
 #include <unistd.h>
 
 static int g_failures;
@@ -612,6 +613,103 @@ static void test_tcp(void)
     close(fd);
 }
 
+/* Message passing between address spaces.
+ *
+ * The whole claim being tested is that the two ends share no memory: the
+ * request buffer is not mapped in the server and the reply buffer is not
+ * mapped in the client. So the server answers with something it had to
+ * construct - a sum, the caller's own pid, the text reversed - rather than
+ * anything it could have got by reading a pointer it was handed.
+ */
+#define IPC_TEST_PORT 900
+#define IPC_TAG_ADD   1
+#define IPC_TAG_ECHO  2
+#define IPC_TAG_QUIT  3
+
+static void ipc_server(void)
+{
+    const int port = port_create(IPC_TEST_PORT);
+    if (port < 0)
+        exit(1);
+    for (;;) {
+        struct ipc_message m;
+        unsigned from = 0;
+        const int handle = ipc_recv(port, &m, &from);
+        if (handle < 0)
+            exit(1);
+        struct ipc_message r;
+        memset(&r, 0, sizeof(r));
+        r.tag = m.tag;
+        if (m.tag == IPC_TAG_QUIT) {
+            ipc_reply(handle, &r);
+            port_destroy(port);
+            exit(0);
+        }
+        if (m.tag == IPC_TAG_ADD) {
+            r.word[0] = m.word[0] + m.word[1];
+            r.word[1] = (long)from;
+        } else {
+            unsigned n = m.bytes > IPC_INLINE ? IPC_INLINE : m.bytes;
+            for (unsigned i = 0; i < n; ++i)
+                r.data[i] = m.data[n - 1 - i];
+            r.bytes = n;
+        }
+        ipc_reply(handle, &r);
+    }
+}
+
+static void test_ipc(void)
+{
+    printf("message passing:\n");
+
+    const int pid = fork();
+    if (pid == 0)
+        ipc_server();
+
+    int port = -1;
+    for (int i = 0; i < 300 && port < 0; ++i) {
+        port = port_open(IPC_TEST_PORT);
+        if (port < 0)
+            msleep(10);
+    }
+    check("a server in another process claims a named port", port >= 0);
+    if (port < 0)
+        return;
+
+    struct ipc_message q, a;
+    memset(&q, 0, sizeof(q));
+    memset(&a, 0, sizeof(a));
+    q.tag = IPC_TAG_ADD;
+    q.word[0] = 40;
+    q.word[1] = 2;
+    check("a call crosses into the server and an answer comes back",
+          ipc_call(port, &q, &a) == 0 && a.word[0] == 42);
+    check("the server is told which process is calling",
+          a.word[1] == (long)getpid());
+
+    struct ipc_message e, back;
+    memset(&e, 0, sizeof(e));
+    memset(&back, 0, sizeof(back));
+    e.tag = IPC_TAG_ECHO;
+    const char* text = "across the gap";
+    unsigned n = 0;
+    while (text[n] != '\0') { e.data[n] = text[n]; ++n; }
+    e.bytes = n;
+    int same = ipc_call(port, &e, &back) == 0 && back.bytes == n;
+    for (unsigned i = 0; same && i < n; ++i)
+        if (back.data[i] != text[n - 1 - i])
+            same = 0;
+    check("a payload survives the trip in both directions", same);
+
+    struct ipc_message bye, done;
+    memset(&bye, 0, sizeof(bye));
+    memset(&done, 0, sizeof(done));
+    bye.tag = IPC_TAG_QUIT;
+    ipc_call(port, &bye, &done);
+    wait(0);
+    check("the port goes when its server does", port_open(IPC_TEST_PORT) < 0);
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -624,6 +722,7 @@ int main(void)
     test_permissions();
     test_accounts();
     test_tcp();
+    test_ipc();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

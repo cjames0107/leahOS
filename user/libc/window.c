@@ -289,3 +289,107 @@ void win_set_desktop(int id)
         return;
     block->windows[id].flags |= WS_FLAG_DESKTOP;
 }
+
+/* --- dragging things between windows ------------------------------------- */
+
+void win_drag_begin(const char* path, const char* label, unsigned icon,
+                    int grab_x, int grab_y, int home_x, int home_y)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || path == 0)
+        return;
+    struct ws_drag* d = &block->drag;
+
+    /* Everything before the phase, and the phase last: the server reads phase
+     * first and would otherwise draw a ghost whose path is still the previous
+     * one's. */
+    int i = 0;
+    for (; path[i] != '\0' && i < (int)sizeof(d->path) - 1; ++i)
+        d->path[i] = path[i];
+    d->path[i] = '\0';
+    i = 0;
+    if (label != 0)
+        for (; label[i] != '\0' && i < (int)sizeof(d->label) - 1; ++i)
+            d->label[i] = label[i];
+    d->label[i] = '\0';
+
+    d->icon   = icon;
+    d->grab_x = grab_x;
+    d->grab_y = grab_y;
+    d->home_x = home_x;
+    d->home_y = home_y;
+    d->x      = home_x;
+    d->y      = home_y;
+    d->step   = 0;
+    d->steps  = 0;
+    __atomic_add_fetch(&d->seq, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&d->phase, WS_DRAG_LIVE, __ATOMIC_RELEASE);
+}
+
+const char* win_drag_path(void)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || __atomic_load_n(&block->drag.phase, __ATOMIC_ACQUIRE) !=
+                          WS_DRAG_LIVE)
+        return "";
+    return (const char*)block->drag.path;
+}
+
+const char* win_drop_path(void)
+{
+    struct ws_shared* block = control();
+    return block == 0 ? "" : (const char*)block->drag.path;
+}
+
+int win_dragging(void)
+{
+    struct ws_shared* block = control();
+    return block != 0 &&
+           __atomic_load_n(&block->drag.phase, __ATOMIC_ACQUIRE) == WS_DRAG_LIVE;
+}
+
+/* The snap is short on purpose: long enough to see where the thing went, short
+ * enough that it is never in the way of the next action. The server advances
+ * one step per frame and a frame is 10 ms, so this is about a sixth of a
+ * second - the same order as a window opening. */
+#define DRAG_SNAP_STEPS 16
+
+static void drag_snap_to(int x, int y)
+{
+    struct ws_shared* block = control();
+    if (block == 0)
+        return;
+    struct ws_drag* d = &block->drag;
+    d->to_x  = x;
+    d->to_y  = y;
+    d->step  = 0;
+    d->steps = DRAG_SNAP_STEPS;
+    __atomic_store_n(&d->phase, WS_DRAG_SNAP, __ATOMIC_RELEASE);
+}
+
+void win_drop_accept(int screen_x, int screen_y) { drag_snap_to(screen_x, screen_y); }
+
+void win_drop_reject(void)
+{
+    struct ws_shared* block = control();
+    if (block == 0)
+        return;
+    drag_snap_to(block->drag.home_x, block->drag.home_y);
+}
+
+void win_origin(int id, int* x, int* y)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS) {
+        if (x != 0) *x = 0;
+        if (y != 0) *y = 0;
+        return;
+    }
+    /* The frame's top-left plus the chrome, so this is where the content
+     * begins - which is what a client's own coordinates are relative to. */
+    const int chrome = (block->windows[id].flags & WS_FLAG_DESKTOP) ? 0 : 1;
+    if (x != 0) *x = block->windows[id].x + (chrome ? WS_BORDER : 0);
+    if (y != 0)
+        *y = block->windows[id].y +
+             (chrome ? WS_BORDER + WS_TITLE_HEIGHT : 0);
+}

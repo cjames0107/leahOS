@@ -14,6 +14,7 @@
 #include <leah/percpu.hpp>
 #include <leah/keyboard.hpp>
 #include <leah/ac97.hpp>
+#include <leah/ipc.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
 #include <leah/signal.hpp>
@@ -550,6 +551,63 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             out->name[i] = n[i];
         out->name[i] = '\0';
         frame->rax = 0;
+        break;
+    }
+
+    /* --- message passing --------------------------------------------------
+     *
+     * The message is copied into the kernel while the sender is the current
+     * address space and out of it while the receiver is. That is the whole
+     * reason these are copies rather than a pointer handed across: the two
+     * ends share no mapping, and the only moment either buffer is addressable
+     * is while its own process is running.
+     */
+    case PortCreate:
+        frame->rax = static_cast<u64>(ipc::port_create(static_cast<u32>(frame->rdi)));
+        break;
+
+    case PortOpen:
+        frame->rax = static_cast<u64>(ipc::port_open(static_cast<u32>(frame->rdi)));
+        break;
+
+    case PortDestroy:
+        frame->rax = static_cast<u64>(ipc::port_destroy(static_cast<i32>(frame->rdi)));
+        break;
+
+    case IpcCall: {
+        if (!user_range_ok(frame->rsi, sizeof(ipc::Message)) ||
+            !user_range_ok(frame->rdx, sizeof(ipc::Message))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = static_cast<u64>(
+            ipc::call(static_cast<i32>(frame->rdi),
+                      reinterpret_cast<const ipc::Message*>(frame->rsi),
+                      reinterpret_cast<ipc::Message*>(frame->rdx)));
+        break;
+    }
+
+    case IpcRecv: {
+        if (!user_range_ok(frame->rsi, sizeof(ipc::Message)) ||
+            (frame->rdx != 0 && !user_range_ok(frame->rdx, sizeof(u32)))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = static_cast<u64>(
+            ipc::recv(static_cast<i32>(frame->rdi),
+                      reinterpret_cast<ipc::Message*>(frame->rsi),
+                      reinterpret_cast<u32*>(frame->rdx)));
+        break;
+    }
+
+    case IpcReply: {
+        if (!user_range_ok(frame->rsi, sizeof(ipc::Message))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = static_cast<u64>(
+            ipc::reply(static_cast<i32>(frame->rdi),
+                       reinterpret_cast<const ipc::Message*>(frame->rsi)));
         break;
     }
 

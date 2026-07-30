@@ -2,6 +2,7 @@
 #include <leah/cpu.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
+#include <leah/ipc.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
 #include <leah/percpu.hpp>
@@ -738,6 +739,13 @@ void exit_current(i32 code)
             vmm::destroy_address_space(space);
         }
     }
+
+    /* Anyone mid-conversation with this task has to be let go. A server that
+     * dies owing an answer would otherwise leave its clients asleep on a reply
+     * that is never coming - which in a system built on message passing is how
+     * one crash becomes a frozen machine. */
+    if (self->is_user && !group_still_alive(self))
+        ipc::abandon(self->tgid);
 
     self->state = self->is_user ? State::Zombie : State::Dead;
 
