@@ -81,6 +81,11 @@ struct Task {
     Entry entry;             // kernel threads only
     void* arg;
     files::Table files;      // open files + cwd; inherited across fork
+    /* Which I/O ports this task may touch, or null for the overwhelming
+     * majority that may touch none. Allocated on the first grant and inherited
+     * across fork - a driver that forks a worker meant the worker to be able to
+     * do the work. */
+    u8* io_bitmap;
 };
 
 Task g_tasks[kMaxTasks];
@@ -308,6 +313,9 @@ void switch_to(u32 next_index)
     // interrupt handler that blocks keeps its state on a stack no other task
     // will reuse.
     gdt::set_kernel_stack(percpu::active(), next->kernel_stack_top);
+    /* The hardware checks this on every IN and OUT, so it has to describe the
+     * task that is about to run rather than the one that just stopped. */
+    gdt::set_io_bitmap(percpu::active(), next->io_bitmap);
     percpu::set_syscall_stack_for_this_cpu(next->kernel_stack_top);
     vmm::switch_address_space(next->space != 0 ? next->space : vmm::kernel_space());
 
@@ -658,6 +666,18 @@ u32 fork_current(const TrapFrame& parent_user)
                sizeof(child_task->sig_handler));
         child_task->sig_restorer = parent->sig_restorer;
         child_task->sig_pending  = 0;
+
+        /* Port permissions carry across, with a copy of their own: a driver
+         * that forks a worker meant the worker to be able to do the work, and
+         * sharing one bitmap would mean a later grant to either reached both. */
+        child_task->io_bitmap = nullptr;
+        if (parent->io_bitmap != nullptr) {
+            child_task->io_bitmap =
+                static_cast<u8*>(kmalloc(gdt::io_bitmap_bytes()));
+            if (child_task->io_bitmap != nullptr)
+                memcpy(child_task->io_bitmap, parent->io_bitmap,
+                       gdt::io_bitmap_bytes());
+        }
         // Zero, not one. The parent returns from this syscall and releases the
         // lock on its way out; the child does not - it is fabricated to enter
         // ring 3 through first_user_entry, which goes straight to IRETQ and
@@ -786,6 +806,10 @@ i64 wait_child(i32* status)
                 if (status != nullptr)
                     *status = t.exit_code;
                 kfree(reinterpret_cast<void*>(t.kernel_stack));
+                if (t.io_bitmap != nullptr) {
+                    kfree(t.io_bitmap);
+                    t.io_bitmap = nullptr;
+                }
                 t.state = State::Unused;
                 return pid;
             }
@@ -907,6 +931,36 @@ void set_credentials(u32 uid, u32 gid)
 
 u32 current_tid()  { return current()->pid; }
 u32 current_tgid() { return current()->tgid; }
+
+i64 grant_io_ports(u16 base, u32 count)
+{
+    KernelLock lock;
+    Task* self = current();
+    /* Root only, for now: there is no way yet to say "this program is the
+     * sound driver" other than who started it. When drivers are launched by
+     * something that knows what they are, the grant should come from there. */
+    if (!self->is_user || self->uid != 0 || count == 0)
+        return -1;
+    const u32 last = static_cast<u32>(base) + count - 1;
+    if (last > 0xFFFF)
+        return -1;
+
+    if (self->io_bitmap == nullptr) {
+        self->io_bitmap = static_cast<u8*>(kmalloc(gdt::io_bitmap_bytes()));
+        if (self->io_bitmap == nullptr)
+            return -1;
+        /* Everything denied to start with; a grant clears bits rather than
+         * setting them, so a task can only ever gain what it names. */
+        memset(self->io_bitmap, 0xFF, gdt::io_bitmap_bytes());
+    }
+    for (u32 port = base; port <= last; ++port)
+        self->io_bitmap[port / 8] &= static_cast<u8>(~(1u << (port % 8)));
+
+    /* This task is the one running, so the change has to reach the TSS now
+     * rather than at the next switch. */
+    gdt::set_io_bitmap(percpu::active(), self->io_bitmap);
+    return 0;
+}
 
 u32 current_pid() { return current()->pid; }
 

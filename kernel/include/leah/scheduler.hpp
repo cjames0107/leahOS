@@ -81,6 +81,19 @@ u32 current_tgid();
 // uid 0 is root and bypasses permission checks. Credentials are inherited
 // across fork and execve; only root may change them.
 u32  current_uid();
+
+// --- driver privileges ------------------------------------------------------
+//
+// What separates a driver from an ordinary program. Not a ring: on x86-64 the
+// page tables have one privilege bit, so anything below ring 3 is supervisor
+// and can read all of kernel memory - a ring number would name the privilege
+// without enforcing it. These are enforced, one by the hardware's I/O bitmap
+// and the rest by the page tables.
+
+// Let the calling task use `count` ports from `base`. Returns 0, or -1 if it
+// may not - only root may ask, and a task keeps only what it has asked for, so
+// a sound driver that asked for the mixer cannot reach the disk.
+i64 grant_io_ports(u16 base, u32 count);
 u32  current_gid();
 bool set_current_uid(u32 uid);
 bool set_current_gid(u32 gid);

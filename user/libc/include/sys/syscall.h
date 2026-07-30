@@ -74,6 +74,11 @@
 #define SYS_ipccall     69
 #define SYS_ipcrecv     70
 #define SYS_ipcreply    71
+#define SYS_iopermit    72
+#define SYS_mapphysical 73
+#define SYS_dmaalloc    74
+#define SYS_irqlisten   75
+#define SYS_irqwait     76
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

@@ -103,6 +103,17 @@ enum Number : u64 {
     IpcCall     = 69,  // send and block for the answer
     IpcRecv     = 70,  // block for a request; returns a handle to answer with
     IpcReply    = 71,
+
+    // What a driver in ring 3 needs and an ordinary program must not have.
+    // Deliberately four separate grants rather than one "make me a driver":
+    // a sound driver that asks for a mixer's ports has no business mapping a
+    // disk controller's registers, and the narrower the grant the more true
+    // that stays.
+    IoPermit    = 72,  // let this task use a range of I/O ports
+    MapPhysical = 73,  // map a device's registers into this address space
+    DmaAlloc    = 74,  // physically contiguous memory, and its physical address
+    IrqListen   = 75,  // claim an interrupt line
+    IrqWait     = 76,  // block until it fires
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

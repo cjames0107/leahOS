@@ -33,4 +33,10 @@ void init_cpu(u32 slot);
 // Stack the given CPU switches to on a ring 3 -> ring 0 transition.
 void set_kernel_stack(u32 slot, u64 rsp0);
 
+// Which I/O ports the task about to run may touch. A set bit denies a port, so
+// an all-ones bitmap is the same as no bitmap; nullptr denies everything and is
+// what every task but a driver gets. Called from the context switch.
+void  set_io_bitmap(u32 slot, const u8* bitmap);
+usize io_bitmap_bytes();
+
 } // namespace gdt

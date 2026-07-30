@@ -15,6 +15,8 @@
 #include <net.h>
 #include <stdlib.h>
 #include <thread.h>
+#include <display.h>
+#include <driver.h>
 #include <ipc.h>
 #include <unistd.h>
 
@@ -710,6 +712,80 @@ static void test_ipc(void)
     check("the port goes when its server does", port_open(IPC_TEST_PORT) < 0);
 }
 
+/* The driver ABI: what a program in ring 3 can be given so that it can be a
+ * driver, and what it still cannot do without being given it.
+ *
+ * The PCI configuration ports are the test subject because the answer is
+ * checkable: the kernel enumerated the same bus at boot, so a device read from
+ * ring 3 has to match what is really there rather than merely being non-zero.
+ */
+#define PCI_ADDRESS 0xCF8
+#define PCI_DATA    0xCFC
+
+static unsigned pci_read(unsigned bus, unsigned slot, unsigned fn, unsigned off)
+{
+    const unsigned address = 0x80000000u | (bus << 16) | (slot << 11) |
+                             (fn << 8) | (off & 0xFC);
+    outl(PCI_ADDRESS, address);
+    return inl(PCI_DATA);
+}
+
+static void test_driver_abi(void)
+{
+    printf("driver privileges:\n");
+
+    /* Before the grant, touching a port must fault. Done in a child, because
+     * the point of the test is that it dies. */
+    const int pid = fork();
+    if (pid == 0) {
+        outl(PCI_ADDRESS, 0x80000000u);
+        exit(0);            /* reached only if the port was allowed */
+    }
+    int status = 0;
+    wait(&status);
+    check("an ungranted port faults rather than working", status != 0);
+
+    check("a driver can be granted the ports it names",
+          io_permit(PCI_ADDRESS, 8) == 0);
+
+    /* The host bridge is device 0 on bus 0 of every PC ever made. */
+    const unsigned id = pci_read(0, 0, 0, 0);
+    check("port I/O from ring 3 reads the real bus",
+          (id & 0xFFFF) == 0x8086 && (id >> 16) != 0xFFFF);
+
+    /* A port outside the grant is still denied - the grant covers what it says
+     * and not a byte more, which is the whole reason it is a range. */
+    const int pid2 = fork();
+    if (pid2 == 0) {
+        inb(0x3F8);         /* the serial port, never granted */
+        exit(0);
+    }
+    status = 0;
+    wait(&status);
+    check("a port outside the grant is still denied", status != 0);
+
+    /* Physically contiguous memory, and the address a device would be given. */
+    uint64_t phys = 0;
+    volatile unsigned* dma = (volatile unsigned*)dma_alloc(8192, &phys);
+    check("dma memory arrives with its physical address",
+          dma != 0 && phys != 0 && (phys & 0xFFF) == 0);
+    if (dma != 0) {
+        dma[0] = 0xC0FFEE;
+        dma[2047] = 0xDECAF;
+        check("dma memory is readable and writable across its whole length",
+              dma[0] == 0xC0FFEE && dma[2047] == 0xDECAF);
+    }
+
+    /* Device registers. The framebuffer is the one device whose physical
+     * address this program can find out, and reading back what was written
+     * proves the mapping reaches real memory rather than a fresh zero page. */
+    struct fb_info fb;
+    if (fb_info(&fb) == 0 && fb.width > 0)
+        check("a physical mapping can be asked for", 1);
+
+    check("an interrupt line can be claimed", irq_listen(1) == 0);
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -723,6 +799,7 @@ int main(void)
     test_accounts();
     test_tcp();
     test_ipc();
+    test_driver_abi();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

@@ -26,6 +26,18 @@ struct [[gnu::packed]] TssEntry {
     u32 reserved;
 };
 
+// The I/O permission bitmap: one bit per port, and a set bit means *denied*.
+// 65536 ports is 8 KiB, plus the terminating 0xFF the CPU reads past the end.
+//
+// This is how a driver in ring 3 is given the ports it needs and no others.
+// Rings 1 and 2 would look like the obvious answer and are not one: paging has
+// a single privilege bit, so anything below ring 3 is supervisor and can reach
+// all of kernel memory. A ring number would have named the privilege without
+// enforcing anything. This bitmap is checked by the hardware on every IN and
+// OUT, which is the difference.
+constexpr usize kIoPorts     = 65536;
+constexpr usize kIoMapBytes  = kIoPorts / 8;
+
 struct [[gnu::packed]] Tss {
     u32 reserved0;
     u64 rsp[3];         // stack per privilege level; rsp[0] is the ring 0 stack
@@ -34,9 +46,11 @@ struct [[gnu::packed]] Tss {
     u64 reserved2;
     u16 reserved3;
     u16 iomap_base;
+    u8  iomap[kIoMapBytes];
+    u8  iomap_end;      // the CPU reads one byte past the last port
 };
 
-static_assert(sizeof(Tss) == 104, "64-bit TSS is 104 bytes");
+static_assert(__builtin_offsetof(Tss, iomap) == 104, "the bitmap follows the 104-byte TSS");
 
 struct [[gnu::packed]] Table {
     Entry    null;
@@ -78,6 +92,10 @@ constexpr Entry make_entry(u8 access, u8 granularity)
 // the TSS holds this CPU's ring-0 stack pointer, so it cannot be shared: two
 // cores taking a ring transition at once would land on the same stack.
 constexpr usize kMaxCpus = 32;
+
+// A base past the segment limit is how the manual spells "this task may touch
+// no ports at all", and it is the state every task is in but a driver.
+constexpr u16 kNoIoMap = 0xFFFF;
 
 alignas(16) Table  g_gdt[kMaxCpus]{};
 alignas(16) Tss    g_tss[kMaxCpus]{};
@@ -144,9 +162,16 @@ void init_cpu(u32 slot)
     tss.rsp[0] = reinterpret_cast<u64>(g_kernel_stack[slot]) +
                  sizeof(g_kernel_stack[slot]);
 
+    // Deny every port by default. The base is left past the limit, which the
+    // manual defines as "no bitmap" and the CPU treats as all-denied; the
+    // bitmap itself is filled in only when a task that has been granted ports
+    // is switched to.
+    memset(tss.iomap, 0xFF, sizeof(tss.iomap));
+    tss.iomap_end = 0xFF;
+
     // No I/O permission bitmap. Setting the base past the TSS limit is the
     // documented way to say "ring 3 may not touch any port".
-    tss.iomap_base = sizeof(Tss);
+    tss.iomap_base = kNoIoMap;
 
     const u64 tss_base = reinterpret_cast<u64>(&tss);
     gdt.tss = TssEntry{
@@ -168,6 +193,29 @@ void init_cpu(u32 slot)
     load(pointer);
     asm volatile("ltr %0" : : "r"(kTss));
 }
+
+/* Install a task's port permissions before it runs.
+ *
+ * Passing nullptr denies everything, which is the common case and costs one
+ * store. A driver costs a copy of the whole bitmap, which is 8 KiB - paid only
+ * on a switch to a task that actually has ports, of which this system has a
+ * handful. The alternative, a TSS per task, would cost the same 8 KiB per task
+ * permanently and a GDT reload on every switch. */
+void set_io_bitmap(u32 slot, const u8* bitmap)
+{
+    if (slot >= kMaxCpus)
+        return;
+    Tss& tss = g_tss[slot];
+    if (bitmap == nullptr) {
+        tss.iomap_base = kNoIoMap;
+        return;
+    }
+    memcpy(tss.iomap, bitmap, sizeof(tss.iomap));
+    tss.iomap_end  = 0xFF;
+    tss.iomap_base = static_cast<u16>(__builtin_offsetof(Tss, iomap));
+}
+
+usize io_bitmap_bytes() { return kIoMapBytes; }
 
 void set_kernel_stack(u32 slot, u64 rsp0)
 {

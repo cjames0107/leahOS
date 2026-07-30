@@ -125,6 +125,58 @@ void load_on_this_cpu()
 // ----------------------------------------------------------------------------
 // Called from isr_common with the saved register state.
 // ----------------------------------------------------------------------------
+namespace interrupts {
+namespace {
+
+// One counter and one channel per line. A count rather than a flag because a
+// driver that is slow should be told it missed something: two frames arriving
+// while it was still handling the first is a fact it needs, not one to hide.
+constexpr usize kIrqLines = 16;
+volatile u64 g_irq_count[kIrqLines];
+volatile u64 g_irq_seen[kIrqLines];      // what the listener has collected
+volatile bool g_irq_claimed[kIrqLines];
+
+u64 irq_channel(u8 irq)
+{
+    return reinterpret_cast<u64>(&g_irq_count[irq]);
+}
+
+} // namespace
+
+i64 listen(u8 irq)
+{
+    if (irq >= kIrqLines)
+        return -1;
+    g_irq_claimed[irq] = true;
+    g_irq_seen[irq] = g_irq_count[irq];
+    return 0;
+}
+
+i64 wait_for(u8 irq)
+{
+    if (irq >= kIrqLines || !g_irq_claimed[irq])
+        return -1;
+    /* Check then block, with interrupts already masked by the syscall entry -
+     * which is what stops the line firing in the gap between deciding to sleep
+     * and being asleep. */
+    while (g_irq_count[irq] == g_irq_seen[irq])
+        scheduler::block_on(irq_channel(irq));
+    const u64 missed = g_irq_count[irq] - g_irq_seen[irq];
+    g_irq_seen[irq] = g_irq_count[irq];
+    return static_cast<i64>(missed);
+}
+
+// Called from the dispatcher for every hardware line.
+void note_irq(u8 irq)
+{
+    if (irq >= kIrqLines || !g_irq_claimed[irq])
+        return;
+    g_irq_count[irq] = g_irq_count[irq] + 1;
+    scheduler::wake(irq_channel(irq));
+}
+
+} // namespace interrupts
+
 extern "C" void interrupt_dispatch(interrupts::Frame* frame)
 {
     using namespace interrupts;
@@ -194,6 +246,27 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
         }
     }
 
+    /* Any fault from ring 3 is the program's problem, not the machine's.
+     *
+     * The page fault path has said this for a while; every other exception
+     * still brought the whole system down. A privileged instruction, a bad
+     * segment, and - the one that made this urgent - an I/O port a task has
+     * not been granted all arrive as a general protection fault, and a driver
+     * outside the kernel touching a port it does not own must die by itself.
+     * A microkernel where a driver's mistake stops the machine has given up
+     * the only thing it was for.
+     *
+     * The low two bits of the saved CS are the privilege the fault came from,
+     * which is the general form of the check the page fault handler was
+     * doing with its error code. */
+    if (vector < 32 && (frame->cs & 3) == 3) {
+        console::printf("\n  %s[%u] faulted: %s at %p\n",
+                        scheduler::current_name(), scheduler::current_pid(),
+                        exception_name(vector),
+                        reinterpret_cast<void*>(frame->rip));
+        scheduler::exit_current(128 + 4);       // SIGILL-ish; it was illegal
+    }
+
     if (vector < 32)
         panic(exception_name(vector), *frame);
 
@@ -214,6 +287,11 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
 
         if (g_irq_handlers[irq] != nullptr)
             g_irq_handlers[irq](*frame);
+
+        /* And anyone in ring 3 waiting on this line. The kernel's own handler
+         * still ran: while the drivers are being moved out, a line has to be
+         * able to have both. */
+        interrupts::note_irq(irq);
 
         // Whichever controller delivered it is the one that must be told the
         // interrupt is done. The local APIC needs no line number - it knows.

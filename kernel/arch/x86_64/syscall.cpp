@@ -611,6 +611,99 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
     }
 
+    /* --- the driver ABI ---------------------------------------------------
+     *
+     * All four are root-only, which is a placeholder for a real capability:
+     * what should grant these is whatever launches a driver knowing what it
+     * is, not the uid it happens to run as. The narrowness is real, though -
+     * each grant names exactly what it covers.
+     */
+    case IoPermit:
+        frame->rax = static_cast<u64>(
+            scheduler::grant_io_ports(static_cast<u16>(frame->rdi),
+                                      static_cast<u32>(frame->rsi)));
+        break;
+
+    case MapPhysical: {
+        // A device's registers, mapped where the driver can reach them.
+        // Uncached and no-execute: these are not memory, and a stale cache
+        // line where a status register should be is a bug that looks like
+        // faulty hardware.
+        if (scheduler::current_uid() != 0) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const u64 phys  = frame->rdi & ~(vmm::kPageSize - 1);
+        const u64 slack = frame->rdi - phys;
+        const u64 bytes = (frame->rsi + slack + vmm::kPageSize - 1) &
+                          ~(vmm::kPageSize - 1);
+        const u64 base  = scheduler::current_mmap_next();
+        if (bytes == 0 || bytes > (64u << 20) ||
+            base + bytes > memory::kUserMmapEnd) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        bool ok = true;
+        for (u64 off = 0; off < bytes && ok; off += vmm::kPageSize)
+            ok = vmm::map(base + off, phys + off,
+                          vmm::Write | vmm::User | vmm::NoExecute |
+                          vmm::NoCache | vmm::WriteThrough | vmm::Shared);
+        if (!ok) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        scheduler::set_current_mmap_next(base + bytes);
+        frame->rax = base + slack;
+        break;
+    }
+
+    case DmaAlloc: {
+        // Contiguous physical pages, mapped and reported. A driver has to know
+        // the physical address because that is what it writes into a
+        // descriptor; there is no IOMMU here to translate on its behalf.
+        if (scheduler::current_uid() != 0 || !user_range_ok(frame->rsi, sizeof(u64))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const u64 bytes = (frame->rdi + vmm::kPageSize - 1) &
+                          ~(vmm::kPageSize - 1);
+        const usize pages = static_cast<usize>(bytes / vmm::kPageSize);
+        const u64 base = scheduler::current_mmap_next();
+        if (pages == 0 || pages > 4096 || base + bytes > memory::kUserMmapEnd) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const paddr_t phys = pmm::alloc_contiguous(pages);
+        if (phys == 0) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        memset(reinterpret_cast<void*>(memory::phys_to_direct(phys)), 0, bytes);
+        bool ok = true;
+        for (u64 off = 0; off < bytes && ok; off += vmm::kPageSize)
+            ok = vmm::map(base + off, phys + off,
+                          vmm::Write | vmm::User | vmm::NoExecute | vmm::Shared);
+        if (!ok) {
+            pmm::free_contiguous(phys, pages);
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        *reinterpret_cast<u64*>(frame->rsi) = phys;
+        scheduler::set_current_mmap_next(base + bytes);
+        frame->rax = base;
+        break;
+    }
+
+    case IrqListen:
+        frame->rax = static_cast<u64>(
+            interrupts::listen(static_cast<u8>(frame->rdi)));
+        break;
+
+    case IrqWait:
+        frame->rax = static_cast<u64>(
+            interrupts::wait_for(static_cast<u8>(frame->rdi)));
+        break;
+
     case ThreadExit:
         scheduler::exit_current(static_cast<i32>(frame->rdi));   // never returns
 
