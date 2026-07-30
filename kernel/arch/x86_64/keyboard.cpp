@@ -127,6 +127,9 @@ constexpr u32 kBufferSize = 256;
 volatile char g_buffer[kBufferSize]{};
 volatile u32  g_write = 0;
 volatile u32  g_read  = 0;
+// What a USB keyboard last reported holding. Kept apart from g_shift/g_ctrl so
+// releasing a key on one keyboard cannot clear what is held on the other.
+volatile u32  g_usb_mods = 0;
 
 void push(char c)
 {
@@ -305,7 +308,12 @@ char read_blocking()
  * carries its modifiers in the character it produced; a mouse press cannot. */
 u32 modifiers()
 {
-    return (g_shift ? kModShift : 0u) | (g_ctrl ? kModCtrl : 0u);
+    return (g_shift ? kModShift : 0u) | (g_ctrl ? kModCtrl : 0u) | g_usb_mods;
+}
+
+void set_usb_modifiers(u32 mods)
+{
+    g_usb_mods = mods & (kModShift | kModCtrl);
 }
 
 } // namespace keyboard

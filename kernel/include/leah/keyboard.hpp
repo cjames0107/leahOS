@@ -14,6 +14,12 @@ constexpr u32 kModCtrl  = 1u << 1;
 // because its modifiers are already folded into the character.
 u32 modifiers();
 
+// What a USB keyboard says it is holding, since it never goes through the PS/2
+// decoder that maintains the state above. Whatever is held on either keyboard
+// counts as held: a machine can have both, and the answer to "is shift down"
+// should not depend on which one the hand is on.
+void set_usb_modifiers(u32 mods);
+
 void init();
 
 // Feed a scancode through the decoder as though it had arrived on IRQ 1.
