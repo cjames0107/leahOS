@@ -135,6 +135,31 @@ i64 call(i32 port, const Message* request, Message* reply_out)
     return ok ? 0 : -1;
 }
 
+// The shared body of recv and try_recv: take a queued request if there is one.
+static i64 take(i32 port, Message* out, u32* caller_pid)
+{
+    for (usize i = 0; i < kMaxRequests; ++i) {
+        Request& r = g_requests[i];
+        if (r.state != State::Queued || r.port != port)
+            continue;
+        r.state = State::Taken;
+        r.server_pid = scheduler::current_pid();
+        memcpy(out, &r.body, sizeof(Message));
+        if (caller_pid != nullptr)
+            *caller_pid = r.caller_pid;
+        return static_cast<i64>(i);
+    }
+    return -1;
+}
+
+i64 try_recv(i32 port, Message* out, u32* caller_pid)
+{
+    if (!valid_port(port) || out == nullptr ||
+        g_ports[port].owner_pid != scheduler::current_pid())
+        return -1;
+    return take(port, out, caller_pid);
+}
+
 i64 recv(i32 port, Message* out, u32* caller_pid)
 {
     if (!valid_port(port) || out == nullptr)
@@ -143,17 +168,9 @@ i64 recv(i32 port, Message* out, u32* caller_pid)
         return -1;              // only the server may take from its own port
 
     for (;;) {
-        for (usize i = 0; i < kMaxRequests; ++i) {
-            Request& r = g_requests[i];
-            if (r.state != State::Queued || r.port != port)
-                continue;
-            r.state = State::Taken;
-            r.server_pid = scheduler::current_pid();
-            memcpy(out, &r.body, sizeof(Message));
-            if (caller_pid != nullptr)
-                *caller_pid = r.caller_pid;
-            return static_cast<i64>(i);
-        }
+        const i64 got = take(port, out, caller_pid);
+        if (got >= 0)
+            return got;
         // Nothing waiting. The port is the channel, so a request arriving wakes
         // exactly the server that can serve it.
         scheduler::block_on(port_channel(port));

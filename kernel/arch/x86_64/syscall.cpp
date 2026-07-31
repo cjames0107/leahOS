@@ -704,6 +704,19 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             interrupts::wait_for(static_cast<u8>(frame->rdi)));
         break;
 
+    case IpcTryRecv: {
+        if (!user_range_ok(frame->rsi, sizeof(ipc::Message)) ||
+            (frame->rdx != 0 && !user_range_ok(frame->rdx, sizeof(u32)))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = static_cast<u64>(
+            ipc::try_recv(static_cast<i32>(frame->rdi),
+                          reinterpret_cast<ipc::Message*>(frame->rsi),
+                          reinterpret_cast<u32*>(frame->rdx)));
+        break;
+    }
+
     case ThreadExit:
         scheduler::exit_current(static_cast<i32>(frame->rdi));   // never returns
 

@@ -41,6 +41,7 @@ struct Message {
 constexpr u32 kPortNet   = 1;
 constexpr u32 kPortVfs   = 2;
 constexpr u32 kPortBlock = 3;
+constexpr u32 kPortNic   = 4;   // the raw Ethernet device
 
 void init();
 
@@ -49,6 +50,11 @@ void init();
 i64 port_create(u32 name);
 i64 port_destroy(i32 port);
 i64 recv(i32 port, Message* out, u32* caller_pid);
+
+// The same, but returns -1 immediately when nothing is waiting. A server that
+// also owns hardware cannot block forever on its port: it has a card to drain
+// as well, and the two have to be looked at in the same loop.
+i64 try_recv(i32 port, Message* out, u32* caller_pid);
 i64 reply(i32 handle, const Message* msg);
 
 // Client side. open finds a port by name; call sends and blocks for the answer.

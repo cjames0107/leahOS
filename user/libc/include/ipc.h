@@ -25,12 +25,16 @@ struct ipc_message {
 #define IPC_PORT_NET   1
 #define IPC_PORT_VFS   2
 #define IPC_PORT_BLOCK 3
+#define IPC_PORT_NIC   4
 
 /* Server side. */
 int port_create(unsigned name);
 int port_destroy(int port);
 /* Blocks until a request arrives. Returns a handle to answer with, or -1. */
 int ipc_recv(int port, struct ipc_message* out, unsigned* caller_pid);
+/* The same without blocking: -1 when nothing is waiting. A server that also
+ * owns hardware has a card to drain as well as a port to answer. */
+int ipc_try_recv(int port, struct ipc_message* out, unsigned* caller_pid);
 int ipc_reply(int handle, const struct ipc_message* msg);
 
 /* Client side. port_open returns -1 when nobody has claimed the name yet. */

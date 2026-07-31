@@ -113,7 +113,8 @@ enum Number : u64 {
     MapPhysical = 73,  // map a device's registers into this address space
     DmaAlloc    = 74,  // physically contiguous memory, and its physical address
     IrqListen   = 75,  // claim an interrupt line
-    IrqWait     = 76,  // block until it fires
+    IrqWait     = 76,
+    IpcTryRecv  = 77,  // recv without blocking  // block until it fires
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

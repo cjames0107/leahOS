@@ -79,6 +79,7 @@
 #define SYS_dmaalloc    74
 #define SYS_irqlisten   75
 #define SYS_irqwait     76
+#define SYS_ipctryrecv  77
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

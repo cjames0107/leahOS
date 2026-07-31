@@ -27,6 +27,11 @@ int ipc_recv(int port, struct ipc_message* out, unsigned* caller_pid)
     return (int)__syscall(SYS_ipcrecv, port, (long)out, (long)caller_pid, 0, 0);
 }
 
+int ipc_try_recv(int port, struct ipc_message* out, unsigned* caller_pid)
+{
+    return (int)__syscall(SYS_ipctryrecv, port, (long)out, (long)caller_pid, 0, 0);
+}
+
 int ipc_reply(int handle, const struct ipc_message* msg)
 {
     return (int)__syscall(SYS_ipcreply, handle, (long)msg, 0, 0, 0);

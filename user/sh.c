@@ -136,7 +136,7 @@ int main(void)
         if (read_line(line, sizeof(line)) < 0)
             break;
 
-        const int n = tokenize(line, tokens);
+        int n = tokenize(line, tokens);
         if (n == 0)
             continue;
 
@@ -162,6 +162,16 @@ int main(void)
                 bar = i;
                 break;
             }
+        }
+
+        /* A trailing & means do not wait. Servers are the reason: a driver or
+         * a filesystem runs for as long as the machine does, and starting one
+         * from a shell that then waits for it to finish is a shell you never
+         * get back. */
+        int background = 0;
+        if (n > 0 && strcmp(tokens[n - 1], "&") == 0) {
+            background = 1;
+            --n;
         }
 
         if (bar >= 0) {
@@ -200,10 +210,17 @@ int main(void)
             parse(tokens, 0, n, argv, &in, &out, &append);
             if (argv[0] == 0)
                 continue;
-            if (fork() == 0)
+            const int pid = fork();
+            if (pid == 0)
                 child(argv, in, out, append);
-            int status;
-            wait(&status);
+            if (background) {
+                /* Not reaped here. init is everyone's second parent and will
+                 * collect it; waiting is the one thing this must not do. */
+                printf("[%d]\n", pid);
+            } else {
+                int status;
+                wait(&status);
+            }
         }
     }
 
