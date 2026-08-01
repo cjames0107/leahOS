@@ -25,6 +25,12 @@ struct vfs_shared {
 #define VFS_LIST     3  /* data = path, w1 = index -> data = name, w0 = kind   */
 #define VFS_MOUNTED  4  /* -> w0 = 1 when a filesystem is up, w1 = block size  */
 
+#define VFS_CREATE   5  /* data = path -> makes an empty file                */
+#define VFS_WRITE    6  /* data = path, w1 = offset, w2 = length <- segment   */
+#define VFS_MKDIR    7  /* data = path                                        */
+#define VFS_UNLINK   8  /* data = path                                        */
+#define VFS_SYNC     9  /* flush what is held back                            */
+
 #define VFS_KIND_FILE 0
 #define VFS_KIND_DIR  1
 

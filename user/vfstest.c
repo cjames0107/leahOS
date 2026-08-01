@@ -104,7 +104,75 @@ int main(void)
     check("the root lists more than a handful of entries", entries >= 6);
     printf("      %d entries in /\n", entries);
 
+    /* --- and now writing ------------------------------------------------
+     *
+     * Everything made here is checked by reading it back, and then the image
+     * is checked by fsck on the host afterwards - which is the part that
+     * catches a filesystem that looks right from inside and is not.
+     */
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_MKDIR;
+    const char* dir = "/made";
+    n = 0; while (dir[n] != '\0') { q.data[n] = dir[n]; ++n; }
+    q.bytes = n;
+    check("a directory can be made", ipc_call(port, &q, &a) == 0 && a.word[0] == 0);
+
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_CREATE;
+    const char* file = "/made/hello.txt";
+    n = 0; while (file[n] != '\0') { q.data[n] = file[n]; ++n; }
+    q.bytes = n;
+    check("a file can be made inside it",
+          ipc_call(port, &q, &a) == 0 && a.word[0] == 0);
+
+    /* Longer than one block, so an extent has to grow rather than just exist. */
+    const unsigned long length = 5000;
+    for (unsigned long i = 0; i < length; ++i)
+        buf->data[i] = (unsigned char)('A' + (i % 26));
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_WRITE;
+    for (unsigned i = 0; i < n; ++i) q.data[i] = file[i];
+    q.bytes = n;
+    q.word[1] = 0;
+    q.word[2] = (long)length;
+    check("five thousand bytes are written",
+          ipc_call(port, &q, &a) == 0 && a.word[0] == (long)length);
+
+    memset(buf->data, 0, length);
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_READ;
+    for (unsigned i = 0; i < n; ++i) q.data[i] = file[i];
+    q.bytes = n;
+    q.word[1] = 0;
+    q.word[2] = (long)length;
+    int same = ipc_call(port, &q, &a) == 0 && a.word[0] == (long)length;
+    for (unsigned long i = 0; same && i < length; ++i)
+        if (buf->data[i] != (unsigned char)('A' + (i % 26)))
+            same = 0;
+    check("and read back byte for byte across two blocks", same);
+
+    /* A second file, then remove it, so the free counts have to come back. */
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_CREATE;
+    const char* spare = "/made/spare.txt";
+    n = 0; while (spare[n] != '\0') { q.data[n] = spare[n]; ++n; }
+    q.bytes = n;
+    ipc_call(port, &q, &a);
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_UNLINK;
+    for (unsigned i = 0; i < n; ++i) q.data[i] = spare[i];
+    q.bytes = n;
+    check("a file can be removed again",
+          ipc_call(port, &q, &a) == 0 && a.word[0] == 0);
+
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_STAT;
+    for (unsigned i = 0; i < n; ++i) q.data[i] = spare[i];
+    q.bytes = n;
+    check("and is gone afterwards",
+          !(ipc_call(port, &q, &a) == 0 && a.word[0] >= 0));
+
     if (g_failures == 0)
-        printf("  ok  a file was read across four processes\n");
+        printf("  ok  a filesystem was read and written across four processes\n");
     return g_failures;
 }

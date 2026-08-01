@@ -4,11 +4,11 @@
  * disk. So a path lookup is this process asking that one, which asks the
  * drive - and none of the three can reach another's memory.
  *
- * Read-only so far. Everything a filesystem does that can lose data - block
- * allocation, growing an extent, inserting into a directory - is the half that
- * has to be right rather than merely working, and putting it in before the
- * read path has been proven against a real disk would mean debugging both at
- * once.
+ * Writing is the half that can lose data rather than merely fail, so it went in
+ * after the read path had been proven rather than beside it. The filesystem is
+ * made without metadata checksums and without the 64-bit feature, which is what
+ * makes this tractable: a descriptor is 32 bytes, and updating a bitmap does
+ * not mean recomputing a checksum over it as well.
  */
 
 #include <blk.h>
@@ -151,6 +151,227 @@ static unsigned long map_block(const struct inode* in, unsigned long file_block)
     }
 }
 
+/* --- writing --------------------------------------------------------------
+ *
+ * Every one of these has to leave the filesystem consistent on its own,
+ * because there is no journal here: a counter updated without the bitmap it
+ * describes is a filesystem that fsck complains about, and the order things
+ * are written in is the only thing standing between the two.
+ */
+
+static unsigned char g_sb[1024];        /* the superblock, kept in memory */
+static unsigned g_blocks_per_group, g_group_count;
+static unsigned long g_gd_block;
+
+static void wr16w(unsigned char* p, unsigned at, unsigned v)
+{
+    p[at] = (unsigned char)v; p[at + 1] = (unsigned char)(v >> 8);
+}
+static void wr32w(unsigned char* p, unsigned at, unsigned v)
+{
+    p[at] = (unsigned char)v;         p[at + 1] = (unsigned char)(v >> 8);
+    p[at + 2] = (unsigned char)(v >> 16); p[at + 3] = (unsigned char)(v >> 24);
+}
+
+static int disk_write(unsigned long lba, unsigned count)
+{
+    struct ipc_message q, a;
+    memset(&q, 0, sizeof(q));
+    memset(&a, 0, sizeof(a));
+    q.tag = BLK_WRITE;
+    q.word[0] = (long)lba;
+    q.word[1] = (long)count;
+    if (ipc_call(g_blk, &q, &a) != 0 || a.word[0] != 0)
+        return -1;
+    return 0;
+}
+
+static int write_block(unsigned long block, const unsigned char* in)
+{
+    const unsigned sectors = g_block_size / BLK_SECTOR;
+    memcpy(g_sectors->data, in, g_block_size);
+    return disk_write(block * sectors, sectors);
+}
+
+/* The superblock lives 1024 bytes into the volume, which for every block size
+ * this system uses means inside a block that also holds other things - so it
+ * is always a read, a patch and a write back. */
+static int write_superblock(void)
+{
+    static unsigned char whole[8192];
+    const unsigned long block = 1024 / g_block_size;
+    const unsigned within = 1024 % g_block_size;
+    if (read_block(block, whole) != 0)
+        return -1;
+    memcpy(whole + within, g_sb, 1024);
+    return write_block(block, whole);
+}
+
+static int read_group_desc(unsigned group, unsigned char* desc)
+{
+    const unsigned long byte = (unsigned long)group * g_desc_size;
+    if (read_block(g_gd_block + byte / g_block_size, g_block) != 0)
+        return -1;
+    memcpy(desc, g_block + byte % g_block_size, g_desc_size);
+    return 0;
+}
+
+static int write_group_desc(unsigned group, const unsigned char* desc)
+{
+    const unsigned long byte = (unsigned long)group * g_desc_size;
+    const unsigned long block = g_gd_block + byte / g_block_size;
+    if (read_block(block, g_block) != 0)
+        return -1;
+    memcpy(g_block + byte % g_block_size, desc, g_desc_size);
+    return write_block(block, g_block);
+}
+
+/* Take the first clear bit in some group's bitmap, and keep the three places
+ * that count free space in step with it. */
+static unsigned long alloc_from(unsigned long bitmap_block, unsigned limit,
+                                unsigned desc_free_at, unsigned sb_free_at,
+                                unsigned group, unsigned char* desc)
+{
+    static unsigned char bm[8192];
+    if (read_block(bitmap_block, bm) != 0)
+        return 0;
+    for (unsigned bit = 0; bit < limit; ++bit) {
+        if (bm[bit >> 3] & (1u << (bit & 7)))
+            continue;
+        bm[bit >> 3] |= (unsigned char)(1u << (bit & 7));
+        if (write_block(bitmap_block, bm) != 0)
+            return 0;
+        wr16w(desc, desc_free_at, rd16(desc, desc_free_at) - 1);
+        write_group_desc(group, desc);
+        wr32w(g_sb, sb_free_at, rd32(g_sb, sb_free_at) - 1);
+        write_superblock();
+        return bit + 1;                 /* +1 so zero can mean failure */
+    }
+    return 0;
+}
+
+static unsigned long alloc_block(void)
+{
+    for (unsigned g = 0; g < g_group_count; ++g) {
+        unsigned char desc[64];
+        if (read_group_desc(g, desc) != 0 || rd16(desc, 12) == 0)
+            continue;
+        const unsigned long got = alloc_from(rd32(desc, 0), g_blocks_per_group,
+                                             12, 12, g, desc);
+        if (got != 0)
+            return g_first_data_block +
+                   (unsigned long)g * g_blocks_per_group + (got - 1);
+    }
+    return 0;
+}
+
+static unsigned alloc_inode(int is_dir)
+{
+    for (unsigned g = 0; g < g_group_count; ++g) {
+        unsigned char desc[64];
+        if (read_group_desc(g, desc) != 0 || rd16(desc, 14) == 0)
+            continue;
+        const unsigned long got = alloc_from(rd32(desc, 4), g_inodes_per_group,
+                                             14, 16, g, desc);
+        if (got == 0)
+            continue;
+        if (is_dir) {
+            /* Directories are counted separately, at offset 16 - which is the
+             * field after free inodes and before two bytes of padding. Writing
+             * to 18 instead puts the count in the padding, where nothing reads
+             * it and fsck reports the real one as wrong. */
+            if (read_group_desc(g, desc) == 0) {
+                wr16w(desc, 16, rd16(desc, 16) + 1);
+                write_group_desc(g, desc);
+            }
+        }
+        return g * g_inodes_per_group + (unsigned)got;
+    }
+    return 0;
+}
+
+static void free_block(unsigned long block)
+{
+    if (block < g_first_data_block)
+        return;
+    const unsigned long rel = block - g_first_data_block;
+    const unsigned g = (unsigned)(rel / g_blocks_per_group);
+    const unsigned bit = (unsigned)(rel % g_blocks_per_group);
+    unsigned char desc[64];
+    if (g >= g_group_count || read_group_desc(g, desc) != 0)
+        return;
+    static unsigned char bm[8192];
+    const unsigned long bitmap = rd32(desc, 0);
+    if (read_block(bitmap, bm) != 0)
+        return;
+    if ((bm[bit >> 3] & (1u << (bit & 7))) == 0)
+        return;                         /* already free; do not double-count */
+    bm[bit >> 3] &= (unsigned char)~(1u << (bit & 7));
+    write_block(bitmap, bm);
+    wr16w(desc, 12, rd16(desc, 12) + 1);
+    write_group_desc(g, desc);
+    wr32w(g_sb, 12, rd32(g_sb, 12) + 1);
+    write_superblock();
+}
+
+/* Where an inode's 128 or 256 bytes live, so it can be written back. */
+static int inode_location(unsigned number, unsigned long* block_out,
+                          unsigned* offset_out)
+{
+    if (number == 0 || g_inodes_per_group == 0)
+        return -1;
+    const unsigned group = (number - 1) / g_inodes_per_group;
+    const unsigned index = (number - 1) % g_inodes_per_group;
+    unsigned char desc[64];
+    if (read_group_desc(group, desc) != 0)
+        return -1;
+    const unsigned long table = rd32(desc, 8);
+    const unsigned long byte = (unsigned long)index * g_inode_size;
+    *block_out = table + byte / g_block_size;
+    *offset_out = (unsigned)(byte % g_block_size);
+    return 0;
+}
+
+/* What an inode's link count is right now, for the callers that are changing
+ * something else about it and must not disturb that. */
+static unsigned inode_links(unsigned number)
+{
+    unsigned long block; unsigned at;
+    if (inode_location(number, &block, &at) != 0 ||
+        read_block(block, g_block) != 0)
+        return 1;
+    return rd16(g_block, at + 26);
+}
+
+static unsigned dir_links(unsigned number) { return inode_links(number); }
+
+static int write_inode(unsigned number, const struct inode* in, unsigned links)
+{
+    unsigned long block; unsigned at;
+    if (inode_location(number, &block, &at) != 0 ||
+        read_block(block, g_block) != 0)
+        return -1;
+    /* The inode's fields, at the offsets ext4 puts them: mode at 0, size split
+     * between 4 and 108, links at 26, i_blocks at 28 in 512-byte units
+     * whatever the block size is, flags at 32, and the 60 bytes of extent root
+     * at 40. Getting i_blocks or the flags a few bytes out writes over the
+     * extent header, which is a file that reads as empty and an fsck that
+     * says so. */
+    unsigned char* raw = g_block + at;
+    wr16w(raw, 0, in->mode);
+    wr32w(raw, 4, (unsigned)in->size);
+    wr32w(raw, 108, (unsigned)(in->size >> 32));
+    /* Always written, including zero. A removed inode that keeps its old link
+     * count is one fsck finds in use with nothing pointing at it - the bitmap
+     * bit being clear is not enough on its own. */
+    wr16w(raw, 26, links);
+    const unsigned used = (unsigned)((in->size + g_block_size - 1) / g_block_size);
+    wr32w(raw, 28, used * (g_block_size / 512));
+    wr32w(raw, 32, rd32(raw, 32) | 0x80000);            /* EXTENTS_FL */
+    memcpy(raw + 40, in->block, 60);
+    return write_block(block, g_block);
+}
+
 /* --- names --------------------------------------------------------------- */
 
 #define ROOT_INODE 2
@@ -221,6 +442,227 @@ static unsigned lookup(const char* path, struct inode* out)
     return ino;
 }
 
+/* Give a file one more block, appending to the extent root. Four extents fit
+ * inline, which is four runs rather than four blocks - a file written straight
+ * through gets one extent and grows within it. */
+static unsigned long extend(struct inode* in, unsigned number)
+{
+    unsigned char* node = in->block;
+    if (rd16(node, 0) != 0xF30A || rd16(node, 6) != 0)
+        return 0;                       /* not a root we can append to */
+    const unsigned entries = rd16(node, 2);
+    const unsigned long want = (in->size + g_block_size - 1) / g_block_size;
+
+    const unsigned long phys = alloc_block();
+    if (phys == 0)
+        return 0;
+    /* A fresh block of a directory has to read as empty rather than as
+     * whatever was there before it was freed. */
+    memset(g_block, 0, g_block_size);
+    write_block(phys, g_block);
+
+    if (entries > 0) {
+        unsigned char* last = node + 12 + (entries - 1) * 12;
+        const unsigned first = rd32(last, 0);
+        const unsigned len = rd16(last, 4);
+        const unsigned long start = ((unsigned long)rd16(last, 6) << 32) |
+                                    rd32(last, 8);
+        if (start + len == phys && first + len == want) {
+            wr16w(last, 4, len + 1);    /* it carried on where it left off */
+            return phys;
+        }
+    }
+    if (entries >= rd16(node, 4))
+        return 0;                       /* the inline root is full */
+    unsigned char* ent = node + 12 + entries * 12;
+    wr32w(ent, 0, (unsigned)want);
+    wr16w(ent, 4, 1);
+    wr16w(ent, 6, (unsigned)(phys >> 32));
+    wr32w(ent, 8, (unsigned)phys);
+    wr16w(node, 2, entries + 1);
+    (void)number;
+    return phys;
+}
+
+/* Put a name into a directory. ext4 packs entries by letting each one claim
+ * more room than it needs, so making space means finding one with slack and
+ * splitting it rather than shifting everything along. */
+static int dir_add(struct inode* dir, unsigned dir_ino, const char* name,
+                   unsigned ino, unsigned type)
+{
+    unsigned len = 0;
+    while (name[len] != '\0') ++len;
+    const unsigned need = (8 + len + 3) & ~3u;
+
+    const unsigned long blocks = (dir->size + g_block_size - 1) / g_block_size;
+    for (unsigned long b = 0; b <= blocks; ++b) {
+        unsigned long phys;
+        if (b == blocks) {
+            /* Out of room in what it has; give it another block, which starts
+             * as one entry spanning the whole thing. */
+            phys = extend(dir, dir_ino);
+            if (phys == 0)
+                return -1;
+            dir->size += g_block_size;
+            memset(g_block, 0, g_block_size);
+            wr32w(g_block, 0, ino);
+            wr16w(g_block, 4, g_block_size);
+            g_block[6] = (unsigned char)len;
+            g_block[7] = (unsigned char)type;
+            memcpy(g_block + 8, name, len);
+            if (write_block(phys, g_block) != 0)
+                return -1;
+            return write_inode(dir_ino, dir, dir_links(dir_ino));
+        }
+        phys = map_block(dir, b);
+        if (phys == 0 || read_block(phys, g_block) != 0)
+            continue;
+
+        unsigned at = 0;
+        while (at + 8 <= g_block_size) {
+            const unsigned e_ino = rd32(g_block, at);
+            const unsigned rec = rd16(g_block, at + 4);
+            const unsigned nlen = g_block[at + 6];
+            if (rec < 8 || at + rec > g_block_size)
+                break;
+            const unsigned actual = e_ino == 0 ? 0 : ((8 + nlen + 3) & ~3u);
+            if (rec - actual >= need) {
+                unsigned put = at + actual;
+                if (actual != 0)
+                    wr16w(g_block, at + 4, actual);
+                else
+                    put = at;
+                wr32w(g_block, put, ino);
+                wr16w(g_block, put + 4, rec - actual);
+                g_block[put + 6] = (unsigned char)len;
+                g_block[put + 7] = (unsigned char)type;
+                memcpy(g_block + put + 8, name, len);
+                return write_block(phys, g_block);
+            }
+            at += rec;
+        }
+    }
+    return -1;
+}
+
+/* Take a name out. The entry before it swallows its record, which is how ext4
+ * has always deleted things - nothing moves and nothing is zeroed. */
+static int dir_remove(struct inode* dir, const char* name, unsigned* ino_out)
+{
+    const unsigned long blocks = (dir->size + g_block_size - 1) / g_block_size;
+    for (unsigned long b = 0; b < blocks; ++b) {
+        const unsigned long phys = map_block(dir, b);
+        if (phys == 0 || read_block(phys, g_block) != 0)
+            continue;
+        unsigned at = 0, prev = 0xFFFFFFFFu;
+        while (at + 8 <= g_block_size) {
+            const unsigned rec = rd16(g_block, at + 4);
+            const unsigned nlen = g_block[at + 6];
+            if (rec < 8 || at + rec > g_block_size)
+                break;
+            if (rd32(g_block, at) != 0 && nlen > 0) {
+                unsigned i = 0;
+                while (i < nlen && name[i] != '\0' &&
+                       name[i] == (char)g_block[at + 8 + i])
+                    ++i;
+                if (i == nlen && name[nlen] == '\0') {
+                    if (ino_out != 0)
+                        *ino_out = rd32(g_block, at);
+                    if (prev != 0xFFFFFFFFu)
+                        wr16w(g_block, prev + 4, rd16(g_block, prev + 4) + rec);
+                    else
+                        wr32w(g_block, at, 0);
+                    return write_block(phys, g_block);
+                }
+            }
+            prev = at;
+            at += rec;
+        }
+    }
+    return -1;
+}
+
+/* Split a path into the directory holding it and the last component. */
+static int split_path(const char* path, char* parent, char* last)
+{
+    int cut = -1;
+    int n = 0;
+    while (path[n] != '\0') {
+        if (path[n] == '/') cut = n;
+        ++n;
+    }
+    if (cut < 0 || n - cut - 1 == 0 || n - cut - 1 > 63)
+        return -1;
+    int i = 0;
+    for (; i < cut; ++i) parent[i] = path[i];
+    parent[i] = '\0';
+    if (cut == 0) { parent[0] = '/'; parent[1] = '\0'; }
+    for (i = 0; i < n - cut - 1; ++i) last[i] = path[cut + 1 + i];
+    last[i] = '\0';
+    return 0;
+}
+
+/* Make an empty file or directory and link it into its parent. */
+static int create(const char* path, int is_dir)
+{
+    char parent[256], name[64];
+    if (split_path(path, parent, name) != 0)
+        return -1;
+    struct inode dir;
+    const unsigned dir_ino = lookup(parent, &dir);
+    if (dir_ino == 0)
+        return -1;
+    if (dir_search(&dir, name, 0, 0, 0) != 0)
+        return -1;                      /* it is already there */
+
+    const unsigned ino = alloc_inode(is_dir);
+    if (ino == 0)
+        return -1;
+
+    struct inode fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    fresh.mode = is_dir ? (0040755) : (0100644);
+    fresh.size = 0;
+    /* An empty extent root: the magic, no entries, and room for four. */
+    wr16w(fresh.block, 0, 0xF30A);
+    wr16w(fresh.block, 2, 0);
+    wr16w(fresh.block, 4, 4);
+    wr16w(fresh.block, 6, 0);
+    if (write_inode(ino, &fresh, is_dir ? 2u : 1u) != 0)
+        return -1;
+
+    if (is_dir) {
+        /* A directory is not empty on disk: it holds itself and its parent. */
+        const unsigned long phys = extend(&fresh, ino);
+        if (phys == 0)
+            return -1;
+        fresh.size = g_block_size;
+        memset(g_block, 0, g_block_size);
+        wr32w(g_block, 0, ino);
+        wr16w(g_block, 4, 12);
+        g_block[6] = 1; g_block[7] = 2; g_block[8] = '.';
+        wr32w(g_block, 12, dir_ino);
+        wr16w(g_block, 16, g_block_size - 12);
+        g_block[18] = 2; g_block[19] = 2; g_block[20] = '.'; g_block[21] = '.';
+        if (write_block(phys, g_block) != 0 ||
+            write_inode(ino, &fresh, 2u) != 0)
+            return -1;
+    }
+
+    if (dir_add(&dir, dir_ino, name, ino, is_dir ? 2 : 1) != 0)
+        return -1;
+    if (is_dir) {
+        /* The parent gained a ".." pointing at it. */
+        unsigned long block; unsigned at;
+        if (inode_location(dir_ino, &block, &at) == 0 &&
+            read_block(block, g_block) == 0) {
+            wr16w(g_block, at + 26, rd16(g_block, at + 26) + 1);
+            write_block(block, g_block);
+        }
+    }
+    return 0;
+}
+
 static int mount(void)
 {
     if (disk_read(0, 8) != 0)
@@ -239,6 +681,12 @@ static int mount(void)
     /* The 64-bit feature is what makes a group descriptor bigger than 32. */
     g_desc_size = (rd32(sb, 96) & 0x80) ? rd16(sb, 254) : 32;
     if (g_desc_size < 32) g_desc_size = 32;
+    g_blocks_per_group = rd32(sb, 32);
+    const unsigned inodes = rd32(sb, 0);
+    g_group_count = g_inodes_per_group ?
+        (inodes + g_inodes_per_group - 1) / g_inodes_per_group : 0;
+    g_gd_block = g_first_data_block + 1;
+    memcpy(g_sb, sb, 1024);
     g_mounted = 1;
     return 0;
 }
@@ -342,6 +790,105 @@ int main(void)
                     r.word[0] = (long)done;
                 }
             }
+        } else if (m.tag == VFS_CREATE || m.tag == VFS_MKDIR) {
+            r.word[0] = create((const char*)m.data, m.tag == VFS_MKDIR);
+        } else if (m.tag == VFS_UNLINK) {
+            char parent[256], name[64];
+            struct inode dir;
+            unsigned ino = 0, dir_ino;
+            if (split_path((const char*)m.data, parent, name) == 0 &&
+                (dir_ino = lookup(parent, &dir)) != 0 &&
+                dir_remove(&dir, name, &ino) == 0 && ino != 0) {
+                /* The blocks go back, then the inode. The other order would
+                 * leave a freed inode still owning blocks if this stopped
+                 * half way, which is the shape of leak fsck cannot repair. */
+                struct inode victim;
+                if (read_inode(ino, &victim) == 0) {
+                    const unsigned long n =
+                        (victim.size + g_block_size - 1) / g_block_size;
+                    for (unsigned long b = 0; b < n; ++b) {
+                        const unsigned long phys = map_block(&victim, b);
+                        if (phys != 0)
+                            free_block(phys);
+                    }
+                    memset(&victim, 0, sizeof(victim));
+                    write_inode(ino, &victim, 0);
+                    /* And a deletion time, which is what marks an inode as
+                     * freed rather than never used.
+                     *
+                     * It has to look like a time. The same field doubles as
+                     * the link in the orphan list - the chain of inodes that
+                     * were deleted while still open - and fsck tells the two
+                     * apart by whether the value could be an inode number. A
+                     * small one is read as a link into a list that does not
+                     * exist, and reported as a corrupted orphan chain. There
+                     * is no clock in this process, so this is a fixed stamp
+                     * that is unambiguously not an inode. */
+                    unsigned long ib; unsigned io;
+                    if (inode_location(ino, &ib, &io) == 0 &&
+                        read_block(ib, g_block) == 0) {
+                        wr32w(g_block, io + 20, 0x60000000u);
+                        write_block(ib, g_block);
+                    }
+                    /* And the inode bitmap bit, which nothing else clears. */
+                    const unsigned g = (ino - 1) / g_inodes_per_group;
+                    const unsigned bit = (ino - 1) % g_inodes_per_group;
+                    unsigned char desc[64];
+                    if (read_group_desc(g, desc) == 0) {
+                        static unsigned char bm[8192];
+                        const unsigned long bitmap = rd32(desc, 4);
+                        if (read_block(bitmap, bm) == 0 &&
+                            (bm[bit >> 3] & (1u << (bit & 7))) != 0) {
+                            bm[bit >> 3] &= (unsigned char)~(1u << (bit & 7));
+                            write_block(bitmap, bm);
+                            wr16w(desc, 14, rd16(desc, 14) + 1);
+                            write_group_desc(g, desc);
+                            wr32w(g_sb, 16, rd32(g_sb, 16) + 1);
+                            write_superblock();
+                        }
+                    }
+                }
+                r.word[0] = 0;
+            }
+        } else if (m.tag == VFS_WRITE) {
+            struct inode in;
+            const unsigned ino = lookup((const char*)m.data, &in);
+            if (ino != 0) {
+                unsigned long offset = (unsigned long)m.word[1];
+                unsigned long want = (unsigned long)m.word[2];
+                if (want > VFS_CHUNK) want = VFS_CHUNK;
+                unsigned long done = 0;
+                while (done < want) {
+                    const unsigned long fb = (offset + done) / g_block_size;
+                    const unsigned within = (offset + done) % g_block_size;
+                    unsigned long n = g_block_size - within;
+                    if (n > want - done) n = want - done;
+
+                    unsigned long phys = map_block(&in, fb);
+                    if (phys == 0) {
+                        /* Growing: the file has to be as long as the block
+                         * being added before extend() knows where to put it. */
+                        const unsigned long was = in.size;
+                        in.size = fb * g_block_size;
+                        phys = extend(&in, ino);
+                        in.size = was;
+                        if (phys == 0)
+                            break;
+                    }
+                    if (read_block(phys, g_block) != 0)
+                        break;
+                    memcpy(g_block + within, out->data + done, n);
+                    if (write_block(phys, g_block) != 0)
+                        break;
+                    done += n;
+                    if (offset + done > in.size)
+                        in.size = offset + done;
+                }
+                write_inode(ino, &in, inode_links(ino));
+                r.word[0] = (long)done;
+            }
+        } else if (m.tag == VFS_SYNC) {
+            r.word[0] = write_superblock();
         }
         ipc_reply(handle, &r);
     }
