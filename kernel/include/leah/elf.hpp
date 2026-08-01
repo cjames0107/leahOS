@@ -36,4 +36,12 @@ const char* error_name(Error error);
 // p_vaddr. Returns Error::None on success.
 Error load(const char* path, Image& out);
 
+// The same, from an image already in memory.
+//
+// This is how the first two processes start. They are the disk driver and the
+// filesystem, so there is no filesystem to load them from - the machine has to
+// be able to run something before it can read anything, and what it runs first
+// is built into the kernel image.
+Error load_memory(const u8* image, usize size, Image& out);
+
 } // namespace elf

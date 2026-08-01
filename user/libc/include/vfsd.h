@@ -30,6 +30,8 @@ struct vfs_shared {
 #define VFS_MKDIR    7  /* data = path                                        */
 #define VFS_UNLINK   8  /* data = path                                        */
 #define VFS_SYNC     9  /* flush what is held back                            */
+#define VFS_CHMOD   10  /* data = path, w1 = mode                             */
+#define VFS_CHOWN   11  /* data = path, w1 = uid, w2 = gid                    */
 
 #define VFS_KIND_FILE 0
 #define VFS_KIND_DIR  1

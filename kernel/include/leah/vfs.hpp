@@ -2,12 +2,17 @@
 
 #include <leah/types.hpp>
 
-// The filesystem-independent layer.
+// The filesystem, as the kernel sees it.
 //
-// Deliberately path-based rather than handle-based for now: open/close/seek
-// needs a file descriptor table, and that belongs with processes rather than
-// ahead of them. FAT32 is the first implementation; exFAT and ext2/3/4 slot in
-// behind the same interface.
+// There is no filesystem behind this any more. Every call here is a message to
+// vfsd, which reads and writes ext4, and which reaches the disk by asking
+// blockd. What is left in the kernel is the file descriptor table, which is
+// genuinely its own: a descriptor is an entry in a process's table, and whose
+// table it is is a question about processes rather than about storage.
+//
+// Path-based rather than handle-based, which used to be a simplification and
+// is now the point: it is what let the implementation move into another
+// process without a single caller above this line changing.
 
 namespace vfs {
 
@@ -47,55 +52,6 @@ struct Entry {
     Type type;
     u64  size;
 };
-
-class FileSystem {
-public:
-    virtual ~FileSystem() = default;
-
-    virtual const char* type_name() const = 0;
-    virtual const char* volume_label() const = 0;
-
-    virtual bool stat(const char* path, Stat& out) = 0;
-
-    // Returns bytes read, or -1 on error. A short read means end of file.
-    virtual isize read(const char* path, u64 offset, void* buffer, usize bytes) = 0;
-
-    virtual bool list(const char* path, Entry* out, usize max, usize& count) = 0;
-
-    // Writing past the end extends the file. Returns bytes written, or -1.
-    virtual isize write(const char* path, u64 offset, const void* buffer, usize bytes) = 0;
-
-    virtual bool create(const char* path, Type type) = 0;
-    virtual bool remove(const char* path) = 0;
-
-    // Move an entry to a new path, no data copy. Default: unsupported.
-    virtual bool rename(const char* old_path, const char* new_path)
-    {
-        (void)old_path;
-        (void)new_path;
-        return false;
-    }
-
-    // Change permission bits / ownership. Default: unsupported, which is the
-    // honest answer for a filesystem with nowhere to record them.
-    virtual bool chmod(const char* path, u16 mode)
-    {
-        (void)path;
-        (void)mode;
-        return false;
-    }
-    virtual bool chown(const char* path, u32 uid, u32 gid)
-    {
-        (void)path;
-        (void)uid;
-        (void)gid;
-        return false;
-    }
-};
-
-// Single root mount. A real mount table arrives with the second filesystem.
-void mount(FileSystem* filesystem);
-FileSystem* mounted();
 
 bool  stat(const char* path, Stat& out);
 isize read(const char* path, u64 offset, void* buffer, usize bytes);

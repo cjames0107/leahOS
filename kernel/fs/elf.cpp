@@ -71,18 +71,41 @@ const char* error_name(Error error)
     return "unknown";
 }
 
-Error load(const char* path, Image& out)
+namespace {
+
+// Where the bytes come from. A path goes through the filesystem; an image is
+// already in memory. Everything after the fetch is identical, which is why the
+// loader takes one of these rather than being written twice.
+struct Source {
+    const char* path;       // null when the image is in memory
+    const u8*   memory;
+    u64         size;
+};
+
+isize fetch(const Source& src, u64 offset, void* out, usize length)
+{
+    if (src.memory != nullptr) {
+        if (offset >= src.size)
+            return 0;
+        u64 n = length;
+        if (n > src.size - offset)
+            n = src.size - offset;
+        memcpy(out, src.memory + offset, static_cast<usize>(n));
+        return static_cast<isize>(n);
+    }
+    return vfs::read(src.path, offset, out, length);
+}
+
+Error load_from(const Source& src, Image& out)
 {
     out = Image{};
 
-    vfs::Stat info{};
-    if (!vfs::stat(path, info) || info.type != vfs::Type::File)
-        return Error::NotFound;
-    if (info.size < sizeof(Header))
+    const u64 total = src.size;
+    if (total < sizeof(Header))
         return Error::TooSmall;
 
     Header header{};
-    if (vfs::read(path, 0, &header, sizeof(header)) != static_cast<isize>(sizeof(header)))
+    if (fetch(src, 0, &header, sizeof(header)) != static_cast<isize>(sizeof(header)))
         return Error::ReadFailed;
 
     if (memcmp(header.ident, kMagic, sizeof(kMagic)) != 0)
@@ -103,11 +126,11 @@ Error load(const char* path, Image& out)
     for (u16 i = 0; i < header.program_header_count; ++i) {
         const u64 offset = header.program_header_offset +
                            static_cast<u64>(i) * header.program_header_size;
-        if (offset + sizeof(ProgramHeader) > info.size)
+        if (offset + sizeof(ProgramHeader) > total)
             return Error::BadProgramHeader;
 
         ProgramHeader segment{};
-        if (vfs::read(path, offset, &segment, sizeof(segment)) !=
+        if (fetch(src, offset, &segment, sizeof(segment)) !=
             static_cast<isize>(sizeof(segment)))
             return Error::ReadFailed;
 
@@ -115,7 +138,7 @@ Error load(const char* path, Image& out)
             continue;
         if (segment.file_size > segment.memory_size)
             return Error::BadProgramHeader;
-        if (segment.offset + segment.file_size > info.size)
+        if (segment.offset + segment.file_size > total)
             return Error::BadProgramHeader;
         if (segment.memory_size == 0)
             continue;
@@ -146,9 +169,9 @@ Error load(const char* path, Image& out)
         }
 
         if (segment.file_size > 0) {
-            const isize got = vfs::read(path, segment.offset,
-                                        reinterpret_cast<void*>(segment.virtual_address),
-                                        segment.file_size);
+            const isize got = fetch(src, segment.offset,
+                                    reinterpret_cast<void*>(segment.virtual_address),
+                                    segment.file_size);
             if (got < 0 || static_cast<u64>(got) != segment.file_size)
                 return Error::ReadFailed;
         }
@@ -176,6 +199,23 @@ Error load(const char* path, Image& out)
         return Error::BadProgramHeader;
 
     return Error::None;
+}
+
+} // namespace
+
+Error load(const char* path, Image& out)
+{
+    vfs::Stat info{};
+    if (!vfs::stat(path, info) || info.type != vfs::Type::File)
+        return Error::NotFound;
+    const Source src{ path, nullptr, info.size };
+    return load_from(src, out);
+}
+
+Error load_memory(const u8* image, usize size, Image& out)
+{
+    const Source src{ nullptr, image, size };
+    return load_from(src, out);
 }
 
 } // namespace elf

@@ -168,12 +168,12 @@ static int identify(void)
 
 int main(int argc, char** argv)
 {
-    /* Which channel: 0 is the primary at 0x1F0, 1 the secondary at 0x170.
-     * The secondary is the default because the kernel's own filesystem still
-     * lives on the primary, and two drivers on one channel is one command
-     * arriving in the middle of another's transfer. */
-    const int channel = argc > 1 ? atoi_simple(argv[1]) : 1;
-    g_slave = argc > 2 ? atoi_simple(argv[2]) : 0;
+    /* The root disk by default: primary channel, second drive. That is where
+     * the filesystem is, and this is now the only driver that can reach it -
+     * the kernel has none. The arguments are still there for pointing a second
+     * copy at some other disk. */
+    const int channel = argc > 1 ? atoi_simple(argv[1]) : 0;
+    g_slave = argc > 2 ? atoi_simple(argv[2]) : 1;
     g_io = channel == 0 ? 0x1F0 : 0x170;
     g_control = channel == 0 ? 0x3F6 : 0x376;
 

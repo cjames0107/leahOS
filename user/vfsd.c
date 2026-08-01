@@ -69,6 +69,7 @@ static int read_block(unsigned long block, unsigned char* out)
 
 struct inode {
     unsigned mode;
+    unsigned uid, gid;
     unsigned long size;
     unsigned char block[60];
 };
@@ -98,6 +99,8 @@ static int read_inode(unsigned number, struct inode* out)
     const unsigned char* raw = g_block + ibyte % g_block_size;
 
     out->mode = rd16(raw, 0);
+    out->uid  = rd16(raw, 2);
+    out->gid  = rd16(raw, 24);
     out->size = (unsigned long)rd32(raw, 4) |
                 ((unsigned long)rd32(raw, 108) << 32);
     memcpy(out->block, raw + 40, 60);
@@ -359,6 +362,8 @@ static int write_inode(unsigned number, const struct inode* in, unsigned links)
      * says so. */
     unsigned char* raw = g_block + at;
     wr16w(raw, 0, in->mode);
+    wr16w(raw, 2, in->uid);
+    wr16w(raw, 24, in->gid);
     wr32w(raw, 4, (unsigned)in->size);
     wr32w(raw, 108, (unsigned)(in->size >> 32));
     /* Always written, including zero. A removed inode that keeps its old link
@@ -582,6 +587,37 @@ static int dir_remove(struct inode* dir, const char* name, unsigned* ino_out)
     return -1;
 }
 
+/* True when a directory holds nothing but itself and its parent. Removing one
+ * that still has contents would strand every one of them: the entries would
+ * still exist and nothing would reach them, which is the kind of damage fsck
+ * can find and cannot undo. */
+static int dir_is_empty(const struct inode* dir)
+{
+    const unsigned long blocks = (dir->size + g_block_size - 1) / g_block_size;
+    for (unsigned long b = 0; b < blocks; ++b) {
+        const unsigned long phys = map_block(dir, b);
+        if (phys == 0 || read_block(phys, g_block) != 0)
+            continue;
+        unsigned at = 0;
+        while (at + 8 <= g_block_size) {
+            const unsigned ino = rd32(g_block, at);
+            const unsigned rec = rd16(g_block, at + 4);
+            const unsigned len = g_block[at + 6];
+            if (rec < 8 || at + rec > g_block_size)
+                break;
+            if (ino != 0 && len > 0) {
+                const int dot = len == 1 && g_block[at + 8] == '.';
+                const int dotdot = len == 2 && g_block[at + 8] == '.' &&
+                                   g_block[at + 9] == '.';
+                if (!dot && !dotdot)
+                    return 0;
+            }
+            at += rec;
+        }
+    }
+    return 1;
+}
+
 /* Split a path into the directory holding it and the last component. */
 static int split_path(const char* path, char* parent, char* last)
 {
@@ -749,6 +785,9 @@ int main(void)
                 r.word[1] = (in.mode & 0xF000) == 0x4000 ? VFS_KIND_DIR
                                                          : VFS_KIND_FILE;
                 r.word[2] = in.mode & 0777;
+                /* Both owners in one word: they are always wanted together
+                 * and there are only four to spend. */
+                r.word[3] = (long)((in.uid << 16) | in.gid);
             }
         } else if (m.tag == VFS_LIST) {
             struct inode in;
@@ -794,11 +833,28 @@ int main(void)
             r.word[0] = create((const char*)m.data, m.tag == VFS_MKDIR);
         } else if (m.tag == VFS_UNLINK) {
             char parent[256], name[64];
-            struct inode dir;
-            unsigned ino = 0, dir_ino;
-            if (split_path((const char*)m.data, parent, name) == 0 &&
-                (dir_ino = lookup(parent, &dir)) != 0 &&
-                dir_remove(&dir, name, &ino) == 0 && ino != 0) {
+            struct inode dir, target;
+            unsigned ino = 0, dir_ino = 0;
+            int removing_dir = 0;
+
+            /* Look before removing: a directory has to be empty, and finding
+             * that out afterwards is too late to put the entry back. */
+            int allowed = split_path((const char*)m.data, parent, name) == 0 &&
+                          (dir_ino = lookup(parent, &dir)) != 0;
+            if (allowed) {
+                struct inode probe;
+                const unsigned pino = lookup((const char*)m.data, &probe);
+                if (pino == 0)
+                    allowed = 0;
+                else if ((probe.mode & 0xF000) == 0x4000) {
+                    removing_dir = 1;
+                    allowed = dir_is_empty(&probe);
+                }
+                target = probe;
+            }
+            (void)target;
+
+            if (allowed && dir_remove(&dir, name, &ino) == 0 && ino != 0) {
                 /* The blocks go back, then the inode. The other order would
                  * leave a freed inode still owning blocks if this stopped
                  * half way, which is the shape of leak fsck cannot repair. */
@@ -848,6 +904,25 @@ int main(void)
                         }
                     }
                 }
+                if (removing_dir) {
+                    /* The parent loses the ".." that pointed back at it, and
+                     * the group holds one directory fewer. Both are counts
+                     * fsck checks and nothing else reads. */
+                    unsigned long pb; unsigned po;
+                    if (inode_location(dir_ino, &pb, &po) == 0 &&
+                        read_block(pb, g_block) == 0) {
+                        const unsigned links = rd16(g_block, po + 26);
+                        if (links > 0)
+                            wr16w(g_block, po + 26, links - 1);
+                        write_block(pb, g_block);
+                    }
+                    const unsigned g = (ino - 1) / g_inodes_per_group;
+                    unsigned char gd[64];
+                    if (read_group_desc(g, gd) == 0 && rd16(gd, 16) > 0) {
+                        wr16w(gd, 16, rd16(gd, 16) - 1);
+                        write_group_desc(g, gd);
+                    }
+                }
                 r.word[0] = 0;
             }
         } else if (m.tag == VFS_WRITE) {
@@ -886,6 +961,19 @@ int main(void)
                 }
                 write_inode(ino, &in, inode_links(ino));
                 r.word[0] = (long)done;
+            }
+        } else if (m.tag == VFS_CHMOD || m.tag == VFS_CHOWN) {
+            struct inode in;
+            const unsigned ino = lookup((const char*)m.data, &in);
+            if (ino != 0) {
+                if (m.tag == VFS_CHMOD)
+                    in.mode = (in.mode & 0xF000) |
+                              ((unsigned)m.word[1] & 0777);
+                else {
+                    in.uid = (unsigned)m.word[1];
+                    in.gid = (unsigned)m.word[2];
+                }
+                r.word[0] = write_inode(ino, &in, inode_links(ino));
             }
         } else if (m.tag == VFS_SYNC) {
             r.word[0] = write_superblock();

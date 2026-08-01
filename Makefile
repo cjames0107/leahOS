@@ -156,6 +156,11 @@ $(BUILD)/ap_trampoline.bin: boot/ap_trampoline.asm | $(BUILD)
 
 $(BUILD)/kernel/arch/x86_64/ap_blob.asm.o: $(BUILD)/ap_trampoline.bin
 
+# The disk driver and the filesystem are built into the kernel image, because
+# there is nothing to load them from: they are what makes loading possible.
+# So they have to be linked before the kernel is.
+$(BUILD)/kernel/arch/x86_64/servers.asm.o: $(BUILD)/blockd.elf $(BUILD)/vfsd.elf
+
 # --- kernel -----------------------------------------------------------------
 $(BUILD)/%.asm.o: %.asm
 	@mkdir -p $(dir $@)

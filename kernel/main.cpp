@@ -1,16 +1,11 @@
 #include <leah/acpi.hpp>
-#include <leah/ahci.hpp>
 #include <leah/apic.hpp>
-#include <leah/ata.hpp>
-#include <leah/blockdev.hpp>
 #include <leah/bootinfo.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/elf.hpp>
 #include <leah/syscall.hpp>
 #include <leah/framebuffer.hpp>
-#include <leah/ext.hpp>
-#include <leah/fat32.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
 #include <leah/hpet.hpp>
@@ -36,7 +31,6 @@
 #include <leah/vfs.hpp>
 #include <leah/vmm.hpp>
 #include <leah/usb_hid.hpp>
-#include <leah/usb_storage.hpp>
 #include <leah/xhci.hpp>
 
 namespace boot {
@@ -57,6 +51,12 @@ const char* region_type_name(RegionType type)
 
 extern "C" u8 __kernel_start[];
 extern "C" u8 __kernel_end[];
+
+// The two programs the kernel carries, from servers.asm.
+extern "C" const u8 g_server_blockd[];
+extern "C" const u8 g_server_blockd_end[];
+extern "C" const u8 g_server_vfsd[];
+extern "C" const u8 g_server_vfsd_end[];
 
 namespace {
 
@@ -173,220 +173,14 @@ void self_test_heap()
     kfree(big);
 }
 
-void print_disks()
-{
-    console::set_color(console::Color::White);
-    console::printf("\n  ATA  %llu drives\n", static_cast<u64>(ata::drive_count()));
-    console::set_color(console::Color::LightGray);
-
-    for (usize i = 0; i < ata::drive_count(); ++i) {
-        const ata::Drive& d = ata::drive_at(i);
-        console::printf("    hd%llu  %llu MiB  %s  %s\n",
-                        static_cast<u64>(i),
-                        ata::capacity_bytes(i) / kMiB,
-                        d.lba48 ? "LBA48" : "LBA28",
-                        d.model);
-    }
-}
-
-// The strongest check available right now: the kernel was loaded from LBA 64 by
-// the bootloader, so reading those same sectors back through an entirely
-// different code path must reproduce the image already in memory. It validates
-// the ATA driver and the unreal-mode loader against each other.
-void self_test_disk()
-{
-    if (ata::drive_count() == 0)
-        panic("ata: no drives found, but we booted off one");
-
-    auto* sector = static_cast<u8*>(kmalloc(ata::kSectorSize));
-    if (sector == nullptr)
-        panic("ata: out of memory for a sector buffer");
-
-    if (!ata::read(0, 0, 1, sector))
-        panic("ata: cannot read LBA 0");
-    if (sector[510] != 0x55 || sector[511] != 0xAA)
-        panic("ata: LBA 0 is not the boot sector we wrote");
-    kfree(sector);
-
-    constexpr u32 kSectors = 32;      // 16 KiB of kernel
-    auto* image = static_cast<u8*>(kmalloc(kSectors * ata::kSectorSize));
-    if (image == nullptr)
-        panic("ata: out of memory for the verification buffer");
-
-    if (!ata::read(0, 64, kSectors, image))
-        panic("ata: cannot read the kernel image back");
-    if (memcmp(image, __kernel_start, kSectors * ata::kSectorSize) != 0)
-        panic("ata: kernel read from disk does not match the loaded image");
-
-    kfree(image);
-
-    // Writes get their own check: they are the operation that can quietly
-    // corrupt the disk, and the cache-flush step is easy to get wrong. Use a
-    // scratch LBA well past the kernel's slot in the image.
-    constexpr u64 kScratchLba = 20000;
-    auto* out = static_cast<u8*>(kmalloc(ata::kSectorSize));
-    auto* back = static_cast<u8*>(kmalloc(ata::kSectorSize));
-    if (out == nullptr || back == nullptr)
-        panic("ata: out of memory for the write test");
-
-    for (usize i = 0; i < ata::kSectorSize; ++i)
-        out[i] = static_cast<u8>(i * 7 + 3);
-
-    if (!ata::write(0, kScratchLba, 1, out))
-        panic("ata: write failed");
-
-    memset(back, 0, ata::kSectorSize);
-    if (!ata::read(0, kScratchLba, 1, back))
-        panic("ata: cannot read back what we just wrote");
-    if (memcmp(out, back, ata::kSectorSize) != 0)
-        panic("ata: read-back does not match the data written");
-
-    kfree(back);
-    kfree(out);
-}
-
 // The same shape as the ATA check: write a pattern well clear of anything that
 // matters, read it back through the controller, and compare. A DMA path can
 // fail in ways PIO cannot - a wrong physical address in the scatter/gather
 // table reads back someone else's memory rather than erroring - so the
 // round trip is the check that counts.
-void self_test_ahci()
-{
-    if (ahci::drive_count() == 0)
-        return;
-
-    constexpr u32 kSectors = 8;
-    constexpr u64 kScratchLba = 64;
-    const usize bytes = kSectors * ahci::kSectorSize;
-
-    auto* out  = static_cast<u8*>(kmalloc(bytes));
-    auto* back = static_cast<u8*>(kmalloc(bytes));
-    if (out == nullptr || back == nullptr)
-        panic("ahci: out of memory for the self-test");
-
-    for (usize i = 0; i < bytes; ++i)
-        out[i] = static_cast<u8>(i * 13 + 7);
-
-    if (!ahci::write(0, kScratchLba, kSectors, out))
-        panic("ahci: DMA write failed");
-
-    memset(back, 0, bytes);
-    if (!ahci::read(0, kScratchLba, kSectors, back))
-        panic("ahci: DMA read failed");
-    if (memcmp(out, back, bytes) != 0)
-        panic("ahci: what came back is not what was written");
-
-    kfree(back);
-    kfree(out);
-
-    // A transfer larger than one DMA buffer, so the chunking loop runs more
-    // than once and the second chunk's LBA has to be right.
-    constexpr u32 kBigSectors = 200;        // the buffer holds 128
-    const usize big_bytes = kBigSectors * ahci::kSectorSize;
-    auto* big = static_cast<u8*>(kmalloc(big_bytes));
-    auto* big_back = static_cast<u8*>(kmalloc(big_bytes));
-    if (big == nullptr || big_back == nullptr)
-        panic("ahci: out of memory for the large-transfer test");
-
-    for (usize i = 0; i < big_bytes; ++i)
-        big[i] = static_cast<u8>(i * 31 + 11);
-
-    if (!ahci::write(0, 1024, kBigSectors, big))
-        panic("ahci: multi-chunk DMA write failed");
-    memset(big_back, 0, big_bytes);
-    if (!ahci::read(0, 1024, kBigSectors, big_back))
-        panic("ahci: multi-chunk DMA read failed");
-    if (memcmp(big, big_back, big_bytes) != 0)
-        panic("ahci: a transfer spanning several chunks did not round trip");
-
-    kfree(big_back);
-    kfree(big);
-}
-
 // The same round-trip check the AHCI disk gets. A storage stack that reports
 // success without moving the right bytes is the failure worth catching, and
 // SCSI over bulk endpoints has plenty of places to lose them.
-void self_test_usb_storage()
-{
-    if (usb::storage::drive_count() == 0)
-        return;
-
-    constexpr u32 kSectors = 4;
-    const usize bytes = kSectors * usb::storage::kSectorSize;
-    auto* out  = static_cast<u8*>(kmalloc(bytes));
-    auto* back = static_cast<u8*>(kmalloc(bytes));
-    if (out == nullptr || back == nullptr)
-        panic("usb: out of memory for the self-test");
-
-    for (usize i = 0; i < bytes; ++i)
-        out[i] = static_cast<u8>(i * 23 + 5);
-
-    if (!usb::storage::write(0, 16, kSectors, out))
-        panic("usb: SCSI write failed");
-    memset(back, 0, bytes);
-    if (!usb::storage::read(0, 16, kSectors, back))
-        panic("usb: SCSI read failed");
-    if (memcmp(out, back, bytes) != 0)
-        panic("usb: what came back is not what was written");
-
-    kfree(back);
-    kfree(out);
-}
-
-block::Device* g_disk = nullptr;
-block::Device* g_partition = nullptr;
-
-void mount_root()
-{
-    // The root filesystem is an ext4 volume on disk 1 (the whole disk, no
-    // partition table). Disk 0 remains the bootable/kernel disk; its FAT32
-    // partition is the fallback if the ext disk is absent.
-    if (ata::drive_count() > 1) {
-        auto* ext_disk = new block::AtaDevice(1);
-        fs::Ext* ext = fs::Ext::probe(ext_disk);
-        if (ext != nullptr) {
-            g_disk = ext_disk;
-            vfs::mount(ext);
-            console::set_color(console::Color::White);
-            console::printf("\n  root  ext4 on hd1, label \"%s\"\n", ext->volume_label());
-            console::set_color(console::Color::LightGray);
-            return;
-        }
-        delete ext_disk;
-    }
-
-    g_disk = new block::AtaDevice(0);
-
-    block::PartitionInfo parts[4];
-    const usize found = block::scan_partitions(*g_disk, parts, 4);
-
-    console::set_color(console::Color::White);
-    console::printf("\n  partitions  %llu found\n", static_cast<u64>(found));
-    console::set_color(console::Color::LightGray);
-
-    for (usize i = 0; i < found; ++i) {
-        console::printf("    %llu  type 0x%02x  %s  LBA %llu, %llu MiB\n",
-                        static_cast<u64>(i), parts[i].type,
-                        block::partition_type_name(parts[i].type),
-                        parts[i].start_lba,
-                        parts[i].sectors * block::kSectorSize / kMiB);
-    }
-
-    for (usize i = 0; i < found; ++i) {
-        if (parts[i].type != 0x0B && parts[i].type != 0x0C)
-            continue;
-
-        g_partition = new block::Partition(g_disk, parts[i].start_lba, parts[i].sectors);
-        fs::Fat32* filesystem = fs::Fat32::probe(g_partition);
-        if (filesystem == nullptr) {
-            delete g_partition;
-            g_partition = nullptr;
-            continue;
-        }
-        vfs::mount(filesystem);
-        return;
-    }
-}
 
 void print_tree(const char* path, int depth)
 {
@@ -427,8 +221,11 @@ void print_tree(const char* path, int depth)
 // from tools/mkext.sh.
 void self_test_fs()
 {
-    if (vfs::mounted() == nullptr)
-        panic("vfs: no filesystem mounted");
+    /* "Is something mounted" is now a question for the server, and the only
+     * honest way to ask it is to try. */
+    vfs::Stat root{};
+    if (!vfs::stat("/", root) || root.type != vfs::Type::Directory)
+        panic("vfs: the filesystem server has no root");
 
     u64 size = 0;
     char* hello = vfs::read_entire_file("/docs/hello.txt", &size);
@@ -554,21 +351,6 @@ void self_test_fs_write()
     vfs::remove("/BIG.BIN");
 }
 
-void print_filesystem()
-{
-    auto* filesystem = vfs::mounted();
-    if (filesystem == nullptr) {
-        console::write("\n  no filesystem mounted\n");
-        return;
-    }
-
-    console::set_color(console::Color::White);
-    console::printf("\n  %s  volume \"%s\"\n",
-                    filesystem->type_name(), filesystem->volume_label());
-    console::set_color(console::Color::LightGray);
-    print_tree("/", 0);
-}
-
 // Loads a real ELF off the filesystem and calls it. Still ring 0 and still the
 // Resolves the gateway's MAC over ARP - proving the NIC transmits (the request)
 // and receives (the reply), and that the ARP layer works, all against QEMU's
@@ -577,8 +359,61 @@ void print_filesystem()
 // Runs the init process and waits for it. init drives the fork/exec/wait demo;
 // this is also the moment the kernel first hands the CPU to a scheduled user
 // process rather than running one synchronously.
+// Start the disk driver and the filesystem, in that order, and wait for the
+// filesystem to say it is open for business.
+//
+// Nothing can be loaded from disk until both are up, including init - so this
+// is the one place in the system where the order is not a matter of taste. The
+// wait is on the port rather than on a delay: a port appearing is the server
+// saying it is ready, and a delay is a guess that is too long on a fast
+// machine and too short on a slow one.
+bool start_servers()
+{
+    const usize blockd_size =
+        static_cast<usize>(g_server_blockd_end - g_server_blockd);
+    const usize vfsd_size =
+        static_cast<usize>(g_server_vfsd_end - g_server_vfsd);
+
+    if (process::create_embedded("blockd", g_server_blockd, blockd_size,
+                                 scheduler::current_pid()) == 0) {
+        console::printf("  kernel: cannot start the disk driver\n");
+        return false;
+    }
+    for (u32 i = 0; i < 20000 && ipc::port_open(ipc::kPortBlock) < 0; ++i)
+        scheduler::yield();
+    if (ipc::port_open(ipc::kPortBlock) < 0) {
+        console::printf("  kernel: the disk driver never claimed its port\n");
+        return false;
+    }
+
+    if (process::create_embedded("vfsd", g_server_vfsd, vfsd_size,
+                                 scheduler::current_pid()) == 0) {
+        console::printf("  kernel: cannot start the filesystem\n");
+        return false;
+    }
+    for (u32 i = 0; i < 20000 && ipc::port_open(ipc::kPortVfs) < 0; ++i)
+        scheduler::yield();
+    if (ipc::port_open(ipc::kPortVfs) < 0) {
+        console::printf("  kernel: the filesystem never mounted\n");
+        return false;
+    }
+    return true;
+}
+
 void run_userland()
 {
+    if (!start_servers())
+        panic("no filesystem: nothing can be loaded");
+
+    /* The same checks the kernel's own ext4 used to pass, against the server
+     * that replaced it. They run here rather than during the hardware bring-up
+     * because this is the first moment in the boot at which a filesystem
+     * exists at all. */
+    self_test_fs();
+    step("ext4 read path verified through vfsd");
+    self_test_fs_write();
+    step("ext4 write path verified through vfsd");
+
     console::set_color(console::Color::White);
     console::write("\n  starting /BIN/INIT.ELF\n\n");
     console::set_color(console::Color::LightGray);
@@ -910,21 +745,10 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     pci::enumerate();
     step("PCI bus enumerated");
 
-    ata::init();
-    self_test_disk();
-    step("ATA drives identified, read-back verified against the loaded kernel");
-
-    // AHCI moves sectors by DMA rather than through the CPU a word at a time.
-    if (ahci::init()) {
-        for (usize i = 0; i < ahci::drive_count(); ++i) {
-            console::printf("  [ ok ] AHCI sd%llu  %llu MiB  %s (DMA)\n",
-                            static_cast<u64>(i),
-                            ahci::sector_count(i) * ahci::kSectorSize / kMiB,
-                            ahci::model(i));
-        }
-        self_test_ahci();
-        step("AHCI read/write verified by DMA round trip");
-    }
+    /* No disk driver in here any more. The drive is blockd's, and two drivers
+     * on one channel is one command arriving in the middle of another's
+     * transfer - so the kernel does not even identify the drives, because it
+     * would have to touch the same registers to do it. */
 
     if (xhci::init()) {
         console::printf("  [ ok ] xHCI up, %llu device(s) enumerated\n",
@@ -934,18 +758,6 @@ extern "C" void kernel_main(const boot::Info* boot_info)
             console::printf("    usb%llu  port %u  %04x:%04x  class %02x\n",
                             static_cast<u64>(i), d.port, d.vendor, d.product,
                             d.device_class);
-        }
-
-        if (usb::storage::init() > 0) {
-            for (usize i = 0; i < usb::storage::drive_count(); ++i) {
-                console::printf("  [ ok ] USB disk %llu  %llu MiB  %s\n",
-                                static_cast<u64>(i),
-                                usb::storage::sector_count(i) *
-                                    usb::storage::kSectorSize / kMiB,
-                                usb::storage::model(i));
-            }
-            self_test_usb_storage();
-            step("USB mass storage verified by SCSI read/write round trip");
         }
 
         if (usb::hid::init() > 0) {
@@ -963,13 +775,6 @@ extern "C" void kernel_main(const boot::Info* boot_info)
                         static_cast<u64>(console::columns()),
                         static_cast<u64>(console::rows()));
     }
-
-    mount_root();
-    self_test_fs();
-    step("ext4 root mounted, read path verified");
-
-    self_test_fs_write();
-    step("ext4 write path verified (create, extent grow, mkdir, remove, rename)");
 
     shm::init();
     ipc::init();
@@ -999,8 +804,6 @@ extern "C" void kernel_main(const boot::Info* boot_info)
 
     print_memory(*info);
     print_pci();
-    print_disks();
-    print_filesystem();
 
     echo_loop();
 }

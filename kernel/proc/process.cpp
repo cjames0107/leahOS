@@ -1,6 +1,8 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/elf.hpp>
+#include <leah/heap.hpp>
+#include <leah/vfs.hpp>
 #include <leah/memory.hpp>
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
@@ -108,24 +110,62 @@ vaddr_t build_stack(const Args& args)
 // Load an ELF, map a stack, and lay out args in a fresh space. Borrows CR3 for
 // the duration and restores it. Returns the new space, with the entry point and
 // initial stack pointer written out, or 0.
+// Build an address space around a program. `image_bytes` non-null means the
+// program is already in memory - the two servers the kernel carries - and
+// `path` is then only a name for the error message.
 vmm::AddressSpace build_image(const char* path, const Args& args,
-                              vaddr_t& entry_out, vaddr_t& stack_out)
+                              vaddr_t& entry_out, vaddr_t& stack_out,
+                              const u8* image_bytes = nullptr, usize image_size = 0)
 {
+    /* Read the whole program into kernel memory before switching to the new
+     * address space.
+     *
+     * Reading it goes through the filesystem server now, which means blocking,
+     * and a task that blocks is rescheduled with its own address space put
+     * back - which silently undoes the switch below. The loader would then
+     * write the segments into whatever space the caller was using and the new
+     * process would start on pages that were never filled in. Kernel memory is
+     * mapped in every address space, so a copy here is reachable from both
+     * sides of the switch.
+     *
+     * The two servers are already in memory and skip all of this, which is the
+     * whole reason they can be loaded before there is a filesystem. */
+    u8* owned = nullptr;
+    if (image_bytes == nullptr) {
+        vfs::Stat info{};
+        if (!vfs::stat(path, info) || info.type != vfs::Type::File)
+            return 0;
+        owned = static_cast<u8*>(kmalloc(info.size > 0 ? info.size : 1));
+        if (owned == nullptr)
+            return 0;
+        const isize got = vfs::read(path, 0, owned, info.size);
+        if (got < 0 || static_cast<u64>(got) != info.size) {
+            kfree(owned);
+            console::printf("  process: %s: cannot be read\n", path);
+            return 0;
+        }
+        image_bytes = owned;
+        image_size = static_cast<usize>(info.size);
+    }
+
     const vmm::AddressSpace previous = vmm::current_space();
 
     const vmm::AddressSpace space = vmm::create_address_space();
-    if (space == 0)
+    if (space == 0) {
+        kfree(owned);
         return 0;
+    }
 
     vmm::switch_address_space(space);
 
     elf::Image image{};
-    const elf::Error error = elf::load(path, image);
+    const elf::Error error = elf::load_memory(image_bytes, image_size, image);
     if (error != elf::Error::None || !map_user_stack()) {
         vmm::switch_address_space(previous);
         vmm::destroy_address_space(space);
         if (error != elf::Error::None)
             console::printf("  process: %s: %s\n", path, elf::error_name(error));
+        kfree(owned);
         return 0;
     }
 
@@ -133,6 +173,7 @@ vmm::AddressSpace build_image(const char* path, const Args& args,
     entry_out = image.entry;
 
     vmm::switch_address_space(previous);
+    kfree(owned);
     return space;
 }
 
@@ -172,6 +213,29 @@ u32 create(const char* name, const char* path, u32 parent_pid)
         return 0;
 
     const u32 pid = scheduler::spawn_user(name, space, entry_frame(entry, stack), parent_pid);
+    if (pid == 0) {
+        vmm::destroy_address_space(space);
+        return 0;
+    }
+    return pid;
+}
+
+u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pid)
+{
+    cpu::InterruptGuard guard;
+
+    Args args;
+    single_arg(name, args);
+
+    vaddr_t entry = 0;
+    vaddr_t stack = 0;
+    const vmm::AddressSpace space =
+        build_image(name, args, entry, stack, image, size);
+    if (space == 0)
+        return 0;
+
+    const u32 pid =
+        scheduler::spawn_user(name, space, entry_frame(entry, stack), parent_pid);
     if (pid == 0) {
         vmm::destroy_address_space(space);
         return 0;
