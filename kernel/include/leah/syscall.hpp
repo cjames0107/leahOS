@@ -35,10 +35,11 @@ enum Number : u64 {
     Dup2    = 18,
     Sbrk    = 19,
     Rename  = 20,
-    Netinfo = 21,
-    Ping    = 22,
-    Arp     = 23,
-    Resolve = 24,
+    // 21-24 and 39-41 were the network: netinfo, ping, arp, resolve, connect,
+    // send and receive. The stack is a process now and is reached by message
+    // rather than by trap. The numbers are left as a gap rather than reused -
+    // a stale binary calling a recycled number is a bug that looks like
+    // anything except that.
     Mmap    = 25,
     Munmap  = 26,
     Clone   = 27,
@@ -53,9 +54,6 @@ enum Number : u64 {
     Chmod     = 36,
     Chown     = 37,
     Futex     = 38,
-    Connect   = 39,   // TCP: open a connection, returns an fd
-    SockSend  = 40,
-    SockRecv  = 41,
     Login     = 42,   // authenticate and switch credentials
     SetEcho   = 43,   // console echo, off while a password is typed
     UserName  = 44,

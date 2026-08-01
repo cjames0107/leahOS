@@ -302,8 +302,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("e1000d: %02x:%02x:%02x:%02x:%02x:%02x up in ring 3\n",
-           g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
+    printf("e1000d[%d]: %02x:%02x:%02x:%02x:%02x:%02x up in ring 3\n",
+           getpid(), g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
 
     for (;;) {
         pump_receive();

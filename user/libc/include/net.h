@@ -32,8 +32,18 @@ int parse_ip(const char* text, uint32_t* out);
  * failure. */
 int resolve(const char* host, uint32_t* ip);
 
-/* Open a TCP connection to `ip`:`port` and return a file descriptor. read,
- * write and close work on it exactly as on a file or a pipe. -1 on failure. */
-int tcp_connect(uint32_t ip, uint16_t port);
+/* Open a TCP connection to `ip`:`port`. Returns a connection number, or -1.
+ *
+ * Not a file descriptor any more. The stack runs in another process now, and a
+ * descriptor would mean the kernel knowing what a connection is - which is the
+ * thing moving the stack out of it was for. So a connection has its own three
+ * calls instead of borrowing read, write and close.
+ *
+ * tcp_read returns the number of bytes written to `buffer`, 0 once the other
+ * end has finished, or -1 if the connection failed. */
+int  tcp_connect(uint32_t ip, uint16_t port);
+long tcp_read(int connection, void* buffer, unsigned long bytes);
+long tcp_write(int connection, const void* buffer, unsigned long bytes);
+void tcp_close(int connection);
 
 #endif /* _NET_H */

@@ -5,7 +5,6 @@
 #include <leah/keyboard.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/string.hpp>
-#include <leah/tcp.hpp>
 #include <leah/vfs.hpp>
 
 namespace files {
@@ -313,8 +312,6 @@ i64 close(int fd)
     Descriptor& d = table().fds[fd];
     if (d.kind == Kind::Pipe)
         release_pipe(d);
-    else if (d.kind == Kind::Socket)
-        tcp::close(static_cast<int>(d.offset));
     d.kind = Kind::None;
     d.pipe = nullptr;
     return 0;
@@ -330,8 +327,6 @@ i64 read(int fd, void* buffer, usize count)
     case Kind::ConsoleIn:
         return read_console(buffer, count);
 
-    case Kind::Socket:
-        return tcp::recv(static_cast<int>(d.offset), buffer, count);
 
     case Kind::Pipe:
         if ((d.flags & kRead) == 0)
@@ -362,8 +357,6 @@ i64 write(int fd, const void* buffer, usize count)
             console::put(text[i]);
         return static_cast<i64>(count);
     }
-    case Kind::Socket:
-        return tcp::send(static_cast<int>(d.offset), buffer, count);
 
     case Kind::Pipe:
         if ((d.flags & kWrite) == 0)
@@ -416,26 +409,6 @@ i64 stat(const char* path, void* statbuf)
     out->uid  = st.uid;
     out->gid  = st.gid;
     return 0;
-}
-
-// Open a TCP connection and wrap it in a file descriptor, so read, write and
-// close work on a socket exactly as they do on a file or a pipe.
-i64 tcp_connect(u32 ip, u16 port)
-{
-    const int fd = alloc_fd();
-    if (fd < 0)
-        return -1;
-
-    const int handle = tcp::connect(ip, port);
-    if (handle < 0)
-        return -1;
-
-    Descriptor& d = table().fds[fd];
-    d.kind   = Kind::Socket;
-    d.offset = static_cast<u64>(handle);   // the connection, not a file offset
-    d.flags  = kRead | kWrite;
-    d.path[0] = '\0';
-    return fd;
 }
 
 i64 chmod(const char* path, u16 mode)

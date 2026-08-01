@@ -25,10 +25,6 @@
 #define SYS_dup2     18
 #define SYS_sbrk     19
 #define SYS_rename   20
-#define SYS_netinfo  21
-#define SYS_ping     22
-#define SYS_arp      23
-#define SYS_resolve  24
 #define SYS_mmap     25
 #define SYS_munmap   26
 #define SYS_clone    27
@@ -43,7 +39,6 @@
 #define SYS_chmod    36
 #define SYS_chown    37
 #define SYS_futex    38
-#define SYS_connect  39
 #define SYS_login    42
 #define SYS_setecho  43
 #define SYS_username 44

@@ -583,18 +583,21 @@ static void test_tcp(void)
     }
     check("DNS resolved a hostname for TCP", ip != 0);
 
-    const int fd = tcp_connect(ip, 80);
-    check("TCP connected to a real server", fd >= 0);
-    if (fd < 0)
+    const int conn = tcp_connect(ip, 80);
+    check("TCP connected to a real server", conn >= 0);
+    if (conn < 0)
         return;
 
     static const char request[] =
         "GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n";
-    check("wrote a request to the socket",
-          write(fd, request, sizeof(request) - 1) == (long)(sizeof(request) - 1));
+    check("wrote a request to the connection",
+          tcp_write(conn, request, sizeof(request) - 1) ==
+              (long)(sizeof(request) - 1));
 
     char buffer[512];
-    const long got = read(fd, buffer, sizeof(buffer) - 1);
+    long got = 0;
+    for (int i = 0; i < 400 && got == 0; ++i)
+        got = tcp_read(conn, buffer, sizeof(buffer) - 1);
     check("read a response back", got > 0);
     if (got > 0) {
         buffer[got] = '\0';
@@ -605,14 +608,14 @@ static void test_tcp(void)
      * rather than the connection simply going quiet. */
     long total = got > 0 ? got : 0;
     for (;;) {
-        const long more = read(fd, buffer, sizeof(buffer) - 1);
+        const long more = tcp_read(conn, buffer, sizeof(buffer) - 1);
         if (more <= 0)
             break;
         total += more;
     }
     check("the stream ended cleanly at the peer's FIN", total > (long)got);
 
-    close(fd);
+    tcp_close(conn);
 }
 
 /* Message passing between address spaces.

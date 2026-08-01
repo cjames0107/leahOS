@@ -164,6 +164,9 @@ static void arp_answer(const uint8_t* req)
 #define WAIT_PING 2
 #define WAIT_DNS  3     /* a name being looked up */
 #define WAIT_UDP  4     /* a datagram being waited for on a port */
+#define WAIT_CONNECT 5  /* a handshake that has not finished */
+#define WAIT_READ    6  /* a reader with nothing yet to read */
+#define WAIT_TCP_ARP 7  /* a connection that needs an address first */
 
 static struct pending {
     int used;
@@ -176,6 +179,10 @@ static struct pending {
 } g_pending[PENDING_MAX];
 
 static unsigned g_ticks;
+
+struct conn;
+static struct conn* conn_find(unsigned local_port);
+static void conn_close(struct conn* c);
 
 static struct pending* pending_add(int kind, int handle, unsigned ip, unsigned seq)
 {
@@ -211,6 +218,11 @@ static void expire_pending(void)
     for (int i = 0; i < PENDING_MAX; ++i) {
         if (!g_pending[i].used || g_ticks < g_pending[i].deadline)
             continue;
+        if (g_pending[i].kind == WAIT_CONNECT ||
+            g_pending[i].kind == WAIT_TCP_ARP) {
+            /* Nothing answered; do not leave a half-open connection behind. */
+            conn_close(conn_find(g_pending[i].ip));
+        }
         answer(&g_pending[i], -1, 0, 0);
     }
 }
@@ -470,6 +482,145 @@ static unsigned dns_answer(const uint8_t* p, unsigned length, unsigned* id_out)
     return 0;
 }
 
+/* --- TCP ------------------------------------------------------------------
+ *
+ * Enough of it to be a client: connect, send, receive, close, and retransmit
+ * what has not been acknowledged. Listening is not here because nothing in this
+ * system listens yet, and a half-written server side would be a thing to
+ * maintain rather than a thing that works.
+ *
+ * Only in-order data is accepted. A segment that arrives out of order is
+ * dropped and the sender will send it again, which is correct but slow -
+ * reassembly is the obvious next thing and is not needed to be right.
+ */
+
+#define TCP_FIN 0x01
+#define TCP_SYN 0x02
+#define TCP_RST 0x04
+#define TCP_PSH 0x08
+#define TCP_ACK 0x10
+
+#define IP_TCP 6
+
+#define TCP_CLOSED      0
+#define TCP_SYN_SENT    1
+#define TCP_ESTABLISHED 2
+#define TCP_FIN_WAIT    3
+#define TCP_DEAD        4
+
+#define CONN_MAX 8
+#define TCP_RX   8192
+#define TCP_SEG  1400       /* under the 1500-byte link with room for headers */
+
+static struct conn {
+    int used;
+    int state;
+    int peer_closed;
+    unsigned peer_ip, peer_port, local_port;
+    unsigned snd_next;              /* the next sequence number we will use  */
+    unsigned rcv_next;              /* the next one we expect from them      */
+    uint8_t  rx[TCP_RX];
+    unsigned rx_len;
+
+    /* One segment in flight at a time. A window of one is slow and is not
+     * wrong, and the alternative - a real send queue - is a lot of machinery
+     * to add before anything has complained about the speed. */
+    uint8_t  out[TCP_SEG];
+    unsigned out_len, out_seq;
+    unsigned out_deadline;
+    int      out_tries;
+} g_conn[CONN_MAX];
+
+static unsigned g_next_port = 40000;
+
+/* TCP's checksum covers a header that is not in the packet: the addresses, the
+ * protocol and the length, so that a segment delivered to the wrong host or
+ * the wrong protocol fails the check rather than being accepted. */
+static unsigned tcp_checksum(unsigned src, unsigned dst,
+                             const uint8_t* segment, unsigned length)
+{
+    unsigned sum = 0;
+    sum += (src >> 16) & 0xFFFF; sum += src & 0xFFFF;
+    sum += (dst >> 16) & 0xFFFF; sum += dst & 0xFFFF;
+    sum += IP_TCP;
+    sum += length;
+    for (unsigned i = 0; i + 1 < length; i += 2)
+        sum += rd16(segment + i);
+    if (length & 1)
+        sum += (unsigned)segment[length - 1] << 8;
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    return (~sum) & 0xFFFF;
+}
+
+static int tcp_send(struct conn* c, unsigned flags, unsigned seq,
+                    const uint8_t* payload, unsigned length)
+{
+    const uint8_t* mac = arp_lookup(
+        ((c->peer_ip ^ g_ip) & g_mask) ? g_gw : c->peer_ip);
+    if (mac == 0)
+        return -1;
+
+    static uint8_t f[1536];
+    memset(f, 0, 54);
+    memcpy(f, mac, 6);
+    memcpy(f + 6, g_mac, 6);
+    wr16(f + 12, ETH_IP);
+
+    uint8_t* ip_hdr = f + 14;
+    ip_hdr[0] = 0x45;
+    wr16(ip_hdr + 2, 40 + length);
+    ip_hdr[8] = 64;
+    ip_hdr[9] = IP_TCP;
+    wr32(ip_hdr + 12, g_ip);
+    wr32(ip_hdr + 16, c->peer_ip);
+    wr16(ip_hdr + 10, checksum(ip_hdr, 20));
+
+    uint8_t* t = ip_hdr + 20;
+    wr16(t + 0, c->local_port);
+    wr16(t + 2, c->peer_port);
+    wr32(t + 4, seq);
+    wr32(t + 8, c->rcv_next);
+    wr16(t + 12, (5u << 12) | flags);           /* five words of header */
+    wr16(t + 14, TCP_RX - c->rx_len);           /* what we can still take */
+    if (length > 0)
+        memcpy(t + 20, payload, length);
+    wr16(t + 16, tcp_checksum(g_ip, c->peer_ip, t, 20 + length));
+
+    return send_frame(f, 54 + length);
+}
+
+static struct conn* conn_find(unsigned local_port)
+{
+    for (int i = 0; i < CONN_MAX; ++i)
+        if (g_conn[i].used && g_conn[i].local_port == local_port)
+            return &g_conn[i];
+    return 0;
+}
+
+static void conn_close(struct conn* c)
+{
+    if (c != 0)
+        c->used = 0;
+}
+
+static void conn_retransmit(void)
+{
+    for (int i = 0; i < CONN_MAX; ++i) {
+        struct conn* c = &g_conn[i];
+        if (!c->used || c->out_len == 0 || g_ticks < c->out_deadline)
+            continue;
+        if (++c->out_tries > 5) {
+            /* Five goes and no acknowledgement. The other end is gone. */
+            c->state = TCP_DEAD;
+            c->out_len = 0;
+            continue;
+        }
+        tcp_send(c, TCP_ACK | TCP_PSH, c->out_seq, c->out, c->out_len);
+        c->out_deadline = g_ticks + 400 * (unsigned)c->out_tries;
+    }
+}
+
 /* --- everything that arrives ---------------------------------------------- */
 
 static unsigned src_ip_of(const uint8_t* ip_hdr) { return rd32(ip_hdr + 12); }
@@ -500,6 +651,13 @@ static void handle_frame(const uint8_t* f, unsigned len)
                     send_ping(p->ip, p->seq, f + 22);
                 } else if (p->kind == WAIT_DNS && p->name[0] != '\0') {
                     dns_ask(p->name, p->seq, f + 22);
+                } else if (p->kind == WAIT_TCP_ARP) {
+                    struct conn* c = conn_find(p->ip);
+                    if (c != 0) {
+                        tcp_send(c, TCP_SYN, c->snd_next, 0, 0);
+                        c->snd_next += 1;
+                    }
+                    p->kind = WAIT_CONNECT;
                 }
             }
         }
@@ -578,6 +736,97 @@ static void handle_frame(const uint8_t* f, unsigned len)
         return;
     }
 
+    if (ip_hdr[9] == IP_TCP) {
+        const uint8_t* t = ip_hdr + ihl;
+        if (len < 14 + ihl + 20)
+            return;
+        const unsigned dst_port = rd16(t + 2);
+        struct conn* c = conn_find(dst_port);
+        if (c == 0 || !c->used)
+            return;
+
+        const unsigned seq   = rd32(t + 4);
+        const unsigned ack   = rd32(t + 8);
+        const unsigned flags = rd16(t + 12) & 0x3F;
+        const unsigned off   = ((rd16(t + 12) >> 12) & 0xF) * 4;
+        const unsigned total = rd16(ip_hdr + 2);
+        const unsigned dlen  = (total > ihl + off) ? total - ihl - off : 0;
+        const uint8_t* body  = t + off;
+
+        if (flags & TCP_RST) {
+            /* Refused, or the other end has given up. Either way this
+             * connection is over and anyone waiting on it should be told so
+             * rather than waiting for a timeout. */
+            c->state = TCP_DEAD;
+            for (int i = 0; i < PENDING_MAX; ++i) {
+                struct pending* p = &g_pending[i];
+                if (p->used && p->ip == c->local_port &&
+                    (p->kind == WAIT_CONNECT || p->kind == WAIT_READ))
+                    answer(p, -1, 0, 0);
+            }
+            return;
+        }
+
+        if (c->state == TCP_SYN_SENT && (flags & TCP_SYN) && (flags & TCP_ACK)) {
+            c->rcv_next = seq + 1;
+            c->snd_next = ack;
+            c->state = TCP_ESTABLISHED;
+            tcp_send(c, TCP_ACK, c->snd_next, 0, 0);
+            for (int i = 0; i < PENDING_MAX; ++i) {
+                struct pending* p = &g_pending[i];
+                if (p->used && p->kind == WAIT_CONNECT && p->ip == c->local_port)
+                    answer(p, (long)c->local_port, 0, 0);
+            }
+            return;
+        }
+
+        /* Anything we sent that has now been acknowledged can stop being
+         * kept. Only the whole segment counts, because only whole segments
+         * are ever sent. */
+        if ((flags & TCP_ACK) && c->out_len > 0 &&
+            ack >= c->out_seq + c->out_len) {
+            c->out_len = 0;
+            c->out_tries = 0;
+        }
+
+        if (dlen > 0) {
+            if (seq == c->rcv_next) {
+                unsigned n = dlen;
+                if (n > TCP_RX - c->rx_len)
+                    n = TCP_RX - c->rx_len;
+                memcpy(c->rx + c->rx_len, body, n);
+                c->rx_len += n;
+                c->rcv_next += dlen;
+            }
+            /* Acknowledge either way: in order it moves things along, and out
+             * of order it tells the sender what we are actually waiting for. */
+            tcp_send(c, TCP_ACK, c->snd_next, 0, 0);
+        }
+
+        if (flags & TCP_FIN) {
+            c->rcv_next = seq + dlen + 1;
+            c->peer_closed = 1;
+            tcp_send(c, TCP_ACK, c->snd_next, 0, 0);
+        }
+
+        /* Whoever was waiting to read can have what arrived, or be told the
+         * stream has ended. */
+        for (int i = 0; i < PENDING_MAX; ++i) {
+            struct pending* p = &g_pending[i];
+            if (!p->used || p->kind != WAIT_READ || p->ip != c->local_port)
+                continue;
+            if (c->rx_len > 0) {
+                unsigned n = c->rx_len > 200 ? 200 : c->rx_len;
+                answer(p, (long)n, c->rx, n);
+                memmove(c->rx, c->rx + n, c->rx_len - n);
+                c->rx_len -= n;
+            } else if (c->peer_closed) {
+                answer(p, 0, 0, 0);     /* the end of the stream */
+            }
+        }
+        return;
+    }
+
     if (ip_hdr[9] != IP_ICMP)
         return;
 
@@ -632,8 +881,8 @@ int main(void)
         printf("netd: a stack is already running\n");
         return 1;
     }
-    printf("netd: up on %02x:%02x:%02x:%02x:%02x:%02x, asking for a lease\n",
-           g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
+    printf("netd[%d]: up on %02x:%02x:%02x:%02x:%02x:%02x, asking for a lease\n",
+           getpid(), g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
 
     g_dhcp_state = DHCP_OFFER;
     dhcp_send(DHCP_DISCOVER);
@@ -649,6 +898,7 @@ int main(void)
         }
 
         drain();
+        conn_retransmit();
         expire_pending();
 
         struct ipc_message m, r;
@@ -739,6 +989,103 @@ int main(void)
                 r.word[0] = -1;
                 ipc_reply(handle, &r);
             }
+        } else if (m.tag == NET_TCP_CONNECT) {
+            struct conn* c = 0;
+            for (int i = 0; i < CONN_MAX && c == 0; ++i)
+                if (!g_conn[i].used) c = &g_conn[i];
+            if (c == 0) {
+                r.word[0] = -1;
+                ipc_reply(handle, &r);
+            } else {
+                memset(c, 0, sizeof(*c));
+                c->used = 1;
+                c->peer_ip = (unsigned)m.word[0];
+                c->peer_port = (unsigned)m.word[1];
+                c->local_port = g_next_port++;
+                if (g_next_port > 60000) g_next_port = 40000;
+                /* An initial sequence number that is not always the same, so
+                 * a new connection cannot be confused with an old one on the
+                 * same pair of ports. */
+                c->snd_next = 0x5EED0000u + g_ticks * 7919u;
+                c->state = TCP_SYN_SENT;
+
+                const unsigned via = ((c->peer_ip ^ g_ip) & g_mask)
+                                         ? g_gw : c->peer_ip;
+                struct pending* p = pending_add(WAIT_CONNECT, handle,
+                                                c->local_port, 0);
+                if (p == 0) {
+                    c->used = 0;
+                    r.word[0] = -1;
+                    ipc_reply(handle, &r);
+                } else if (arp_lookup(via) != 0) {
+                    tcp_send(c, TCP_SYN, c->snd_next, 0, 0);
+                    c->snd_next += 1;
+                } else {
+                    /* The address has to be found before the handshake can
+                     * start. Remember which connection is waiting on it. */
+                    p->kind = WAIT_TCP_ARP;
+                    p->seq = via;
+                    arp_ask(via);
+                }
+            }
+        } else if (m.tag == NET_TCP_SEND) {
+            struct conn* c = conn_find((unsigned)m.word[0]);
+            if (c == 0 || c->state != TCP_ESTABLISHED || c->out_len > 0) {
+                /* Busy or gone. One segment in flight at a time, so a caller
+                 * offering more before the last was acknowledged is told to
+                 * wait rather than having it silently dropped. */
+                r.word[0] = (c != 0 && c->out_len > 0) ? 0 : -1;
+            } else {
+                /* Bounded by the message, not by the segment: m.bytes comes
+                 * from the caller and the data it describes is only ever
+                 * sizeof(m.data) long. */
+                unsigned n = m.bytes;
+                if (n > sizeof(m.data)) n = sizeof(m.data);
+                memcpy(c->out, m.data, n);
+                c->out_len = n;
+                c->out_seq = c->snd_next;
+                c->out_tries = 0;
+                c->out_deadline = g_ticks + 400;
+                tcp_send(c, TCP_ACK | TCP_PSH, c->snd_next, c->out, n);
+                c->snd_next += n;
+                r.word[0] = (long)n;
+            }
+            ipc_reply(handle, &r);
+        } else if (m.tag == NET_TCP_RECV) {
+            struct conn* c = conn_find((unsigned)m.word[0]);
+            if (c == 0 || c->state == TCP_DEAD) {
+                r.word[0] = -1;
+                ipc_reply(handle, &r);
+            } else if (c->rx_len > 0) {
+                unsigned n = c->rx_len > 200 ? 200 : c->rx_len;
+                memcpy(r.data, c->rx, n);
+                r.bytes = n;
+                r.word[0] = (long)n;
+                memmove(c->rx, c->rx + n, c->rx_len - n);
+                c->rx_len -= n;
+                ipc_reply(handle, &r);
+            } else if (c->peer_closed) {
+                r.word[0] = 0;
+                ipc_reply(handle, &r);
+            } else {
+                /* Nothing yet. Put the reader aside rather than answering
+                 * with nothing, which would turn every read into a poll. */
+                if (pending_add(WAIT_READ, handle, c->local_port, 0) == 0) {
+                    r.word[0] = -1;
+                    ipc_reply(handle, &r);
+                }
+            }
+        } else if (m.tag == NET_TCP_CLOSE) {
+            struct conn* c = conn_find((unsigned)m.word[0]);
+            if (c != 0) {
+                if (c->state == TCP_ESTABLISHED) {
+                    tcp_send(c, TCP_FIN | TCP_ACK, c->snd_next, 0, 0);
+                    c->snd_next += 1;
+                }
+                c->used = 0;
+            }
+            r.word[0] = 0;
+            ipc_reply(handle, &r);
         } else {
             r.word[0] = -1;
             ipc_reply(handle, &r);

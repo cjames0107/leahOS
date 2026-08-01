@@ -5,7 +5,6 @@
 #include <leah/gdt.hpp>
 #include <leah/interrupts.hpp>
 #include <leah/memory.hpp>
-#include <leah/net.hpp>
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
 #include <leah/shm.hpp>
@@ -823,12 +822,6 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             sys_futex(frame->rdi, frame->rsi, frame->rdx));
         break;
 
-    case Connect:
-        frame->rax = static_cast<u64>(
-            files::tcp_connect(static_cast<u32>(frame->rdi),
-                               static_cast<u16>(frame->rsi)));
-        break;
-
     case Login: {
         // The password is copied in and the account file is read here, so the
         // hash never enters a user process - which is what lets su work without
@@ -1162,65 +1155,6 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             files::rename(reinterpret_cast<const char*>(frame->rdi),
                           reinterpret_cast<const char*>(frame->rsi)));
         break;
-
-    case Netinfo: {
-        if (!net::available() || !user_range_ok(frame->rdi, sizeof(net::Info))) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        net::info(*reinterpret_cast<net::Info*>(frame->rdi));
-        frame->rax = 0;
-        break;
-    }
-
-    case Ping: {
-        if (!net::available()) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        u8 ttl = 0;
-        const bool ok = net::ping(static_cast<u32>(frame->rdi),
-                                  static_cast<u16>(frame->rsi), &ttl);
-        if (ok && frame->rdx != 0 && user_range_ok(frame->rdx, sizeof(u8)))
-            *reinterpret_cast<u8*>(frame->rdx) = ttl;
-        frame->rax = ok ? 1 : 0;
-        break;
-    }
-
-    case Arp: {
-        if (!net::available() || !user_range_ok(frame->rsi, net::kMacLength)) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        const bool ok = net::arp_resolve(static_cast<u32>(frame->rdi),
-                                         reinterpret_cast<u8*>(frame->rsi));
-        frame->rax = ok ? 0 : static_cast<u64>(-1);
-        break;
-    }
-
-    case Resolve: {
-        if (!net::available() || !user_range_ok(frame->rdi, 1) ||
-            !user_range_ok(frame->rsi, sizeof(u32))) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        // Copy the hostname into the kernel, bounded, so a missing terminator
-        // cannot walk off the end of the user mapping.
-        char host[256];
-        const char* src = reinterpret_cast<const char*>(frame->rdi);
-        usize n = 0;
-        while (n < sizeof(host) - 1 && src[n] != '\0')
-            ++n;
-        memcpy(host, src, n);
-        host[n] = '\0';
-
-        u32 ip = 0;
-        const bool ok = net::resolve(host, &ip);
-        if (ok)
-            *reinterpret_cast<u32*>(frame->rsi) = ip;
-        frame->rax = ok ? 0 : static_cast<u64>(-1);
-        break;
-    }
 
     case Fork:
         frame->rax = scheduler::fork_current(to_trap_frame(*frame));

@@ -22,4 +22,12 @@
 #define NET_UDP_SEND 6  /* w0 = IP, w1 = port, w2 = source port, data = payload */
 #define NET_UDP_RECV 7  /* w0 = source port to listen on -> data = a datagram   */
 
+/* TCP. A connection is named by a number rather than a file descriptor: a
+ * descriptor would mean the kernel knowing what a connection is, which is
+ * exactly what moving the stack out was for. */
+#define NET_TCP_CONNECT 8   /* w0 = IP, w1 = port -> w0 = connection, -1 if not */
+#define NET_TCP_SEND    9   /* w0 = connection, data -> w0 = bytes taken        */
+#define NET_TCP_RECV   10   /* w0 = connection -> data, w0 = length, 0 at end   */
+#define NET_TCP_CLOSE  11   /* w0 = connection                                  */
+
 #endif

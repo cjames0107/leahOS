@@ -29,8 +29,8 @@ int main(int argc, char** argv)
     printf("connecting to %s (%u.%u.%u.%u) port 80\n", host,
            (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 
-    const int fd = tcp_connect(ip, 80);
-    if (fd < 0) {
+    const int conn = tcp_connect(ip, 80);
+    if (conn < 0) {
         printf("fetch: connection refused or timed out\n");
         return 1;
     }
@@ -41,16 +41,16 @@ int main(int argc, char** argv)
     snprintf(request, sizeof(request),
              "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n",
              path, host);
-    if (write(fd, request, strlen(request)) < 0) {
+    if (tcp_write(conn, request, strlen(request)) < 0) {
         printf("fetch: could not send the request\n");
-        close(fd);
+        tcp_close(conn);
         return 1;
     }
 
     long total = 0;
     char buffer[1024];
     for (;;) {
-        const long got = read(fd, buffer, sizeof(buffer) - 1);
+        const long got = tcp_read(conn, buffer, sizeof(buffer) - 1);
         if (got <= 0)
             break;                  /* 0 is end of stream, -1 a dead connection */
         buffer[got] = '\0';
@@ -58,7 +58,7 @@ int main(int argc, char** argv)
         total += got;
     }
 
-    close(fd);
+    tcp_close(conn);
     printf("\n--- %ld bytes received ---\n", total);
     return total > 0 ? 0 : 1;
 }

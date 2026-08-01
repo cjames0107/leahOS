@@ -17,7 +17,6 @@ enum class Kind : u8 {
     ConsoleOut,     // fd 1, 2: the console
     File,
     Pipe,
-    Socket,         // a TCP connection; `pipe` carries the handle
 };
 
 struct Descriptor {
@@ -67,7 +66,6 @@ i64 chdir(const char* path);
 i64 getcwd(char* buffer, usize size);
 i64 mkdir(const char* path);
 i64 unlink(const char* path);
-i64 tcp_connect(u32 ip, u16 port);
 void set_console_echo(bool on);
 i64 chmod(const char* path, u16 mode);
 i64 chown(const char* path, u32 uid, u32 gid);
