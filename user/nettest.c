@@ -63,6 +63,23 @@ int main(void)
         }
     }
 
+    /* A name, which needs the resolver found and asked - two round trips
+     * behind one request. */
+    memset(&q, 0, sizeof(q));
+    memset(&a, 0, sizeof(a));
+    q.tag = NET_LOOKUP;
+    const char* host = "example.com";
+    unsigned n = 0;
+    while (host[n] != '\0') { q.data[n] = host[n]; ++n; }
+    q.bytes = n;
+    if (ipc_call(port, &q, &a) == 0 && a.word[0] > 0) {
+        const unsigned ip = (unsigned)a.word[0];
+        printf("nettest: %s is %u.%u.%u.%u\n", host,
+               (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+    } else {
+        printf("nettest: could not look up %s\n", host);
+    }
+
     memset(&q, 0, sizeof(q));
     memset(&a, 0, sizeof(a));
     q.tag = NET_STATS;

@@ -18,5 +18,8 @@
 #define NET_RESOLVE 2   /* w0 = IP -> data = 6 MAC bytes, w0 = 0 on success */
 #define NET_PING    3   /* w0 = IP, w1 = sequence -> w0 = TTL, -1 on timeout */
 #define NET_STATS   4   /* w0 = frames in, w1 = frames out, w2 = arp entries */
+#define NET_LOOKUP  5   /* data = a host name -> w0 = its address, -1 if none  */
+#define NET_UDP_SEND 6  /* w0 = IP, w1 = port, w2 = source port, data = payload */
+#define NET_UDP_RECV 7  /* w0 = source port to listen on -> data = a datagram   */
 
 #endif
