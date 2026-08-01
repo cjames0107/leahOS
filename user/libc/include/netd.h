@@ -30,4 +30,10 @@
 #define NET_TCP_RECV   10   /* w0 = connection -> data, w0 = length, 0 at end   */
 #define NET_TCP_CLOSE  11   /* w0 = connection                                  */
 
+/* IPv6. The addresses do not fit in a word, so they travel in data - which is
+ * the first thing about v6 that is different and not the last. */
+#define NET6_INFO   12  /* -> data = 16 bytes link-local + 16 global, w0 = have */
+#define NET6_NEIGH  13  /* data = 16-byte address -> data = 6-byte MAC          */
+#define NET6_PING   14  /* data = 16-byte address, w1 = seq -> w0 = hop limit   */
+
 #endif

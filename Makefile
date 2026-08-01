@@ -115,7 +115,7 @@ KERNEL_BIN := $(BUILD)/kernel.bin
 # path instead of asking which application does the job.
 BIN_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear \
                  ifconfig ping arp nslookup tests id chmod chown su fetch whoami \
-                 login useradd passwd stat gui wserver desktop tone ipctest e1000d nictest netd nettest
+                 login useradd passwd stat gui wserver desktop tone ipctest e1000d nictest netd nettest ping6
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman
 USER_PROGRAMS := $(BIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
@@ -267,7 +267,7 @@ QEMUFLAGS := -machine pc,hpet=on \
              -drive format=raw,file=$(SATA_IMG),if=none,id=satadisk \
              -device ide-hd,drive=satadisk,bus=sata0.0 \
              -m $(MEM) -smp $(CPUS) \
-             -netdev user,id=net0 -device e1000,netdev=net0 \
+             -netdev user,id=net0,ipv4=on,ipv6=on -device e1000,netdev=net0 \
              -no-reboot -no-shutdown \
              $(QEMU_EXTRA)
 

@@ -65,6 +65,7 @@ static void cfg_write(unsigned bus, unsigned slot, unsigned fn, unsigned off,
 #define CTRL_SLU   (1u << 6)
 #define RCTL_EN    (1u << 1)
 #define RCTL_UPE   (1u << 3)
+#define RCTL_MPE   (1u << 4)    /* accept multicast */
 #define RCTL_BAM   (1u << 15)
 #define RCTL_SECRC (1u << 26)
 #define TCTL_EN    (1u << 1)
@@ -206,10 +207,18 @@ static int bring_up(int which)
     reg_write(RDLEN, RX_COUNT * sizeof(struct rx_desc));
     reg_write(RDH, 0);
     reg_write(RDT, RX_COUNT - 1);
-    /* Promiscuous for unicast: on a point-to-point virtual link there is
-     * nothing to filter out, and QEMU's receive-address filter drops our own
-     * replies even with the address programmed. */
-    reg_write(RCTL, RCTL_EN | RCTL_UPE | RCTL_BAM | RCTL_SECRC);
+    /* Promiscuous for unicast and multicast both. Unicast because QEMU's
+     * receive-address filter drops our own replies even with the address
+     * programmed, and on a point-to-point link there is nothing to sift out
+     * anyway.
+     *
+     * Multicast because IPv6 has no broadcast. Every router advertisement,
+     * every neighbour solicitation - the whole of discovery - arrives on a
+     * multicast address, so a card set up the way IPv4 was happy with receives
+     * none of it and the machine simply never learns that a network is there.
+     * That is what happened: the link-local address formed, the solicitation
+     * went out, and nothing ever came back. */
+    reg_write(RCTL, RCTL_EN | RCTL_UPE | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
 
     for (int i = 0; i < TX_COUNT; ++i)
         g_tx[i].status = TX_DD;
@@ -244,11 +253,19 @@ static int transmit(const uint8_t* frame, unsigned length)
     return 0;
 }
 
-/* Move everything the card has finished receiving into the shared ring. */
+/* Move what the card has finished receiving into the shared ring.
+ *
+ * Bounded to one pass round the ring rather than "until there is nothing
+ * left". A link with enough traffic on it can refill the ring as fast as this
+ * empties it, and an unbounded loop then never returns - the driver stops
+ * answering its port and the machine appears to have hung, which is exactly
+ * what happened the moment multicast was let in. Whatever is left is still
+ * there next time round the loop, a millisecond later.
+ */
 static void pump_receive(void)
 {
     unsigned tail = reg_read(RDT);
-    for (;;) {
+    for (unsigned pass = 0; pass < RX_COUNT; ++pass) {
         const unsigned index = (tail + 1) % RX_COUNT;
         struct rx_desc* d = &g_rx[index];
         if ((d->status & RX_DD) == 0)

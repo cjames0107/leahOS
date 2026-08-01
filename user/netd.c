@@ -167,6 +167,8 @@ static void arp_answer(const uint8_t* req)
 #define WAIT_CONNECT 5  /* a handshake that has not finished */
 #define WAIT_READ    6  /* a reader with nothing yet to read */
 #define WAIT_TCP_ARP 7  /* a connection that needs an address first */
+#define WAIT_ND    8    /* a neighbour being solicited over IPv6 */
+#define WAIT_PING6 9    /* an ICMPv6 echo that has not come back */
 
 static struct pending {
     int used;
@@ -621,9 +623,368 @@ static void conn_retransmit(void)
     }
 }
 
+/* --- IPv6 -----------------------------------------------------------------
+ *
+ * Not a second address family bolted beside the first. IPv6 replaces the
+ * pieces underneath rather than adding to them: there is no ARP, because
+ * finding a neighbour is done with ICMP like everything else; there is no
+ * broadcast, because multicast covers it properly; and an address is not
+ * something a server hands out one at a time - the router says what the prefix
+ * is and every machine works out its own.
+ *
+ * Which is why this is more code than it looks like it should be. Half of it
+ * is the things IPv4 got by asking someone.
+ */
+
+#define ETH_IP6   0x86DD
+#define IP6_ICMP  58
+#define IP6_UDP   17
+#define IP6_TCP   6
+
+#define ND_ROUTER_SOLICIT   133
+#define ND_ROUTER_ADVERT    134
+#define ND_NEIGHBOUR_SOLICIT 135
+#define ND_NEIGHBOUR_ADVERT  136
+#define ICMP6_ECHO_REQUEST  128
+#define ICMP6_ECHO_REPLY    129
+
+struct in6 { uint8_t b[16]; };
+
+static struct in6 g_ll;             /* fe80::, always ours                   */
+static struct in6 g_global;         /* from the router's prefix, if there is one */
+static struct in6 g_router;         /* the router's own link-local address    */
+static int g_have_global, g_have_router;
+
+static int in6_equal(const struct in6* a, const struct in6* b)
+{
+    for (int i = 0; i < 16; ++i)
+        if (a->b[i] != b->b[i])
+            return 0;
+    return 1;
+}
+
+static int in6_zero(const struct in6* a)
+{
+    for (int i = 0; i < 16; ++i)
+        if (a->b[i])
+            return 0;
+    return 1;
+}
+
+/* An address a machine can work out for itself, from the one number it is
+ * born with. The MAC is split down the middle, ff:fe is dropped in between,
+ * and the bit that means "this was assigned by a manufacturer" is flipped to
+ * mean "and I am using it as an address". */
+static void eui64(struct in6* out, const uint8_t* mac)
+{
+    memset(out, 0, sizeof(*out));
+    out->b[0] = 0xFE; out->b[1] = 0x80;
+    out->b[8]  = mac[0] ^ 0x02;
+    out->b[9]  = mac[1];
+    out->b[10] = mac[2];
+    out->b[11] = 0xFF;
+    out->b[12] = 0xFE;
+    out->b[13] = mac[3];
+    out->b[14] = mac[4];
+    out->b[15] = mac[5];
+}
+
+/* Multicast has no broadcast to fall back on and does not need one: the last
+ * four bytes of the address are the last four of the Ethernet address, so a
+ * card can filter without understanding IPv6 at all. */
+static void multicast_mac(const struct in6* addr, uint8_t* mac)
+{
+    mac[0] = 0x33; mac[1] = 0x33;
+    mac[2] = addr->b[12]; mac[3] = addr->b[13];
+    mac[4] = addr->b[14]; mac[5] = addr->b[15];
+}
+
+/* ff02::1:ffXX:XXXX - the group every machine joins for its own address, so a
+ * neighbour solicitation reaches one machine rather than all of them. */
+static void solicited_node(const struct in6* target, struct in6* out)
+{
+    memset(out, 0, sizeof(*out));
+    out->b[0] = 0xFF; out->b[1] = 0x02;
+    out->b[11] = 0x01;
+    out->b[12] = 0xFF;
+    out->b[13] = target->b[13];
+    out->b[14] = target->b[14];
+    out->b[15] = target->b[15];
+}
+
+static void all_routers(struct in6* out)
+{
+    memset(out, 0, sizeof(*out));
+    out->b[0] = 0xFF; out->b[1] = 0x02; out->b[15] = 0x02;
+}
+
+/* The checksum is not optional here, and it covers a header that is not in the
+ * packet: the two addresses, the length and the protocol. */
+static unsigned icmp6_checksum(const struct in6* src, const struct in6* dst,
+                               unsigned next, const uint8_t* body, unsigned length)
+{
+    unsigned sum = 0;
+    for (int i = 0; i < 16; i += 2) sum += rd16(src->b + i);
+    for (int i = 0; i < 16; i += 2) sum += rd16(dst->b + i);
+    sum += (length >> 16) & 0xFFFF;
+    sum += length & 0xFFFF;
+    sum += next;
+    for (unsigned i = 0; i + 1 < length; i += 2)
+        sum += rd16(body + i);
+    if (length & 1)
+        sum += (unsigned)body[length - 1] << 8;
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    return (~sum) & 0xFFFF;
+}
+
+/* --- who is where, over IPv6 ---------------------------------------------- */
+
+#define NEIGH_MAX 16
+static struct { struct in6 addr; uint8_t mac[6]; int used; } g_neigh[NEIGH_MAX];
+
+static void neigh_learn(const struct in6* addr, const uint8_t* mac)
+{
+    for (int i = 0; i < NEIGH_MAX; ++i)
+        if (g_neigh[i].used && in6_equal(&g_neigh[i].addr, addr)) {
+            memcpy(g_neigh[i].mac, mac, 6);
+            return;
+        }
+    for (int i = 0; i < NEIGH_MAX; ++i)
+        if (!g_neigh[i].used) {
+            g_neigh[i].used = 1;
+            g_neigh[i].addr = *addr;
+            memcpy(g_neigh[i].mac, mac, 6);
+            return;
+        }
+}
+
+static const uint8_t* neigh_lookup(const struct in6* addr)
+{
+    for (int i = 0; i < NEIGH_MAX; ++i)
+        if (g_neigh[i].used && in6_equal(&g_neigh[i].addr, addr))
+            return g_neigh[i].mac;
+    return 0;
+}
+
+/* Build and send one IPv6 packet. `hop` is 255 for neighbour discovery, which
+ * is how the receiver knows the message cannot have come through a router and
+ * therefore really is from the local link. */
+static int send_ip6(const struct in6* src, const struct in6* dst,
+                    const uint8_t* dst_mac, unsigned next, unsigned hop,
+                    const uint8_t* body, unsigned length)
+{
+    static uint8_t f[1536];
+    if (length > sizeof(f) - 54)
+        return -1;
+    memcpy(f, dst_mac, 6);
+    memcpy(f + 6, g_mac, 6);
+    wr16(f + 12, ETH_IP6);
+
+    uint8_t* h = f + 14;
+    memset(h, 0, 40);
+    h[0] = 0x60;                    /* version six, nothing else set */
+    wr16(h + 4, length);
+    h[6] = (uint8_t)next;
+    h[7] = (uint8_t)hop;
+    memcpy(h + 8, src->b, 16);
+    memcpy(h + 24, dst->b, 16);
+    memcpy(h + 40, body, length);
+    return send_frame(f, 54 + length);
+}
+
+/* --- neighbour discovery, which is ARP's whole job done properly ---------- */
+
+static void nd_solicit(const struct in6* target)
+{
+    struct in6 dst;
+    solicited_node(target, &dst);
+    uint8_t mac[6];
+    multicast_mac(&dst, mac);
+
+    uint8_t body[32];
+    memset(body, 0, sizeof(body));
+    body[0] = ND_NEIGHBOUR_SOLICIT;
+    memcpy(body + 8, target->b, 16);
+    body[24] = 1;                   /* option: this is my link-layer address */
+    body[25] = 1;                   /* one eight-byte unit long */
+    memcpy(body + 26, g_mac, 6);
+    wr16(body + 2, icmp6_checksum(&g_ll, &dst, IP6_ICMP, body, sizeof(body)));
+    send_ip6(&g_ll, &dst, mac, IP6_ICMP, 255, body, sizeof(body));
+}
+
+static void nd_advertise(const struct in6* to, const uint8_t* to_mac,
+                         const struct in6* target)
+{
+    uint8_t body[32];
+    memset(body, 0, sizeof(body));
+    body[0] = ND_NEIGHBOUR_ADVERT;
+    body[4] = 0x60;                 /* solicited, and override what they had */
+    memcpy(body + 8, target->b, 16);
+    body[24] = 2;                   /* option: the address they asked about */
+    body[25] = 1;
+    memcpy(body + 26, g_mac, 6);
+    wr16(body + 2, icmp6_checksum(target, to, IP6_ICMP, body, sizeof(body)));
+    send_ip6(target, to, to_mac, IP6_ICMP, 255, body, sizeof(body));
+}
+
+static void rs_send(void)
+{
+    struct in6 dst;
+    all_routers(&dst);
+    uint8_t mac[6];
+    multicast_mac(&dst, mac);
+
+    uint8_t body[16];
+    memset(body, 0, sizeof(body));
+    body[0] = ND_ROUTER_SOLICIT;
+    body[8] = 1;                    /* option: my link-layer address */
+    body[9] = 1;
+    memcpy(body + 10, g_mac, 6);
+    wr16(body + 2, icmp6_checksum(&g_ll, &dst, IP6_ICMP, body, sizeof(body)));
+    send_ip6(&g_ll, &dst, mac, IP6_ICMP, 255, body, sizeof(body));
+}
+
+static void send_ping6(const struct in6* to, unsigned seq, const uint8_t* mac)
+{
+    uint8_t body[16];
+    memset(body, 0, sizeof(body));
+    body[0] = ICMP6_ECHO_REQUEST;
+    wr16(body + 4, 0x4C45);             /* an identifier: "LE" */
+    wr16(body + 6, seq);
+    for (int i = 0; i < 8; ++i)
+        body[8 + i] = (uint8_t)('a' + i);
+    const struct in6* me = g_have_global ? &g_global : &g_ll;
+    wr16(body + 2, icmp6_checksum(me, to, IP6_ICMP, body, sizeof(body)));
+    send_ip6(me, to, mac, IP6_ICMP, 64, body, sizeof(body));
+}
+
 /* --- everything that arrives ---------------------------------------------- */
 
 static unsigned src_ip_of(const uint8_t* ip_hdr) { return rd32(ip_hdr + 12); }
+
+/* Walk the options that follow a discovery message. They are all
+ * type-length-value with the length in eight-byte units, which is the one
+ * thing about IPv6 options that never varies. */
+static const uint8_t* nd_option(const uint8_t* body, unsigned length,
+                                unsigned at, unsigned want, unsigned* len_out)
+{
+    while (at + 2 <= length) {
+        const unsigned type = body[at];
+        const unsigned units = body[at + 1];
+        if (units == 0 || at + units * 8 > length)
+            return 0;
+        if (type == want) {
+            if (len_out != 0) *len_out = units * 8;
+            return body + at;
+        }
+        at += units * 8;
+    }
+    return 0;
+}
+
+static void handle_icmp6(const uint8_t* f, unsigned len, const uint8_t* h,
+                         const uint8_t* body, unsigned length)
+{
+    struct in6 src, dst;
+    memcpy(src.b, h + 8, 16);
+    memcpy(dst.b, h + 24, 16);
+    const unsigned type = body[0];
+
+    if (type == ND_NEIGHBOUR_SOLICIT && length >= 24) {
+        struct in6 target;
+        memcpy(target.b, body + 8, 16);
+        /* Only answer for addresses that are actually ours. */
+        if (!in6_equal(&target, &g_ll) &&
+            !(g_have_global && in6_equal(&target, &g_global)))
+            return;
+        unsigned olen = 0;
+        const uint8_t* opt = nd_option(body, length, 24, 1, &olen);
+        if (opt != 0 && olen >= 8)
+            neigh_learn(&src, opt + 2);
+        /* A solicitation from the unspecified address is duplicate address
+         * detection, and is answered to the all-nodes group rather than to a
+         * sender that does not have an address yet. */
+        const uint8_t* to_mac = in6_zero(&src) ? 0 : neigh_lookup(&src);
+        if (to_mac == 0)
+            to_mac = f + 6;         /* whoever sent it, whatever they claimed */
+        nd_advertise(&src, to_mac, &target);
+        return;
+    }
+
+    if (type == ND_NEIGHBOUR_ADVERT && length >= 24) {
+        struct in6 target;
+        memcpy(target.b, body + 8, 16);
+        unsigned olen = 0;
+        const uint8_t* opt = nd_option(body, length, 24, 2, &olen);
+        neigh_learn(&target, (opt != 0 && olen >= 8) ? opt + 2 : f + 6);
+        for (int i = 0; i < PENDING_MAX; ++i) {
+            struct pending* p = &g_pending[i];
+            if (!p->used)
+                continue;
+            if (p->kind == WAIT_ND && in6_equal((struct in6*)p->name, &target)) {
+                answer(p, 0, neigh_lookup(&target), 6);
+            } else if (p->kind == WAIT_PING6) {
+                /* It was waiting for whoever could carry it. */
+                struct in6 to;
+                memcpy(to.b, p->name, 16);
+                const uint8_t* mac = neigh_lookup(&target);
+                if (mac != 0)
+                    send_ping6(&to, p->seq, mac);
+            }
+        }
+        return;
+    }
+
+    if (type == ND_ROUTER_ADVERT && length >= 16) {
+        g_router = src;
+        g_have_router = 1;
+        neigh_learn(&src, f + 6);
+        unsigned olen = 0;
+        const uint8_t* opt = nd_option(body, length, 16, 1, &olen);
+        if (opt != 0 && olen >= 8)
+            neigh_learn(&src, opt + 2);
+
+        /* The prefix, and then the address worked out from it. This is what
+         * replaces asking a server for one: the router says what the network
+         * is and every machine fills in its own half. */
+        unsigned plen = 0;
+        const uint8_t* prefix = nd_option(body, length, 16, 3, &plen);
+        if (prefix != 0 && plen >= 32 && prefix[2] == 64 && !g_have_global) {
+            eui64(&g_global, g_mac);
+            memcpy(g_global.b, prefix + 16, 8);      /* the router's half */
+            g_have_global = 1;
+            printf("netd: address %x:%x::%x:%x:%x:%x from the router\n",
+                   rd16(g_global.b), rd16(g_global.b + 2),
+                   rd16(g_global.b + 8), rd16(g_global.b + 10),
+                   rd16(g_global.b + 12), rd16(g_global.b + 14));
+        }
+        return;
+    }
+
+    if (type == ICMP6_ECHO_REQUEST && length >= 8) {
+        static uint8_t reply[1280];
+        const unsigned n = length > sizeof(reply) ? (unsigned)sizeof(reply) : length;
+        memcpy(reply, body, n);
+        reply[0] = ICMP6_ECHO_REPLY;
+        wr16(reply + 2, 0);
+        const struct in6* me = in6_equal(&dst, &g_ll) ? &g_ll : &g_global;
+        wr16(reply + 2, icmp6_checksum(me, &src, IP6_ICMP, reply, n));
+        const uint8_t* mac = neigh_lookup(&src);
+        send_ip6(me, &src, mac != 0 ? mac : f + 6, IP6_ICMP, 64, reply, n);
+        return;
+    }
+
+    if (type == ICMP6_ECHO_REPLY && length >= 8) {
+        const unsigned seq = rd16(body + 6);
+        for (int i = 0; i < PENDING_MAX; ++i) {
+            struct pending* p = &g_pending[i];
+            if (p->used && p->kind == WAIT_PING6 && p->seq == seq)
+                answer(p, (long)h[7], 0, 0);        /* the hop limit it had */
+        }
+    }
+    (void)len;
+}
 
 static void handle_frame(const uint8_t* f, unsigned len)
 {
@@ -660,6 +1021,18 @@ static void handle_frame(const uint8_t* f, unsigned len)
                     p->kind = WAIT_CONNECT;
                 }
             }
+        }
+        return;
+    }
+
+    if (type == ETH_IP6 && len >= 14 + 40) {
+        const uint8_t* h = f + 14;
+        const unsigned payload = rd16(h + 4);
+        if (h[6] == IP6_ICMP && len >= 14 + 40 + 8) {
+            unsigned n = payload;
+            if (n > len - 14 - 40)
+                n = len - 14 - 40;
+            handle_icmp6(f, len, h, h + 40, n);
         }
         return;
     }
@@ -884,6 +1257,14 @@ int main(void)
     printf("netd[%d]: up on %02x:%02x:%02x:%02x:%02x:%02x, asking for a lease\n",
            getpid(), g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
 
+    /* IPv6 needs no server to hand out an address, only a router willing to
+     * say what the network is - so this asks, and works out the rest itself. */
+    eui64(&g_ll, g_mac);
+    printf("netd: link-local fe80::%x:%x:%x:%x\n",
+           rd16(g_ll.b + 8), rd16(g_ll.b + 10),
+           rd16(g_ll.b + 12), rd16(g_ll.b + 14));
+    rs_send();
+
     g_dhcp_state = DHCP_OFFER;
     dhcp_send(DHCP_DISCOVER);
     unsigned give_up = 3000;            /* three seconds of ticks */
@@ -1086,6 +1467,45 @@ int main(void)
             }
             r.word[0] = 0;
             ipc_reply(handle, &r);
+        } else if (m.tag == NET6_INFO) {
+            memcpy(r.data, g_ll.b, 16);
+            memcpy(r.data + 16, g_global.b, 16);
+            r.bytes = 32;
+            r.word[0] = g_have_global;
+            r.word[1] = g_have_router;
+            ipc_reply(handle, &r);
+        } else if (m.tag == NET6_NEIGH || m.tag == NET6_PING) {
+            struct in6 target;
+            memcpy(target.b, m.data, 16);
+            /* Off the link, ask the router - which is found the same way any
+             * other neighbour is, because it is one. */
+            struct in6 via = target;
+            if (target.b[0] != 0xFE && g_have_router)
+                via = g_router;
+            const uint8_t* mac = neigh_lookup(&via);
+
+            if (m.tag == NET6_NEIGH && mac != 0) {
+                memcpy(r.data, mac, 6);
+                r.bytes = 6;
+                r.word[0] = 0;
+                ipc_reply(handle, &r);
+            } else {
+                struct pending* p = pending_add(
+                    m.tag == NET6_PING ? WAIT_PING6 : WAIT_ND, handle, 0,
+                    (unsigned)m.word[1]);
+                if (p == 0) {
+                    r.word[0] = -1;
+                    ipc_reply(handle, &r);
+                } else {
+                    /* The address being waited on rides in the same field a
+                     * host name would; both are just bytes to remember. */
+                    memcpy(p->name, m.tag == NET6_PING ? target.b : via.b, 16);
+                    if (mac != 0)
+                        send_ping6(&target, (unsigned)m.word[1], mac);
+                    else
+                        nd_solicit(&via);
+                }
+            }
         } else {
             r.word[0] = -1;
             ipc_reply(handle, &r);
