@@ -40,6 +40,7 @@ int main(void)
 {
     start("/BIN/E1000D.ELF", "e1000d", IPC_PORT_NIC);
     start("/BIN/NETD.ELF", "netd", IPC_PORT_NET);
+    start("/BIN/AUDIOD.ELF", "audiod", IPC_PORT_AUDIO);
 
     // login owns the console from here: it authenticates, starts a shell as
     // whoever logged in, and comes back to its prompt when that shell exits.

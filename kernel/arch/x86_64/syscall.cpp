@@ -12,7 +12,6 @@
 #include <leah/mouse.hpp>
 #include <leah/percpu.hpp>
 #include <leah/keyboard.hpp>
-#include <leah/ac97.hpp>
 #include <leah/ipc.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
@@ -494,62 +493,6 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         }
         frame->rax = scheduler::cpu_stats(
             reinterpret_cast<scheduler::CpuStat*>(frame->rdi), max);
-        break;
-    }
-
-    case AudioPlay: {
-        const u64 count = frame->rsi;
-        // Samples are 16-bit, so the byte length is twice the count - and the
-        // multiplication is where a caller could ask for something that wraps.
-        if (count > (1u << 20) || !user_range_ok(frame->rdi, count * 2)) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        frame->rax = audio::play(reinterpret_cast<const i16*>(frame->rdi),
-                                 static_cast<usize>(count));
-        break;
-    }
-
-    case AudioSpace:
-        frame->rax = audio::space();
-        break;
-
-    case AudioVolume:
-        // A signed argument, so one call both reads and writes: asking for the
-        // volume and setting it are the same question from opposite ends.
-        if (static_cast<i64>(frame->rdi) >= 0)
-            audio::set_volume(static_cast<u32>(frame->rdi));
-        frame->rax = audio::volume();
-        break;
-
-    case AudioStop:
-        audio::stop();
-        frame->rax = 0;
-        break;
-
-    case AudioFlush:
-        audio::flush();
-        frame->rax = 0;
-        break;
-
-    case AudioInfo: {
-        // { present, rate, channels, name[32] } - laid out to match
-        // struct audio_info in <audio.h>.
-        struct Info { u32 present; u32 rate; u32 channels; char name[32]; };
-        if (!user_range_ok(frame->rdi, sizeof(Info))) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        auto* out = reinterpret_cast<Info*>(frame->rdi);
-        out->present  = audio::available() ? 1u : 0u;
-        out->rate     = audio::kSampleRate;
-        out->channels = audio::kChannels;
-        const char* n = audio::device_name();
-        u32 i = 0;
-        for (; n[i] != '\0' && i < sizeof(out->name) - 1; ++i)
-            out->name[i] = n[i];
-        out->name[i] = '\0';
-        frame->rax = 0;
         break;
     }
 

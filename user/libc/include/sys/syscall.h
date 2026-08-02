@@ -57,12 +57,6 @@
 #define SYS_proclist   57
 #define SYS_meminfo    58
 #define SYS_cpuinfo    59
-#define SYS_audioplay   60
-#define SYS_audiospace  61
-#define SYS_audiovol    62
-#define SYS_audiostop   63
-#define SYS_audioflush  64
-#define SYS_audioinfo   65
 #define SYS_portcreate  66
 #define SYS_portopen    67
 #define SYS_portdestroy 68

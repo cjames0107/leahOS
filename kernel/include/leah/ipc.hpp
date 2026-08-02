@@ -42,6 +42,7 @@ constexpr u32 kPortNet   = 1;
 constexpr u32 kPortVfs   = 2;
 constexpr u32 kPortBlock = 3;
 constexpr u32 kPortNic   = 4;   // the raw Ethernet device
+constexpr u32 kPortAudio = 5;
 
 void init();
 
