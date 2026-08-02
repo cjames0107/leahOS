@@ -731,6 +731,58 @@ static int mount(void)
 }
 
 
+/* --- the caller's own transfer buffer ----------------------------------------
+ *
+ * There used to be one shared segment, and one was enough because there used to
+ * be one client: the kernel, holding its big lock across the whole operation.
+ * With every process a client that breaks, and quietly - the reply is what
+ * unblocks the caller, so between replying to one and it copying its bytes out,
+ * another can arrive and overwrite them. Nobody would see an error; they would
+ * see the wrong file's contents.
+ *
+ * So the buffer belongs to whoever asked. The message says which segment to use
+ * - the field was always there for this - and vfsd maps it on demand and keeps
+ * the last few, because a process that reads one block usually reads the next.
+ * The global segment stays for the kernel, which still loads programs through
+ * here and has no shm of its own to offer. */
+#define BUFCACHE 8
+
+static struct {
+    unsigned key;
+    void*    mapped;
+} g_bufs[BUFCACHE];
+static unsigned g_buf_next;
+
+static struct vfs_shared* g_global;      /* the kernel's, by the well-known key */
+
+static struct vfs_shared* transfer_buffer(unsigned key)
+{
+    unsigned i;
+    int id;
+    void* p;
+
+    if (key == 0 || key == VFS_SHM_KEY)
+        return g_global;
+
+    for (i = 0; i < BUFCACHE; ++i)
+        if (g_bufs[i].key == key && g_bufs[i].mapped != 0)
+            return (struct vfs_shared*)g_bufs[i].mapped;
+
+    id = shm_open(key, sizeof(struct vfs_shared), 0);
+    if (id < 0)
+        return g_global;                 /* no segment offered; do no harm */
+    p = shm_map(id);
+    if (p == 0)
+        return g_global;
+
+    /* Round-robin eviction. Forgetting a mapping only costs the next mapping;
+     * it cannot lose data, because nothing is cached in it. */
+    g_bufs[g_buf_next].key = key;
+    g_bufs[g_buf_next].mapped = p;
+    g_buf_next = (g_buf_next + 1) % BUFCACHE;
+    return (struct vfs_shared*)p;
+}
+
 /* --- who is asking, and whether they may -------------------------------------
  *
  * This used to be the kernel's job, back when the kernel held the file
@@ -790,8 +842,8 @@ int main(void)
     }
 
     const int vshm = shm_open(VFS_SHM_KEY, sizeof(struct vfs_shared), SHM_PUBLIC);
-    struct vfs_shared* out = vshm < 0 ? 0 : (struct vfs_shared*)shm_map(vshm);
-    if (out == 0) {
+    g_global = vshm < 0 ? 0 : (struct vfs_shared*)shm_map(vshm);
+    if (g_global == 0) {
         printf("vfsd: cannot publish a transfer buffer\n");
         return 1;
     }
@@ -813,8 +865,13 @@ int main(void)
         struct ipc_message m, r;
         unsigned from = 0;
         const int handle = ipc_recv(port, &m, &from);
+        struct vfs_shared* out;
         if (handle < 0)
-            return 1;
+            continue;           /* a failed receive is not a reason to die */
+
+        /* Whose buffer this exchange uses. Chosen per request, because the
+         * caller changes per request. */
+        out = transfer_buffer((unsigned)m.shm_key);
 
         memset(&r, 0, sizeof(r));
         r.tag = m.tag;
