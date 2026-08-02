@@ -15,7 +15,6 @@
 #include <leah/mouse.hpp>
 #include <leah/ipc.hpp>
 #include <leah/panic.hpp>
-#include <leah/pci.hpp>
 #include <leah/percpu.hpp>
 #include <leah/pic.hpp>
 #include <leah/pmm.hpp>
@@ -93,20 +92,6 @@ void print_memory(const boot::Info& info)
     console::printf("    page tables at %p, heap %llu KiB\n",
                     reinterpret_cast<void*>(vmm::kernel_page_table()),
                     static_cast<u64>(heap::heap_size()) / 1024);
-}
-
-void print_pci()
-{
-    console::set_color(console::Color::White);
-    console::printf("\n  PCI  %llu devices\n", static_cast<u64>(pci::device_count()));
-    console::set_color(console::Color::LightGray);
-
-    for (usize i = 0; i < pci::device_count(); ++i) {
-        const pci::Device& d = pci::device_at(i);
-        console::printf("    %02x:%02x.%u  %04x:%04x  %s\n",
-                        d.bus, d.slot, d.function, d.vendor_id, d.device_id,
-                        pci::class_name(d.class_code, d.subclass));
-    }
 }
 
 // Exercises split, reuse and coalescing rather than just proving that a single
@@ -656,8 +641,10 @@ extern "C" void kernel_main(const boot::Info* boot_info)
         step("no PS/2 controller; input comes from usbd");
     }
 
-    pci::enumerate();
-    step("PCI bus enumerated");
+    /* No PCI enumeration either. Every driver scans config space for itself,
+     * because a driver must not trust someone else's table about hardware it
+     * is about to drive - and once they all did that, the kernel's copy was
+     * only ever printed. It is `lspci` now. */
 
     /* No disk driver in here any more. The drive is blockd's, and two drivers
      * on one channel is one command arriving in the middle of another's
@@ -697,7 +684,6 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     step("userland: init forked, exec'd and waited on a child");
 
     print_memory(*info);
-    print_pci();
 
     echo_loop();
 }
