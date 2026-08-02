@@ -28,10 +28,19 @@ context_switch:
     push r13
     push r14
     push r15
+    ; A stamp identifying *this* saved frame, passed in RDX. The scheduler
+    ; records the same value on the task, so a task about to be resumed can be
+    ; checked against the frame it claims to own. A stale kernel_rsp - one that
+    ; points at a frame saved earlier, or at one already consumed - carries an
+    ; older stamp and is caught at the switch, where the frame that set it up
+    ; still exists, rather than at the indirect jump through whatever garbage
+    ; got restored into a callee-saved register.
+    push rdx
 
     mov [rdi], rsp          ; park the outgoing thread's stack pointer
     mov rsp, rsi            ; adopt the incoming thread's stack
 
+    add rsp, 8              ; the stamp; the scheduler has already checked it
     pop r15
     pop r14
     pop r13

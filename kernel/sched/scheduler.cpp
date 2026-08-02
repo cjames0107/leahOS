@@ -15,7 +15,7 @@
 #include <leah/string.hpp>
 
 // Implemented in context.asm, user_entry.asm and syscall_entry.asm.
-extern "C" void context_switch(u64* save_rsp, u64 load_rsp);
+extern "C" void context_switch(u64* save_rsp, u64 load_rsp, u64 stamp);
 extern "C" void user_return();
 // The first-entry-to-ring-3 stub: releases the displaced task, then falls into
 // user_return. See user_entry.asm.
@@ -81,6 +81,9 @@ struct Task {
     // between: its kernel_rsp is still stale, and resuming from it would put
     // two processors on one kernel stack.
     volatile bool on_cpu;
+    // The stamp on the switch frame this task's kernel_rsp points at. Set when
+    // the frame is saved (or fabricated) and checked before it is resumed.
+    u64 resume_stamp;
     // Tick at which a sleeping task becomes runnable again, or 0 if it is not
     // sleeping. Checked on every timer tick.
     u64   wake_tick;
@@ -241,6 +244,15 @@ void finish_switch();
     exit_current(0);
 }
 
+// Stamps only have to be unique, never reused, and never zero - a fresh frame
+// must not accidentally match a stale one, and zero is what an uninitialised
+// slot reads as.
+u64 next_stamp()
+{
+    static u64 counter = 0;
+    return __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED) | (1ull << 63);
+}
+
 u32 pick_next()
 {
     // Any Ready task other than idle, round-robin from the current one.
@@ -367,8 +379,31 @@ void switch_to(u32 next_index)
         panic("scheduler: kernel stack overflow");
     }
 
+    /* The six callee-saved registers sit between the stamp and the return
+     * address, and there is nothing to check them against: a callee-saved
+     * register may hold any integer at all, so "is this value sane" has no
+     * answer. Both times this went wrong the restored r12 was a perfectly
+     * plausible address - once a user stack, once this task's own kernel stack
+     * - and the kernel then called through it. What is checkable is not the
+     * values but whether the frame they came from is the one this task is
+     * supposed to be resuming, which is what the stamp says. */
+    if (next->kernel_rsp != 0) {
+        const u64 stamp = *reinterpret_cast<const u64*>(next->kernel_rsp);
+        if (stamp != next->resume_stamp) {
+            console::printf("\n  scheduler: %s (slot %u, pid %u) would resume "
+                            "from a frame stamped %llx, expected %llx, "
+                            "rsp %p\n",
+                            next->name != nullptr ? next->name : "?",
+                            next_index, next->pid,
+                            static_cast<u64>(stamp),
+                            static_cast<u64>(next->resume_stamp),
+                            reinterpret_cast<void*>(next->kernel_rsp));
+            panic("scheduler: a task's saved registers are not its own");
+        }
+    }
+
     {
-        const u64 resume = *reinterpret_cast<const u64*>(next->kernel_rsp + 48);
+        const u64 resume = *reinterpret_cast<const u64*>(next->kernel_rsp + 56);
         if (resume < 0xFFFFFFFF80000000ull) {
             console::printf("\n  scheduler: %s (slot %u, pid %u) would resume "
                             "at %p from rsp %p\n",
@@ -380,7 +415,10 @@ void switch_to(u32 next_index)
         }
     }
 
-    context_switch(&prev->kernel_rsp, next->kernel_rsp);
+    /* Stamped before the switch, because context_switch is what writes it onto
+     * the outgoing stack and the task has to agree with what lands there. */
+    prev->resume_stamp = next_stamp();
+    context_switch(&prev->kernel_rsp, next->kernel_rsp, prev->resume_stamp);
 
     // Reached as the *incoming* task, on whichever CPU resumed it.
     finish_switch();
@@ -403,14 +441,20 @@ void fabricate(Task* task, u64 ret_target, const void* frame_bytes, usize frame_
         sp -= 8;
     }
 
+    /* Laid out the way context_switch pops it: rbx deepest, then rbp, r12,
+     * r13, r14, r15, and the stamp last so it ends up at the saved rsp. The
+     * labels here used to run the other way, which was harmless only because
+     * every value is zero. */
     auto* stack = reinterpret_cast<u64*>(sp);
     *--stack = ret_target;      // context_switch's RET lands here
-    *--stack = 0;               // r15
-    *--stack = 0;               // r14
-    *--stack = 0;               // r13
-    *--stack = 0;               // r12
-    *--stack = 0;               // rbp
     *--stack = 0;               // rbx
+    *--stack = 0;               // rbp
+    *--stack = 0;               // r12
+    *--stack = 0;               // r13
+    *--stack = 0;               // r14
+    *--stack = 0;               // r15
+    task->resume_stamp = next_stamp();
+    *--stack = task->resume_stamp;
     task->kernel_rsp = reinterpret_cast<u64>(stack);
 }
 
