@@ -106,6 +106,30 @@ void stop_other_cpus()
         describe_page_fault(frame);
     print_registers(frame);
     console::set_color(console::Color::DarkGray);
+
+    /* Whatever on the stack looks like a kernel return address.
+     *
+     * When the fault is a jump to nonsense, the register dump says where it
+     * went and nothing about where it came from - and the code that made the
+     * jump has already returned. The stack still has the frames above it, so
+     * anything in the kernel's text range is a caller, and printing them names
+     * the path. Not a real unwind: no frame pointers, so this is a sieve, and
+     * a stale value that happens to look like an address will be in the list
+     * too. It still beats guessing.
+     */
+    {
+        const u64* sp = reinterpret_cast<const u64*>(frame.rsp & ~7ull);
+        console::write("\n  kernel addresses on the stack:\n");
+        u32 shown = 0;
+        for (u32 i = 0; i < 64 && shown < 8; ++i) {
+            const u64 value = sp[i];
+            if (value >= 0xFFFFFFFF80000000ull && value < 0xFFFFFFFF80800000ull) {
+                console::printf("    +%03u  %016llx\n", i * 8, value);
+                ++shown;
+            }
+        }
+    }
+
     console::write("\n  halted.\n");
     cpu::halt_forever();
 }

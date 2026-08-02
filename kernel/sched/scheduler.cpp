@@ -326,6 +326,26 @@ void switch_to(u32 next_index)
     prev->bkl_depth = sync::bkl::depth();
     sync::bkl::handoff(next->bkl_depth);
 
+    /* The incoming task's saved return address, which context_switch is about
+     * to RET to. It sits past the six callee-saved registers the switch pops.
+     *
+     * Checked because when it is wrong the failure is a jump to nonsense with
+     * nothing left on the stack to say who did it: the register dump names
+     * where it went and the frame that set it up is already gone. Catching it
+     * here names the task instead. */
+    {
+        const u64 resume = *reinterpret_cast<const u64*>(next->kernel_rsp + 48);
+        if (resume < 0xFFFFFFFF80000000ull) {
+            console::printf("\n  scheduler: %s (slot %u, pid %u) would resume "
+                            "at %p from rsp %p\n",
+                            next->name != nullptr ? next->name : "?",
+                            next_index, next->pid,
+                            reinterpret_cast<void*>(resume),
+                            reinterpret_cast<void*>(next->kernel_rsp));
+            panic("scheduler: a task's saved return address is not kernel code");
+        }
+    }
+
     context_switch(&prev->kernel_rsp, next->kernel_rsp);
 
     // Reached as the *incoming* task, on whichever CPU resumed it.
@@ -799,6 +819,27 @@ i64 wait_child(i32* status)
             // would make thread_join wait for a process that is still running.
             if (t.state == State::Zombie && t.tgid == t.pid &&
                 group_still_alive(&t))
+                continue;
+
+            // A zombie is not finished with its kernel stack until the CPU it
+            // was running on has actually switched off it.
+            //
+            // exit_current marks the task Zombie and then calls switch_to, and
+            // between those two the processor is still executing on that stack
+            // - pushing, popping and finally running context_switch itself.
+            // Freeing it in that window hands the memory back to the heap while
+            // a CPU is still using it, and the next thing to be allocated (a
+            // kernel stack, an I/O bitmap, a file buffer) is written straight
+            // over a live saved frame. What comes out the other side is an
+            // IRETQ to whatever now occupies the slot the return address was
+            // in, which is why the faulting address always looked like a
+            // pointer into the kernel heap.
+            //
+            // on_cpu is cleared by the *next* task's finish_switch, which is
+            // the first moment the stack is genuinely nobody's. Waiting for it
+            // is a handful of microseconds at most.
+            if (t.state == State::Zombie &&
+                __atomic_load_n(&t.on_cpu, __ATOMIC_ACQUIRE))
                 continue;
 
             if (t.state == State::Zombie) {

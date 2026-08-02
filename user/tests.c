@@ -789,6 +789,54 @@ static void test_driver_abi(void)
     check("an interrupt line can be claimed", irq_listen(1) == 0);
 }
 
+/* Exit and reap, over and over.
+ *
+ * This is aimed at one window: a task marks itself a zombie and only then calls
+ * the context switch, so for a few instructions a processor is still running on
+ * a kernel stack that the parent is already entitled to free. A parent blocked
+ * in wait() is woken by the exit itself, so on a second processor it can be
+ * reaping while the first is still on the stack.
+ *
+ * Two hundred rounds because the window is a few instructions wide: it is not
+ * a race that shows up once.
+ */
+static void test_exit_churn(void)
+{
+    printf("exit and reap:\n");
+
+    int reaped = 0;
+    for (int i = 0; i < 200; ++i) {
+        const int pid = fork();
+        if (pid == 0)
+            exit(i & 0x7F);
+        if (pid < 0)
+            break;
+        int status = 0;
+        if (wait(&status) == pid && status == (i & 0x7F))
+            ++reaped;
+    }
+    check("two hundred children exit and are reaped with the right status",
+          reaped == 200);
+
+    /* And with several alive at once, so the reaps interleave with exits
+     * rather than following them one at a time. */
+    int started = 0;
+    for (int i = 0; i < 8; ++i) {
+        const int pid = fork();
+        if (pid == 0) {
+            msleep(i);          /* stagger them into each other */
+            exit(0);
+        }
+        if (pid > 0)
+            ++started;
+    }
+    int collected = 0;
+    for (int i = 0; i < started; ++i)
+        if (wait(0) > 0)
+            ++collected;
+    check("eight overlapping children are all collected", collected == started);
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -803,6 +851,7 @@ int main(void)
     test_tcp();
     test_ipc();
     test_driver_abi();
+    test_exit_churn();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }
