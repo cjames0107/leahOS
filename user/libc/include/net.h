@@ -46,4 +46,12 @@ long tcp_read(int connection, void* buffer, unsigned long bytes);
 long tcp_write(int connection, const void* buffer, unsigned long bytes);
 void tcp_close(int connection);
 
+/* The same over IPv6. A connection made this way is read, written and closed
+ * with the three calls above: what carried the handshake stops mattering the
+ * moment it has finished, which is the whole reason TCP is not two protocols.
+ *
+ * resolve6 asks for AAAA rather than A and writes sixteen bytes. */
+int tcp_connect6(const unsigned char address[16], uint16_t port);
+int resolve6(const char* host, unsigned char out[16]);
+
 #endif /* _NET_H */

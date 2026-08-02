@@ -137,6 +137,38 @@ int tcp_connect(uint32_t ip, uint16_t port)
     return (int)a.word[0];
 }
 
+int tcp_connect6(const unsigned char address[16], uint16_t port)
+{
+    struct ipc_message q, a;
+    memset(&q, 0, sizeof(q));
+    q.tag = NET6_TCP_CONNECT;
+    memcpy(q.data, address, 16);
+    q.bytes = 16;
+    q.word[1] = (long)port;
+    if (ask(&q, &a) != 0)
+        return -1;
+    if (a.word[0] < 0)
+        return (int)a.word[0];      /* -1 no answer, -2 refused */
+    return (int)a.word[0];
+}
+
+int resolve6(const char* host, unsigned char out[16])
+{
+    struct ipc_message q, a;
+    memset(&q, 0, sizeof(q));
+    q.tag = NET6_LOOKUP;
+    unsigned n = 0;
+    while (host != 0 && host[n] != '\0' && n < sizeof(q.data) - 1) {
+        q.data[n] = host[n];
+        ++n;
+    }
+    q.bytes = n;
+    if (n == 0 || ask(&q, &a) != 0 || a.bytes != 16)
+        return -1;
+    memcpy(out, a.data, 16);
+    return 0;
+}
+
 long tcp_read(int connection, void* buffer, unsigned long bytes)
 {
     struct ipc_message q, a;

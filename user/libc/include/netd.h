@@ -35,5 +35,7 @@
 #define NET6_INFO   12  /* -> data = 16 bytes link-local + 16 global, w0 = have */
 #define NET6_NEIGH  13  /* data = 16-byte address -> data = 6-byte MAC          */
 #define NET6_PING   14  /* data = 16-byte address, w1 = seq -> w0 = hop limit   */
+#define NET6_LOOKUP 15  /* data = a host name -> data = 16 address bytes        */
+#define NET6_TCP_CONNECT 16 /* data = 16-byte address, w1 = port -> w0 = conn   */
 
 #endif

@@ -177,7 +177,9 @@ static struct pending {
     unsigned ip;
     unsigned seq;           /* also the DNS id, and the UDP port */
     unsigned deadline;      /* in loop ticks */
-    char     name[128];     /* the host being looked up */
+    int      want6;         /* a lookup asking for AAAA rather than A */
+    int      over6;         /* and one whose question travels over IPv6 */
+    char     name[128];     /* the host being looked up, or 16 address bytes */
 } g_pending[PENDING_MAX];
 
 static unsigned g_ticks;
@@ -197,6 +199,8 @@ static struct pending* pending_add(int kind, int handle, unsigned ip, unsigned s
             g_pending[i].seq = seq;
             g_pending[i].deadline = g_ticks + 2000;   /* two seconds of ticks */
             g_pending[i].name[0] = '\0';
+            g_pending[i].want6 = 0;
+            g_pending[i].over6 = 0;
             return &g_pending[i];
         }
     return 0;
@@ -259,6 +263,14 @@ static void send_ping(unsigned ip, unsigned seq, const uint8_t* mac)
 
     send_frame(f, sizeof(f));
 }
+
+/* An IPv6 address. Defined here rather than with the rest of IPv6 because DNS
+ * sits above both families and has to name one before either exists. */
+struct in6 { uint8_t b[16]; };
+static int send_udp6(const struct in6* dst, const uint8_t* dst_mac,
+                     unsigned src_port, unsigned dst_port,
+                     const uint8_t* payload, unsigned length);
+static const uint8_t* route6(const struct in6* to, struct in6* via_out);
 
 /* --- UDP ------------------------------------------------------------------
  *
@@ -433,7 +445,10 @@ static unsigned encode_name(const char* host, uint8_t* out)
     return at;
 }
 
-static void dns_ask(const char* host, unsigned id, const uint8_t* mac)
+/* `want6` asks for AAAA rather than A. The question is otherwise identical -
+ * a record type is one number, which is most of why the same resolver serves
+ * both families without knowing anything about either. */
+static void dns_ask(const char* host, unsigned id, const uint8_t* mac, int want6)
 {
     static uint8_t q[300];
     memset(q, 0, sizeof(q));
@@ -441,9 +456,27 @@ static void dns_ask(const char* host, unsigned id, const uint8_t* mac)
     wr16(q + 2, 0x0100);                    /* a query, please recurse */
     wr16(q + 4, 1);                         /* one question */
     unsigned at = 12 + encode_name(host, q + 12);
-    wr16(q + at, 1); at += 2;               /* an address record */
+    wr16(q + at, want6 ? 28 : 1); at += 2;  /* AAAA or A */
     wr16(q + at, 1); at += 2;               /* on the internet */
     send_udp(g_dns, mac, 40000 + (id & 0xFF), DNS_PORT, q, at);
+}
+
+/* The same question carried over IPv6 rather than IPv4, to a resolver that has
+ * a v6 address. Which transport a lookup travels over and which family it asks
+ * about are independent, and conflating them is how a stack ends up unable to
+ * find an A record when only v6 works. */
+static void dns_ask6(const char* host, unsigned id, const struct in6* server,
+                     const uint8_t* mac, int want6)
+{
+    static uint8_t q[300];
+    memset(q, 0, sizeof(q));
+    wr16(q + 0, id);
+    wr16(q + 2, 0x0100);
+    wr16(q + 4, 1);
+    unsigned at = 12 + encode_name(host, q + 12);
+    wr16(q + at, want6 ? 28 : 1); at += 2;
+    wr16(q + at, 1); at += 2;
+    send_udp6(server, mac, 40000 + (id & 0xFF), DNS_PORT, q, at);
 }
 
 /* Skip a name, which may end in a pointer to one earlier in the packet. */
@@ -458,6 +491,35 @@ static unsigned skip_name(const uint8_t* p, unsigned at, unsigned length)
         at += 1 + len;
     }
     return length;
+}
+
+/* Pull the first address of the wanted type out of an answer. A four-byte
+ * record is written to `v4`, a sixteen-byte one to `v6`; the caller knows
+ * which it asked for. */
+static int dns_answer6(const uint8_t* p, unsigned length, unsigned* id_out,
+                       struct in6* v6)
+{
+    if (length < 12)
+        return 0;
+    *id_out = rd16(p);
+    const unsigned questions = rd16(p + 4), answers = rd16(p + 6);
+    if ((rd16(p + 2) & 0x000F) != 0)
+        return 0;
+    unsigned at = 12;
+    for (unsigned i = 0; i < questions; ++i)
+        at = skip_name(p, at, length) + 4;
+    for (unsigned i = 0; i < answers && at + 10 <= length; ++i) {
+        at = skip_name(p, at, length);
+        const unsigned type = rd16(p + at);
+        const unsigned len = rd16(p + at + 8);
+        at += 10;
+        if (type == 28 && len == 16 && at + 16 <= length) {
+            memcpy(v6->b, p + at, 16);
+            return 1;
+        }
+        at += len;
+    }
+    return 0;
 }
 
 static unsigned dns_answer(const uint8_t* p, unsigned length, unsigned* id_out)
@@ -519,6 +581,8 @@ static struct conn {
     int state;
     int peer_closed;
     unsigned peer_ip, peer_port, local_port;
+    int      v6;                    /* the peer is an IPv6 address */
+    struct in6 peer6;
     unsigned snd_next;              /* the next sequence number we will use  */
     unsigned rcv_next;              /* the next one we expect from them      */
     uint8_t  rx[TCP_RX];
@@ -555,9 +619,14 @@ static unsigned tcp_checksum(unsigned src, unsigned dst,
     return (~sum) & 0xFFFF;
 }
 
+static int tcp_send6(struct conn* c, unsigned flags, unsigned seq,
+                     const uint8_t* payload, unsigned length);
+
 static int tcp_send(struct conn* c, unsigned flags, unsigned seq,
                     const uint8_t* payload, unsigned length)
 {
+    if (c->v6)
+        return tcp_send6(c, flags, seq, payload, length);
     const uint8_t* mac = arp_lookup(
         ((c->peer_ip ^ g_ip) & g_mask) ? g_gw : c->peer_ip);
     if (mac == 0)
@@ -612,6 +681,18 @@ static void conn_retransmit(void)
         struct conn* c = &g_conn[i];
         if (!c->used || c->out_len == 0 || g_ticks < c->out_deadline)
             continue;
+        if (c->state == TCP_SYN_SENT) {
+            /* Still handshaking: what needs repeating is the SYN, and its
+             * sequence number is the one before the next. */
+            if (++c->out_tries > 8) {
+                c->state = TCP_DEAD;
+                c->out_len = 0;
+                continue;
+            }
+            tcp_send(c, TCP_SYN, c->snd_next - 1, 0, 0);
+            c->out_deadline = g_ticks + 200 * (unsigned)c->out_tries;
+            continue;
+        }
         if (++c->out_tries > 5) {
             /* Five goes and no acknowledgement. The other end is gone. */
             c->state = TCP_DEAD;
@@ -648,12 +729,11 @@ static void conn_retransmit(void)
 #define ICMP6_ECHO_REQUEST  128
 #define ICMP6_ECHO_REPLY    129
 
-struct in6 { uint8_t b[16]; };
-
 static struct in6 g_ll;             /* fe80::, always ours                   */
 static struct in6 g_global;         /* from the router's prefix, if there is one */
 static struct in6 g_router;         /* the router's own link-local address    */
-static int g_have_global, g_have_router;
+static struct in6 g_dns6;           /* a resolver reachable over IPv6         */
+static int g_have_global, g_have_router, g_have_dns6;
 
 static int in6_equal(const struct in6* a, const struct in6* b)
 {
@@ -845,6 +925,48 @@ static void rs_send(void)
     send_ip6(&g_ll, &dst, mac, IP6_ICMP, 255, body, sizeof(body));
 }
 
+/* A datagram over IPv6.
+ *
+ * The checksum is not optional here. Over IPv4 a zero means "not computed" and
+ * this stack leaves it out; IPv6 removed that escape, because there is no
+ * header checksum underneath it any more - the datagram's own is the only
+ * thing standing between a corrupted address and the wrong process.
+ */
+static int send_udp6(const struct in6* dst, const uint8_t* dst_mac,
+                     unsigned src_port, unsigned dst_port,
+                     const uint8_t* payload, unsigned length)
+{
+    static uint8_t body[1400];
+    if (length > sizeof(body) - 8)
+        return -1;
+    const struct in6* me = (dst->b[0] == 0xFE) ? &g_ll
+                         : (g_have_global ? &g_global : &g_ll);
+    wr16(body + 0, src_port);
+    wr16(body + 2, dst_port);
+    wr16(body + 4, 8 + length);
+    wr16(body + 6, 0);
+    memcpy(body + 8, payload, length);
+    unsigned sum = icmp6_checksum(me, dst, IP6_UDP, body, 8 + length);
+    /* Zero is reserved for "no checksum" over IPv4 and is not legal here, so
+     * the all-ones form of the same value is sent instead. */
+    if (sum == 0)
+        sum = 0xFFFF;
+    wr16(body + 6, sum);
+    return send_ip6(me, dst, dst_mac, IP6_UDP, 64, body, 8 + length);
+}
+
+/* Whoever can carry a packet to this address: the neighbour itself when it is
+ * on the link, otherwise the router. */
+static const uint8_t* route6(const struct in6* to, struct in6* via_out)
+{
+    struct in6 via = *to;
+    if (to->b[0] != 0xFE && g_have_router)
+        via = g_router;
+    if (via_out != 0)
+        *via_out = via;
+    return neigh_lookup(&via);
+}
+
 static void send_ping6(const struct in6* to, unsigned seq, const uint8_t* mac)
 {
     uint8_t body[16];
@@ -862,6 +984,10 @@ static void send_ping6(const struct in6* to, unsigned seq, const uint8_t* mac)
 /* --- everything that arrives ---------------------------------------------- */
 
 static unsigned src_ip_of(const uint8_t* ip_hdr) { return rd32(ip_hdr + 12); }
+
+static void handle_udp6(const uint8_t* h, const uint8_t* udp, unsigned length);
+static void handle_tcp6(const uint8_t* f, const uint8_t* h, const uint8_t* t,
+                        unsigned length);
 
 /* Walk the options that follow a discovery message. They are all
  * type-length-value with the length in eight-byte units, which is the one
@@ -924,6 +1050,9 @@ static void handle_icmp6(const uint8_t* f, unsigned len, const uint8_t* h,
                 continue;
             if (p->kind == WAIT_ND && in6_equal((struct in6*)p->name, &target)) {
                 answer(p, 0, neigh_lookup(&target), 6);
+            } else if (p->kind == WAIT_DNS && p->over6 && p->name[0] != '\0') {
+                dns_ask6(p->name, p->seq, &g_dns6, neigh_lookup(&target),
+                         p->want6);
             } else if (p->kind == WAIT_PING6) {
                 /* It was waiting for whoever could carry it. */
                 struct in6 to;
@@ -954,6 +1083,15 @@ static void handle_icmp6(const uint8_t* f, unsigned len, const uint8_t* h,
             eui64(&g_global, g_mac);
             memcpy(g_global.b, prefix + 16, 8);      /* the router's half */
             g_have_global = 1;
+            /* The resolver on this prefix. There is no option in a router
+             * advertisement that carries one here - the RDNSS option exists
+             * and QEMU does not send it - so this is the convention the same
+             * network uses for IPv4: the third address. It is a guess, and it
+             * is only ever used when it answers. */
+            memset(&g_dns6, 0, sizeof(g_dns6));
+            memcpy(g_dns6.b, prefix + 16, 8);
+            g_dns6.b[15] = 3;
+            g_have_dns6 = 1;
             printf("netd: address %x:%x::%x:%x:%x:%x from the router\n",
                    rd16(g_global.b), rd16(g_global.b + 2),
                    rd16(g_global.b + 8), rd16(g_global.b + 10),
@@ -1011,7 +1149,7 @@ static void handle_frame(const uint8_t* f, unsigned len)
                 } else if (p->kind == WAIT_PING) {
                     send_ping(p->ip, p->seq, f + 22);
                 } else if (p->kind == WAIT_DNS && p->name[0] != '\0') {
-                    dns_ask(p->name, p->seq, f + 22);
+                    dns_ask(p->name, p->seq, f + 22, p->want6);
                 } else if (p->kind == WAIT_TCP_ARP) {
                     struct conn* c = conn_find(p->ip);
                     if (c != 0) {
@@ -1028,11 +1166,15 @@ static void handle_frame(const uint8_t* f, unsigned len)
     if (type == ETH_IP6 && len >= 14 + 40) {
         const uint8_t* h = f + 14;
         const unsigned payload = rd16(h + 4);
+        unsigned n = payload;
+        if (n > len - 14 - 40)
+            n = len - 14 - 40;
         if (h[6] == IP6_ICMP && len >= 14 + 40 + 8) {
-            unsigned n = payload;
-            if (n > len - 14 - 40)
-                n = len - 14 - 40;
             handle_icmp6(f, len, h, h + 40, n);
+        } else if (h[6] == IP6_UDP && n >= 8) {
+            handle_udp6(h, h + 40, n);
+        } else if (h[6] == IP6_TCP && n >= 20) {
+            handle_tcp6(f, h, h + 40, n);
         }
         return;
     }
@@ -1089,11 +1231,22 @@ static void handle_frame(const uint8_t* f, unsigned len)
             return;
         }
         if (src_port == DNS_PORT) {
+            /* Which family the answer holds is the question that was asked,
+             * not the one that carried it: an AAAA record comes back over
+             * IPv4 perfectly happily, and reading it with the A parser finds
+             * nothing and reports the name as unknown. */
             unsigned id = 0;
+            struct in6 got;
+            memset(&got, 0, sizeof(got));
+            const int have6 = dns_answer6(body, dlen, &id, &got);
             const unsigned address = dns_answer(body, dlen, &id);
             for (int i = 0; i < PENDING_MAX; ++i) {
                 struct pending* p = &g_pending[i];
-                if (p->used && p->kind == WAIT_DNS && p->seq == id)
+                if (!p->used || p->kind != WAIT_DNS || p->seq != id)
+                    continue;
+                if (p->want6)
+                    answer(p, have6 ? 0 : -1, have6 ? got.b : 0, have6 ? 16 : 0);
+                else
                     answer(p, address != 0 ? (long)address : -1, 0, 0);
             }
             return;
@@ -1213,6 +1366,168 @@ static void handle_frame(const uint8_t* f, unsigned len)
     }
 }
 
+/* The same segment over IPv6. Only the wrapping differs - the header, and a
+ * checksum taken over sixteen-byte addresses instead of four-byte ones. The
+ * sequence numbers, the flags and the window are the same protocol, which is
+ * the whole point of TCP not caring what carries it. */
+static int tcp_send6(struct conn* c, unsigned flags, unsigned seq,
+                     const uint8_t* payload, unsigned length)
+{
+    struct in6 via;
+    const uint8_t* mac = route6(&c->peer6, &via);
+    if (mac == 0) {
+        nd_solicit(&via);
+        return -1;
+    }
+    static uint8_t body[1500];
+    if (length > sizeof(body) - 20)
+        return -1;
+
+    const struct in6* me = (c->peer6.b[0] == 0xFE) ? &g_ll
+                         : (g_have_global ? &g_global : &g_ll);
+    wr16(body + 0, c->local_port);
+    wr16(body + 2, c->peer_port);
+    wr32(body + 4, seq);
+    wr32(body + 8, c->rcv_next);
+    wr16(body + 12, (5u << 12) | flags);
+    wr16(body + 14, TCP_RX - c->rx_len);
+    wr16(body + 16, 0);
+    wr16(body + 18, 0);
+    if (length > 0)
+        memcpy(body + 20, payload, length);
+    wr16(body + 16, icmp6_checksum(me, &c->peer6, IP6_TCP, body, 20 + length));
+    return send_ip6(me, &c->peer6, mac, IP6_TCP, 64, body, 20 + length);
+}
+
+/* A datagram that arrived over IPv6. The only thing the family changes above
+ * this point is how it got here. */
+static void handle_udp6(const uint8_t* h, const uint8_t* udp, unsigned length)
+{
+    if (length < 8)
+        return;
+    const unsigned src_port = rd16(udp);
+    const unsigned dst_port = rd16(udp + 2);
+    const unsigned udp_len = rd16(udp + 4);
+    if (udp_len < 8 || udp_len - 8 > length - 8)
+        return;
+    const unsigned dlen = udp_len - 8;
+    const uint8_t* body = udp + 8;
+
+    if (src_port == DNS_PORT) {
+        unsigned id = 0;
+        struct in6 got;
+        memset(&got, 0, sizeof(got));
+        const int have6 = dns_answer6(body, dlen, &id, &got);
+        const unsigned v4 = have6 ? 0 : dns_answer(body, dlen, &id);
+        for (int i = 0; i < PENDING_MAX; ++i) {
+            struct pending* p = &g_pending[i];
+            if (!p->used || p->kind != WAIT_DNS || p->seq != id)
+                continue;
+            if (have6)
+                answer(p, 0, got.b, 16);
+            else
+                answer(p, v4 != 0 ? (long)v4 : -1, 0, 0);
+        }
+        return;
+    }
+    for (int i = 0; i < PENDING_MAX; ++i) {
+        struct pending* p = &g_pending[i];
+        if (p->used && p->kind == WAIT_UDP && p->seq == dst_port) {
+            const unsigned n = dlen > 200 ? 200 : dlen;
+            answer(p, 0, body, n);
+        }
+    }
+    (void)h;
+}
+
+/* A segment that arrived over IPv6. The state machine is the one the v4 path
+ * uses; only finding the connection and acknowledging differ, because the
+ * address is sixteen bytes rather than four. */
+static void handle_tcp6(const uint8_t* f, const uint8_t* h, const uint8_t* t,
+                        unsigned length)
+{
+    if (length < 20)
+        return;
+    struct conn* c = conn_find(rd16(t + 2));
+    if (c == 0 || !c->used || !c->v6)
+        return;
+
+    const unsigned seq   = rd32(t + 4);
+    const unsigned ack   = rd32(t + 8);
+    const unsigned flags = rd16(t + 12) & 0x3F;
+    const unsigned off   = ((rd16(t + 12) >> 12) & 0xF) * 4;
+    const unsigned dlen  = length > off ? length - off : 0;
+    const uint8_t* body  = t + off;
+
+    if (flags & TCP_RST) {
+        /* Refused, which is an answer: something on the other side received
+         * the segment, understood it, and said no. Reported differently from
+         * silence so a caller can tell a closed port from a link that never
+         * carried the packet at all. */
+        c->state = TCP_DEAD;
+        for (int i = 0; i < PENDING_MAX; ++i) {
+            struct pending* p = &g_pending[i];
+            if (p->used && p->ip == c->local_port &&
+                (p->kind == WAIT_CONNECT || p->kind == WAIT_READ))
+                answer(p, -2, 0, 0);
+        }
+        return;
+    }
+
+    if (c->state == TCP_SYN_SENT && (flags & TCP_SYN) && (flags & TCP_ACK)) {
+        c->rcv_next = seq + 1;
+        c->snd_next = ack;
+        c->state = TCP_ESTABLISHED;
+        c->out_len = 0;
+        tcp_send(c, TCP_ACK, c->snd_next, 0, 0);
+        for (int i = 0; i < PENDING_MAX; ++i) {
+            struct pending* p = &g_pending[i];
+            if (p->used && p->kind == WAIT_CONNECT && p->ip == c->local_port)
+                answer(p, (long)c->local_port, 0, 0);
+        }
+        return;
+    }
+
+    if ((flags & TCP_ACK) && c->out_len > 0 && ack >= c->out_seq + c->out_len) {
+        c->out_len = 0;
+        c->out_tries = 0;
+    }
+
+    if (dlen > 0) {
+        if (seq == c->rcv_next) {
+            unsigned n = dlen;
+            if (n > TCP_RX - c->rx_len)
+                n = TCP_RX - c->rx_len;
+            memcpy(c->rx + c->rx_len, body, n);
+            c->rx_len += n;
+            c->rcv_next += dlen;
+        }
+        tcp_send(c, TCP_ACK, c->snd_next, 0, 0);
+    }
+
+    if (flags & TCP_FIN) {
+        c->rcv_next = seq + dlen + 1;
+        c->peer_closed = 1;
+        tcp_send(c, TCP_ACK, c->snd_next, 0, 0);
+    }
+
+    for (int i = 0; i < PENDING_MAX; ++i) {
+        struct pending* p = &g_pending[i];
+        if (!p->used || p->kind != WAIT_READ || p->ip != c->local_port)
+            continue;
+        if (c->rx_len > 0) {
+            unsigned n = c->rx_len > 200 ? 200 : c->rx_len;
+            answer(p, (long)n, c->rx, n);
+            memmove(c->rx, c->rx + n, c->rx_len - n);
+            c->rx_len -= n;
+        } else if (c->peer_closed) {
+            answer(p, 0, 0, 0);
+        }
+    }
+    (void)f;
+    (void)h;
+}
+
 static void drain(void)
 {
     while (g_net->rx_tail != g_net->rx_head) {
@@ -1328,7 +1643,8 @@ int main(void)
                     arp_ask(target);
                 }
             }
-        } else if (m.tag == NET_LOOKUP) {
+        } else if (m.tag == NET_LOOKUP || m.tag == NET6_LOOKUP) {
+            const int want6 = m.tag == NET6_LOOKUP;
             /* A name needs the resolver's address resolved first, which is a
              * second round trip - so this waits twice and neither wait blocks
              * anything else. */
@@ -1346,10 +1662,28 @@ int main(void)
                     ++k;
                 }
                 p->name[k] = '\0';
-                if (dns_mac != 0)
-                    dns_ask(p->name, id, dns_mac);
-                else
+                p->want6 = want6;
+                /* Which transport carries the question is independent of
+                 * which family it asks about: an AAAA record comes back over
+                 * IPv4 perfectly well, and this network's only resolver that
+                 * actually answers is the IPv4 one. So v4 is preferred and v6
+                 * is the fallback rather than the other way round - a stack
+                 * that insists on asking over v6 stops resolving anything the
+                 * moment nothing is listening there, which is what happened
+                 * the first time this was wired the other way. */
+                struct in6 via6;
+                const uint8_t* mac6 = g_have_dns6 ? route6(&g_dns6, &via6) : 0;
+                if (dns_mac != 0) {
+                    dns_ask(p->name, id, dns_mac, want6);
+                } else if (g_dns != 0) {
                     arp_ask(((g_dns ^ g_ip) & g_mask) ? g_gw : g_dns);
+                } else if (g_have_dns6 && mac6 != 0) {
+                    p->over6 = 1;
+                    dns_ask6(p->name, id, &g_dns6, mac6, want6);
+                } else if (g_have_dns6) {
+                    p->over6 = 1;
+                    nd_solicit(&via6);
+                }
             }
         } else if (m.tag == NET_UDP_SEND) {
             const unsigned dst = (unsigned)m.word[0];
@@ -1369,6 +1703,46 @@ int main(void)
             if (p == 0) {
                 r.word[0] = -1;
                 ipc_reply(handle, &r);
+            }
+        } else if (m.tag == NET6_TCP_CONNECT) {
+            struct conn* c = 0;
+            for (int i = 0; i < CONN_MAX && c == 0; ++i)
+                if (!g_conn[i].used) c = &g_conn[i];
+            if (c == 0) {
+                r.word[0] = -1;
+                ipc_reply(handle, &r);
+            } else {
+                memset(c, 0, sizeof(*c));
+                c->used = 1;
+                c->v6 = 1;
+                memcpy(c->peer6.b, m.data, 16);
+                c->peer_port = (unsigned)m.word[1];
+                c->local_port = g_next_port++;
+                if (g_next_port > 60000) g_next_port = 40000;
+                c->snd_next = 0x5EED0000u + g_ticks * 7919u;
+                c->state = TCP_SYN_SENT;
+
+                struct pending* p = pending_add(WAIT_CONNECT, handle,
+                                                c->local_port, 0);
+                if (p == 0) {
+                    c->used = 0;
+                    r.word[0] = -1;
+                    ipc_reply(handle, &r);
+                } else {
+                    /* tcp_send6 solicits the neighbour itself when it does not
+                     * know one, and the retransmit timer sends the SYN again
+                     * once the advertisement has arrived - so a first attempt
+                     * that fails for want of an address is not an error. */
+                    c->out_len = 0;
+                    if (tcp_send6(c, TCP_SYN, c->snd_next, 0, 0) != 0) {
+                        c->out_deadline = g_ticks + 200;
+                        c->out_tries = 0;
+                        c->out_len = 1;         /* something to retry */
+                        c->out[0] = 0;
+                        c->out_seq = c->snd_next;
+                    }
+                    c->snd_next += 1;
+                }
             }
         } else if (m.tag == NET_TCP_CONNECT) {
             struct conn* c = 0;

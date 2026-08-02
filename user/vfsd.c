@@ -407,7 +407,9 @@ static unsigned dir_search(const struct inode* dir, const char* name,
                         ++i;
                     if (i == len && name[len] == '\0')
                         return ino;
-                } else if (seen++ == want) {
+                } else if (!(len == 1 && g_block[at + 8] == '.') &&
+                           !(len == 2 && g_block[at + 8] == '.' &&
+                             g_block[at + 9] == '.') && seen++ == want) {
                     unsigned i = 0;
                     for (; i < len && i < 63; ++i)
                         name_out[i] = (char)g_block[at + 8 + i];
