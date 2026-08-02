@@ -126,12 +126,3 @@ int passwd(const char* name, const char* old_password, const char* new_password)
     return ask(&q, &a) == 0 && a.word[0] == 0 ? 0 : -1;
 }
 
-int chmod(const char* path, unsigned mode)
-{
-    return (int)__syscall(SYS_chmod, (long)path, (long)mode, 0, 0, 0);
-}
-
-int chown(const char* path, unsigned uid, unsigned gid)
-{
-    return (int)__syscall(SYS_chown, (long)path, (long)uid, (long)gid, 0, 0);
-}

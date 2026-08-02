@@ -895,8 +895,10 @@ int main(void)
             struct inode in;
             char name[64];
             unsigned kind = VFS_KIND_FILE;
-            if (lookup((const char*)m.data, &in) != 0 &&
-                dir_search(&in, 0, (unsigned)m.word[1], name, &kind) != 0) {
+            const unsigned child = lookup((const char*)m.data, &in) != 0
+                ? dir_search(&in, 0, (unsigned)m.word[1], name, &kind) : 0;
+            if (child != 0) {
+                struct inode ci;
                 unsigned n = 0;
                 while (name[n] != '\0' && n < sizeof(r.data) - 1) {
                     r.data[n] = name[n];
@@ -905,6 +907,12 @@ int main(void)
                 r.data[n] = '\0';
                 r.bytes = n;
                 r.word[0] = (long)kind;
+                /* The size as well. dir_search already hands back the child's
+                 * inode, so this costs one read that was going to happen
+                 * anyway the moment anyone wanted to show a listing - and the
+                 * alternative is every caller stat-ing every name it was just
+                 * told about, which doubles the round trips for a directory. */
+                r.word[1] = read_inode(child, &ci) == 0 ? (long)ci.size : 0;
             }
         } else if (m.tag == VFS_READ) {
             struct inode in;

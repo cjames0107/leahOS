@@ -10,6 +10,10 @@ ssize_t write(int fd, const void* buffer, size_t count);
 ssize_t read(int fd, void* buffer, size_t count);
 pid_t   getpid(void);
 
+/* Internal: fs.c hands the descriptor table to the next image. */
+void    __fd_save_for_exec(void);
+void    __fd_resolve(const char* path, char* out);
+
 pid_t fork(void);
 int   execve(const char* path, char* const argv[], char* const envp[]);
 pid_t wait(int* status);

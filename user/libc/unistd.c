@@ -1,15 +1,9 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-ssize_t write(int fd, const void* buffer, size_t count)
-{
-    return __syscall(SYS_write, fd, (long)buffer, (long)count, 0, 0);
-}
-
-ssize_t read(int fd, void* buffer, size_t count)
-{
-    return __syscall(SYS_read, fd, (long)buffer, (long)count, 0, 0);
-}
+/* read and write live in fs.c now, with the descriptor table they have to
+ * consult: which of them is a file and which is the console is a fact about
+ * that table, and the table is ours. */
 
 pid_t getpid(void)
 {
@@ -23,6 +17,20 @@ pid_t fork(void)
 
 int execve(const char* path, char* const argv[], char* const envp[])
 {
+    /* Hand the descriptor table and the working directory to whatever comes
+     * next. They are ours, in memory that is about to be thrown away, and a
+     * shell that redirected a child's output would otherwise be handing that
+     * child nothing. */
+    __fd_save_for_exec();
+
+    /* Resolve here too. The kernel still opens the image by name, and it is no
+     * longer told about the working directory, so a relative path would be
+     * resolved against a directory nobody has updated since boot. */
+    {
+        static char full[256];
+        __fd_resolve(path, full);
+        path = full;
+    }
     /* The kernel only reads the path for now; argv/envp are accepted for a
      * conventional signature but not yet passed to the new program. */
     return (int)__syscall(SYS_execve, (long)path, (long)argv, (long)envp, 0, 0);

@@ -22,7 +22,7 @@ struct vfs_shared {
 
 #define VFS_STAT     1  /* data = path -> w0 = size, w1 = kind, w2 = mode      */
 #define VFS_READ     2  /* data = path, w1 = offset, w2 = length -> w0 = read  */
-#define VFS_LIST     3  /* data = path, w1 = index -> data = name, w0 = kind   */
+#define VFS_LIST     3  /* data = path, w1 = index -> name, w0 = kind, w1 = size */
 #define VFS_MOUNTED  4  /* -> w0 = 1 when a filesystem is up, w1 = block size  */
 
 #define VFS_CREATE   5  /* data = path -> makes an empty file                */
