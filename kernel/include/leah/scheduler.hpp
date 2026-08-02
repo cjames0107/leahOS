@@ -104,8 +104,9 @@ bool set_current_gid(u32 gid);
 // and applying the ordinary rule on top would make a correct password fail.
 // The identity of another process, for a server that has to decide what its
 // caller may do. Not privileged: a uid is not a secret, and the alternative is
-// servers believing whatever uid arrives in the message.
-u32 uid_of(u32 pid);
+// servers believing whatever uid arrives in the message. The gid is in the
+// high half.
+u64 credentials_of(u32 pid);
 
 // Set a process's identity outright, skipping the "only root may change
 // credentials" rule that would refuse every successful login by a non-root

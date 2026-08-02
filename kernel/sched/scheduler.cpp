@@ -1003,12 +1003,17 @@ bool set_current_gid(u32 gid)
     return true;
 }
 
-u32 uid_of(u32 pid)
+u64 credentials_of(u32 pid)
 {
     KernelLock lock;
     Task* t = find(pid);
-    // No such process reads as "not root", which is the safe way to be wrong.
-    return t == nullptr ? 0xFFFFFFFFu : t->uid;
+    // No such process reads as "not root, not in any group", which is the safe
+    // way to be wrong. The two are packed into one word because a server
+    // deciding whether a caller may touch a file needs both, and asking twice
+    // would let them come from different moments.
+    if (t == nullptr)
+        return 0xFFFFFFFFFFFFFFFFull;
+    return static_cast<u64>(t->gid) << 32 | t->uid;
 }
 
 bool set_credentials_of(u32 pid, u32 uid, u32 gid)

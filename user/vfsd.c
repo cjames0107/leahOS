@@ -16,6 +16,7 @@
 #include <shm.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <vfsd.h>
 
@@ -729,6 +730,48 @@ static int mount(void)
     return 0;
 }
 
+
+/* --- who is asking, and whether they may -------------------------------------
+ *
+ * This used to be the kernel's job, back when the kernel held the file
+ * descriptors: it checked once, at open, and handed out a descriptor that
+ * carried the answer. With the table in libc there is nothing trustworthy on
+ * that side of the boundary - a process asking for its own file is asking with
+ * its own code - so the check belongs here, where the mode bits already are.
+ *
+ * It lands per operation rather than once per open, which is stricter than
+ * what it replaces: a descriptor can no longer outlive the permission that
+ * justified it.
+ *
+ * The uid and gid come from the kernel, about the pid the kernel itself
+ * reported as the sender. Nothing in the message is trusted for this, because
+ * a uid inside a message is a uid the sender chose. */
+static int may_access(const struct inode* in, unsigned caller, int want_write)
+{
+    const unsigned long creds = (unsigned long)__syscall(SYS_credsof, caller,
+                                                         0, 0, 0, 0);
+    const unsigned uid = (unsigned)creds;
+    const unsigned gid = (unsigned)(creds >> 32);
+    unsigned read_bit, write_bit;
+
+    if (uid == 0)
+        return 1;                       /* root bypasses the mode bits */
+
+    if (in->uid == uid) {
+        read_bit = 0400; write_bit = 0200;
+    } else if (in->gid == gid) {
+        read_bit = 0040; write_bit = 0020;
+    } else {
+        read_bit = 0004; write_bit = 0002;
+    }
+    return (in->mode & (want_write ? write_bit : read_bit)) != 0;
+}
+
+static unsigned caller_uid(unsigned caller)
+{
+    return (unsigned)__syscall(SYS_credsof, caller, 0, 0, 0, 0);
+}
+
 int main(void)
 {
     for (int i = 0; i < 400 && g_blk <= 0; ++i) {
@@ -808,7 +851,8 @@ int main(void)
             }
         } else if (m.tag == VFS_READ) {
             struct inode in;
-            if (lookup((const char*)m.data, &in) != 0) {
+            if (lookup((const char*)m.data, &in) != 0 &&
+                may_access(&in, from, 0)) {
                 unsigned long offset = (unsigned long)m.word[1];
                 unsigned long want = (unsigned long)m.word[2];
                 if (offset >= in.size) {
@@ -943,7 +987,7 @@ int main(void)
         } else if (m.tag == VFS_WRITE) {
             struct inode in;
             const unsigned ino = lookup((const char*)m.data, &in);
-            if (ino != 0) {
+            if (ino != 0 && may_access(&in, from, 1)) {
                 unsigned long offset = (unsigned long)m.word[1];
                 unsigned long want = (unsigned long)m.word[2];
                 if (want > VFS_CHUNK) want = VFS_CHUNK;
@@ -980,7 +1024,13 @@ int main(void)
         } else if (m.tag == VFS_CHMOD || m.tag == VFS_CHOWN) {
             struct inode in;
             const unsigned ino = lookup((const char*)m.data, &in);
-            if (ino != 0) {
+            const unsigned who = caller_uid(from);
+            /* Changing permissions is the owner's or root's. Giving a file
+             * away is root's alone: otherwise a user could dodge a quota, or
+             * plant a file owned by someone else. */
+            const int allowed = m.tag == VFS_CHMOD ? (who == 0 || in.uid == who)
+                                                   : (who == 0);
+            if (ino != 0 && allowed) {
                 if (m.tag == VFS_CHMOD)
                     in.mode = (in.mode & 0xF000) |
                               ((unsigned)m.word[1] & 0777);

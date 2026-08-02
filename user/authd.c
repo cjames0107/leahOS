@@ -496,7 +496,7 @@ int main(void)
         /* Who is asking decides what they may do, and the kernel is the only
          * honest source for that - a uid in the message would be a uid the
          * caller chose. */
-        const unsigned caller_uid = (unsigned)__syscall(SYS_uidof, from, 0, 0, 0, 0);
+        const unsigned caller_uid = (unsigned)__syscall(SYS_credsof, from, 0, 0, 0, 0);
 
         memset(&r, 0, sizeof(r));
         r.tag = m.tag;

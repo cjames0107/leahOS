@@ -46,23 +46,6 @@ bool user_range_ok(vaddr_t base, u64 length)
     return true;
 }
 
-// Copy a NUL-terminated string out of user memory, bounded. Returns false when
-// the pointer is not in the user half; a missing terminator truncates rather
-// than running off the end of the mapping.
-bool copy_user_string(u64 user_pointer, char* out, usize out_size)
-{
-    if (user_pointer == 0 || !user_range_ok(user_pointer, 1))
-        return false;
-    const char* in = reinterpret_cast<const char*>(user_pointer);
-    usize n = 0;
-    while (n + 1 < out_size && in[n] != '\0') {
-        out[n] = in[n];
-        ++n;
-    }
-    out[n] = '\0';
-    return true;
-}
-
 // Grow (or query) the process's heap. Returns the previous break, or -1. The
 // new pages are mapped into the process's own space, which is active during the
 // syscall, so zeroing them is a plain write.
@@ -674,12 +657,13 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         frame->rax = 0;
         break;
 
-    case UidOf:
+    case CredsOf:
         // A server cannot take the caller's word for who the caller is - a uid
         // inside a message is a uid the sender chose. This is the kernel
-        // saying it instead, about the pid the kernel itself reported.
-        frame->rax = static_cast<u64>(
-            scheduler::uid_of(static_cast<u32>(frame->rdi)));
+        // saying it instead, about the pid the kernel itself reported. The
+        // gid comes back in the high half; a caller that only wants the uid
+        // can truncate and be right.
+        frame->rax = scheduler::credentials_of(static_cast<u32>(frame->rdi));
         break;
 
     case IpcTryRecv: {

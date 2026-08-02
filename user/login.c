@@ -130,10 +130,19 @@ int main(void)
             exit(127);
         }
         if (server > 0) {
-            /* Bounded: a server that cannot start must not hold up the login.
-             * Falling through without one simply means a text session. */
-            for (int i = 0; i < 600 && !win_server_running(); ++i)
-                msleep(10);         /* up to six seconds, without spinning */
+            /* Wait on the server rather than on a stopwatch. Six fixed
+             * seconds was fine on a fast machine and wrong on a loaded one:
+             * the server was still starting, the clock ran out, and the
+             * session silently became a text shell. As long as the process is
+             * alive it is still coming up, and a slow machine deserves the
+             * same desktop a fast one gets. The bound that matters - a server
+             * that died - is answered by kill(pid, 0), which runs every check
+             * a real signal would and then delivers nothing. */
+            for (int i = 0; i < 6000 && !win_server_running(); ++i) {
+                if (kill(server, 0) != 0)
+                    break;          /* gone; there will be no desktop */
+                msleep(10);
+            }
         }
 
         const int pid = fork();
