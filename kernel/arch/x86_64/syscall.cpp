@@ -656,6 +656,24 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
                 ? 0 : -1);
         break;
 
+    case InputPost:
+        // A keyboard driver in ring 3 handing over what it decoded. Root only,
+        // and for the obvious reason: being able to put characters into the
+        // input queue is being able to type into someone else's session.
+        //
+        // The kernel keeps the queue rather than the driver, because the queue
+        // is what a blocked reader is asleep on and waking it is scheduling.
+        if (scheduler::current_uid() != 0) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        if (frame->rdi == 0)
+            keyboard::inject_char(static_cast<char>(frame->rsi));
+        else
+            keyboard::set_usb_modifiers(static_cast<u32>(frame->rsi));
+        frame->rax = 0;
+        break;
+
     case UidOf:
         // A server cannot take the caller's word for who the caller is - a uid
         // inside a message is a uid the sender chose. This is the kernel

@@ -28,8 +28,6 @@
 #include <leah/string.hpp>
 #include <leah/vfs.hpp>
 #include <leah/vmm.hpp>
-#include <leah/usb_hid.hpp>
-#include <leah/xhci.hpp>
 
 namespace boot {
 
@@ -649,10 +647,14 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     }
 
     keyboard::init();
-    step("PS/2 keyboard on IRQ 1");
 
-    mouse::init();
-    step("PS/2 mouse on IRQ 12");
+    if (keyboard::present()) {
+        step("PS/2 keyboard on IRQ 1");
+        mouse::init();
+        step("PS/2 mouse on IRQ 12");
+    } else {
+        step("no PS/2 controller; input comes from usbd");
+    }
 
     pci::enumerate();
     step("PCI bus enumerated");
@@ -662,21 +664,8 @@ extern "C" void kernel_main(const boot::Info* boot_info)
      * transfer - so the kernel does not even identify the drives, because it
      * would have to touch the same registers to do it. */
 
-    if (xhci::init()) {
-        console::printf("  [ ok ] xHCI up, %llu device(s) enumerated\n",
-                        static_cast<u64>(xhci::device_count()));
-        for (usize i = 0; i < xhci::device_count(); ++i) {
-            const xhci::Device& d = xhci::device_at(i);
-            console::printf("    usb%llu  port %u  %04x:%04x  class %02x\n",
-                            static_cast<u64>(i), d.port, d.vendor, d.product,
-                            d.device_class);
-        }
-
-        if (usb::hid::init() > 0) {
-            console::printf("  [ ok ] USB HID: %llu keyboard(s) in boot protocol\n",
-                            static_cast<u64>(usb::hid::keyboard_count()));
-        }
-    }
+    /* No USB here either. The controller is usbd's; all the kernel keeps of a
+     * keyboard is the queue a blocked reader sleeps on. */
 
     cpu::sti();
     step("interrupts enabled");

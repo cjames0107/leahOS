@@ -76,9 +76,27 @@ u8 receive_data()
 
 void flush_output()
 {
-    while ((io::in8(kStatusPort) & kStatusOutputFull) != 0)
+    // Bounded, because an absent controller reads back 0xFF on every port and
+    // 0xFF has the output-full bit set - so an unbounded drain never finishes
+    // on a machine that has no 8042 at all. There is nothing to drain in that
+    // case, which is exactly the case that used to hang here.
+    for (u32 i = 0; i < kPollLimit; ++i) {
+        if ((io::in8(kStatusPort) & kStatusOutputFull) == 0)
+            return;
         (void)io::in8(kDataPort);
+    }
 }
+
+// A machine with no PS/2 controller floats its ports high, so every read is
+// 0xFF. That is not a status any real 8042 reports - it would mean every bit
+// set at once, including the two error bits - so it is a reliable way to tell
+// "no controller" from "controller busy".
+bool controller_present()
+{
+    return io::in8(kStatusPort) != 0xFF;
+}
+
+bool g_present = true;
 
 // Scancode set 1. A key press sends the code below; the matching release sends
 // the same value with bit 7 set, which is how we track modifier state.
@@ -244,6 +262,14 @@ void inject_scancode(u8 scancode)
 
 void init()
 {
+    // A USB-only machine has no 8042 to configure, and every byte written here
+    // would go nowhere. Say so and leave; usbd brings up the keyboard on those
+    // machines, and the queue below is fed the same either way.
+    if (!controller_present()) {
+        g_present = false;
+        return;
+    }
+
     // Do not assume the firmware left the controller in a usable state. It is
     // entitled to hand over with scanning disabled, and then no amount of
     // typing produces a single scancode - the bytes are dropped inside the
@@ -281,6 +307,8 @@ void init()
     interrupts::register_irq(interrupts::kIrqKeyboard, on_key);
     pic::unmask(interrupts::kIrqKeyboard);
 }
+
+bool present() { return g_present; }
 
 bool has_input()
 {

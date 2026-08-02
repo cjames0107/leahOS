@@ -67,6 +67,7 @@
 #define SYS_ipctryrecv  77
 #define SYS_setcreds    78
 #define SYS_uidof       79
+#define SYS_inputpost   80
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

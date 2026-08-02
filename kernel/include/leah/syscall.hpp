@@ -107,6 +107,7 @@ enum Number : u64 {
     IpcTryRecv  = 77,  // recv without blocking
     SetCreds    = 78,  // set a process's identity outright; root, i.e. authd
     UidOf       = 79,  // the uid of a process, so a server can trust who asked
+    InputPost   = 80,  // a ring 3 input driver putting keys into the queue
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

@@ -20,6 +20,10 @@ u32 modifiers();
 // should not depend on which one the hand is on.
 void set_usb_modifiers(u32 mods);
 
+// False when the machine has no PS/2 controller at all, which is normal on
+// anything recent: the keys come from usbd instead, through the same queue.
+bool present();
+
 void init();
 
 // Feed a scancode through the decoder as though it had arrived on IRQ 1.
