@@ -1105,6 +1105,38 @@ int main(void)
                 }
                 r.word[0] = write_inode(ino, &in, inode_links(ino));
             }
+        } else if (m.tag == VFS_TRUNC) {
+            /* Nothing truncated before this existed, anywhere: O_TRUNC was a
+             * no-op and the kernel's "write the whole file" returned early on
+             * zero bytes. Writing a shorter file over a longer one therefore
+             * left the old tail in place, and what came back was the new
+             * contents followed by whatever used to be there - which reads
+             * exactly like corruption and is the likeliest thing behind a file
+             * that looks garbled after being saved over.
+             *
+             * The blocks go back before the size does. The other order would
+             * leave a file claiming to be empty while still owning them. */
+            struct inode in;
+            const unsigned ino = lookup((const char*)m.data, &in);
+            if (ino != 0 && may_access(&in, from, 1)) {
+                const unsigned long n =
+                    (in.size + g_block_size - 1) / g_block_size;
+                unsigned long b;
+                for (b = 0; b < n; ++b) {
+                    const unsigned long phys = map_block(&in, b);
+                    if (phys != 0)
+                        free_block(phys);
+                }
+                /* An empty extent tree: the header stays, the entries go, or
+                 * the next write would follow pointers to freed blocks. */
+                memset(in.block, 0, 60);
+                wr16w(in.block, 0, 0xF30A);     /* magic */
+                wr16w(in.block, 2, 0);          /* entries */
+                wr16w(in.block, 4, 4);          /* max */
+                wr16w(in.block, 6, 0);          /* depth */
+                in.size = 0;
+                r.word[0] = write_inode(ino, &in, inode_links(ino));
+            }
         } else if (m.tag == VFS_SYNC) {
             r.word[0] = write_superblock();
         }

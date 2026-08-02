@@ -65,20 +65,38 @@ static int          g_started;
 static int g_vfs = -2;                  /* -2 not tried, -1 no server */
 static struct vfs_shared* g_buf;
 static unsigned g_buf_key;
+static int g_buf_pid = -1;              /* whose segment g_buf actually is */
 
 static int vfs_port(void)
 {
-    if (g_vfs == -2) {
-        g_vfs = port_open(IPC_PORT_VFS);
-        if (g_vfs >= 0) {
-            int id;
-            g_buf_key = 0x56460000u | ((unsigned)getpid() & 0xFFFFu);
-            id = shm_open(g_buf_key, sizeof(struct vfs_shared), SHM_PUBLIC);
-            g_buf = id < 0 ? 0 : (struct vfs_shared*)shm_map(id);
-            if (g_buf == 0)
-                g_vfs = -1;
-        }
-    }
+    const int pid = (int)getpid();
+    int id;
+
+    /* The pid is checked every time, not just on the first call, because of
+     * fork. A forked child inherits these statics: the parent's key, and a
+     * mapping of the parent's segment that points at the same physical pages.
+     * Nothing fails - both processes just use one buffer, and each reads what
+     * the other left in it. Whole files come back as fragments of whatever
+     * the other one was doing.
+     *
+     * exec hides this, which is why it took a while to find: fork+exec resets
+     * the statics, so every shell command was fine and only long-lived
+     * processes that fork without exec - which is most of the desktop - were
+     * corrupting each other. */
+    if (g_vfs != -2 && g_buf_pid == pid)
+        return g_vfs;
+
+    g_vfs = port_open(IPC_PORT_VFS);
+    g_buf = 0;
+    g_buf_pid = pid;
+    if (g_vfs < 0)
+        return g_vfs;
+
+    g_buf_key = 0x56460000u | ((unsigned)pid & 0xFFFFu);
+    id = shm_open(g_buf_key, sizeof(struct vfs_shared), SHM_PUBLIC);
+    g_buf = id < 0 ? 0 : (struct vfs_shared*)shm_map(id);
+    if (g_buf == 0)
+        g_vfs = -1;
     return g_vfs;
 }
 
@@ -249,7 +267,7 @@ static int kernel_refs(int kfd)
 
 /* The mode bits, read the way the far side will read them. Not a security
  * decision: see the call site. */
-static int permitted(unsigned mode, unsigned uid, unsigned gid, int want_write)
+static int permitted_stat(unsigned mode, unsigned uid, unsigned gid, int want_write)
 {
     const unsigned me = getuid();
     unsigned r, w;
@@ -288,7 +306,7 @@ int open(const char* path, int flags)
         size = 0;
     } else if (is_dir && (flags & O_WRONLY) != 0) {
         return -1;                      /* a directory cannot be written */
-    } else if (!permitted((unsigned)a.word[2],
+    } else if (!permitted_stat((unsigned)a.word[2],
                           (unsigned)((a.word[3] >> 16) & 0xFFFF),
                           (unsigned)(a.word[3] & 0xFFFF),
                           (flags & O_WRONLY) != 0)) {
@@ -299,6 +317,9 @@ int open(const char* path, int flags)
          * saying so, and because that is what open() has always done. */
         return -1;
     }
+
+    if ((flags & O_TRUNC) != 0 && exists && !is_dir && size > 0)
+        vfs_call(VFS_TRUNC, resolved, 0, 0, &a);
 
     fd = alloc_fd();
     if (fd < 0)
