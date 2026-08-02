@@ -52,6 +52,8 @@ extern "C" const u8 g_server_blockd[];
 extern "C" const u8 g_server_blockd_end[];
 extern "C" const u8 g_server_vfsd[];
 extern "C" const u8 g_server_vfsd_end[];
+extern "C" const u8 g_server_init[];
+extern "C" const u8 g_server_init_end[];
 
 namespace {
 
@@ -374,10 +376,17 @@ void run_userland()
     step("ext4 write path verified through vfsd");
 
     console::set_color(console::Color::White);
-    console::write("\n  starting /BIN/INIT.ELF\n\n");
+    console::write("\n  starting init\n\n");
     console::set_color(console::Color::LightGray);
 
-    const u32 pid = process::create("init", "/BIN/INIT.ELF", scheduler::current_pid());
+    /* Carried in the kernel image like the two servers. Not because init is
+     * needed before there is a filesystem - there is one by now - but because
+     * exec takes bytes rather than a path, and somebody has to have read the
+     * first program. Nothing in the kernel opens a file any more. */
+    const usize init_size =
+        static_cast<usize>(g_server_init_end - g_server_init);
+    const u32 pid = process::create_embedded("init", g_server_init, init_size,
+                                             scheduler::current_pid());
     if (pid == 0)
         panic("could not create the init process");
 

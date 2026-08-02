@@ -1,4 +1,7 @@
 #include <sys/syscall.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* read and write live in fs.c now, with the descriptor table they have to
@@ -15,25 +18,54 @@ pid_t fork(void)
     return (pid_t)__syscall(SYS_fork, 0, 0, 0, 0, 0);
 }
 
+/* Read the program, then hand the kernel its bytes.
+ *
+ * The kernel used to open the path itself, which made it a client of the
+ * filesystem server in the middle of building an address space - a blocking
+ * call at the worst possible moment, and the last place ring 0 reached into
+ * ring 3 for something it needed. Whoever wants to run a program is already a
+ * process with a filesystem; it can do its own reading.
+ */
 int execve(const char* path, char* const argv[], char* const envp[])
 {
-    /* Hand the descriptor table and the working directory to whatever comes
-     * next. They are ours, in memory that is about to be thrown away, and a
-     * shell that redirected a child's output would otherwise be handing that
-     * child nothing. */
+    char full[256];
+    struct stat st;
+    int fd;
+    void* image;
+    long got;
+    int result;
+
+    (void)envp;
+
+    __fd_resolve(path, full);
+    if (stat(full, &st) != 0 || st.st_type != S_IFREG || st.st_size == 0)
+        return -1;
+
+    fd = open(full, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    image = malloc((size_t)st.st_size);
+    if (image == 0) {
+        close(fd);
+        return -1;
+    }
+    got = read(fd, image, (unsigned long)st.st_size);
+    close(fd);
+    if (got != (long)st.st_size) {
+        free(image);
+        return -1;
+    }
+
+    /* Last, because it has to reflect the table as it will be handed over -
+     * after the descriptor this function opened has been closed again. */
     __fd_save_for_exec();
 
-    /* Resolve here too. The kernel still opens the image by name, and it is no
-     * longer told about the working directory, so a relative path would be
-     * resolved against a directory nobody has updated since boot. */
-    {
-        static char full[256];
-        __fd_resolve(path, full);
-        path = full;
-    }
-    /* The kernel only reads the path for now; argv/envp are accepted for a
-     * conventional signature but not yet passed to the new program. */
-    return (int)__syscall(SYS_execve, (long)path, (long)argv, (long)envp, 0, 0);
+    result = (int)__syscall(SYS_execve, (long)image, got, (long)argv, 0, 0);
+
+    /* Only reached when the exec failed: on success the kernel never returns
+     * here, and this address space is already gone. */
+    free(image);
+    return result;
 }
 
 pid_t wait(int* status)

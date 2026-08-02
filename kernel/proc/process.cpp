@@ -110,51 +110,24 @@ vaddr_t build_stack(const Args& args)
 // Load an ELF, map a stack, and lay out args in a fresh space. Borrows CR3 for
 // the duration and restores it. Returns the new space, with the entry point and
 // initial stack pointer written out, or 0.
-// Build an address space around a program. `image_bytes` non-null means the
-// program is already in memory - the two servers the kernel carries - and
-// `path` is then only a name for the error message.
-vmm::AddressSpace build_image(const char* path, const Args& args,
+//
+// The image is always bytes, never a path. It used to be able to take a path
+// and read it, which meant the kernel reaching into the filesystem server - a
+// blocking call, in the middle of building an address space, with all the
+// trouble that implies: a task that blocks is rescheduled with its own space
+// put back, silently undoing the switch below. Whoever wants to run a program
+// reads it themselves now and hands over the bytes.
+//
+// `name` is only for the error message.
+vmm::AddressSpace build_image(const char* name, const Args& args,
                               vaddr_t& entry_out, vaddr_t& stack_out,
-                              const u8* image_bytes = nullptr, usize image_size = 0)
+                              const u8* image_bytes, usize image_size)
 {
-    /* Read the whole program into kernel memory before switching to the new
-     * address space.
-     *
-     * Reading it goes through the filesystem server now, which means blocking,
-     * and a task that blocks is rescheduled with its own address space put
-     * back - which silently undoes the switch below. The loader would then
-     * write the segments into whatever space the caller was using and the new
-     * process would start on pages that were never filled in. Kernel memory is
-     * mapped in every address space, so a copy here is reachable from both
-     * sides of the switch.
-     *
-     * The two servers are already in memory and skip all of this, which is the
-     * whole reason they can be loaded before there is a filesystem. */
-    u8* owned = nullptr;
-    if (image_bytes == nullptr) {
-        vfs::Stat info{};
-        if (!vfs::stat(path, info) || info.type != vfs::Type::File)
-            return 0;
-        owned = static_cast<u8*>(kmalloc(info.size > 0 ? info.size : 1));
-        if (owned == nullptr)
-            return 0;
-        const isize got = vfs::read(path, 0, owned, info.size);
-        if (got < 0 || static_cast<u64>(got) != info.size) {
-            kfree(owned);
-            console::printf("  process: %s: cannot be read (got %d of %u)\n", path, (int)got, (unsigned)info.size);
-            return 0;
-        }
-        image_bytes = owned;
-        image_size = static_cast<usize>(info.size);
-    }
-
     const vmm::AddressSpace previous = vmm::current_space();
 
     const vmm::AddressSpace space = vmm::create_address_space();
-    if (space == 0) {
-        kfree(owned);
+    if (space == 0)
         return 0;
-    }
 
     vmm::switch_address_space(space);
 
@@ -164,8 +137,7 @@ vmm::AddressSpace build_image(const char* path, const Args& args,
         vmm::switch_address_space(previous);
         vmm::destroy_address_space(space);
         if (error != elf::Error::None)
-            console::printf("  process: %s: %s\n", path, elf::error_name(error));
-        kfree(owned);
+            console::printf("  process: %s: %s\n", name, elf::error_name(error));
         return 0;
     }
 
@@ -173,7 +145,6 @@ vmm::AddressSpace build_image(const char* path, const Args& args,
     entry_out = image.entry;
 
     vmm::switch_address_space(previous);
-    kfree(owned);
     return space;
 }
 
@@ -188,37 +159,7 @@ scheduler::TrapFrame entry_frame(vaddr_t entry, vaddr_t stack)
     return frame;
 }
 
-// Copy a user string (path) into the kernel before CR3 is switched away.
-void copy_string(const char* user, char* out, usize max)
-{
-    usize i = 0;
-    for (; i < max - 1 && user[i] != '\0'; ++i)
-        out[i] = user[i];
-    out[i] = '\0';
-}
-
 } // namespace
-
-u32 create(const char* name, const char* path, u32 parent_pid)
-{
-    cpu::InterruptGuard guard;
-
-    Args args;
-    single_arg(name, args);
-
-    vaddr_t entry = 0;
-    vaddr_t stack = 0;
-    const vmm::AddressSpace space = build_image(path, args, entry, stack);
-    if (space == 0)
-        return 0;
-
-    const u32 pid = scheduler::spawn_user(name, space, entry_frame(entry, stack), parent_pid);
-    if (pid == 0) {
-        vmm::destroy_address_space(space);
-        return 0;
-    }
-    return pid;
-}
 
 u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pid)
 {
@@ -243,23 +184,33 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
     return pid;
 }
 
-void exec(syscall::Frame& frame, const char* path, char** argv)
+void exec(syscall::Frame& frame, const u8* image, usize size, char** argv)
 {
     const vmm::AddressSpace old_space = scheduler::current_task_space();
 
-    // path and argv point into the caller's space, which build_image switches
-    // away from - copy them into the kernel (its stack is shared) first.
-    char kpath[256];
-    copy_string(path, kpath, sizeof(kpath));
+    /* The image and argv are in the caller's space, which build_image switches
+     * away from, so both are copied into the kernel first - its memory is
+     * mapped in every address space and so is reachable from both sides of the
+     * switch. The caller read the file; this is only the copy across the
+     * boundary, which is the part that has to be here. */
+    u8* owned = static_cast<u8*>(kmalloc(size));
+    if (owned == nullptr) {
+        frame.rax = static_cast<u64>(-1);
+        return;
+    }
+    memcpy(owned, image, size);
 
     Args args;
     copy_argv(argv, args);
     if (args.argc == 0)
-        single_arg(kpath, args);         // at least argv[0] = the program
+        single_arg("program", args);     // at least argv[0]
 
     vaddr_t entry = 0;
     vaddr_t stack = 0;
-    const vmm::AddressSpace space = build_image(kpath, args, entry, stack);
+    const char* name = args.argc > 0 ? args.storage + args.offset[0] : "program";
+    const vmm::AddressSpace space =
+        build_image(name, args, entry, stack, owned, size);
+    kfree(owned);
     if (space == 0) {
         frame.rax = static_cast<u64>(-1);
         return;

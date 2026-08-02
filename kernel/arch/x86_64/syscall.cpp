@@ -36,6 +36,11 @@ constexpr u64 kEferSyscallEnable = 1ull << 0;
 // A user pointer must not be trusted to point where the program claimed. The
 // full check needs the process's address space; for now, reject anything that
 // reaches into the kernel's higher half, which is the mapping that matters.
+// A program the kernel will copy into its own memory before mapping it. The
+// bound is not about correctness so much as about not letting a caller ask the
+// kernel to kmalloc an arbitrary amount on its say-so.
+constexpr u64 kMaxImageBytes = 32ull * 1024 * 1024;
+
 bool user_range_ok(vaddr_t base, u64 length)
 {
     constexpr vaddr_t kUserCeiling = 0x0000800000000000ull;   // canonical low half
@@ -1034,10 +1039,17 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
 
     case Execve:
-        // On success this rewrites frame to enter the new image and never
-        // "returns" to the caller; on failure it leaves frame->rax = -1.
-        process::exec(*frame, reinterpret_cast<const char*>(frame->rdi),
-                      reinterpret_cast<char**>(frame->rsi));
+        // execve(image, bytes, argv). The caller read the program; the kernel
+        // only maps it. On success this rewrites frame to enter the new image
+        // and never "returns" to the caller; on failure it leaves rax = -1.
+        if (frame->rsi == 0 || frame->rsi > kMaxImageBytes ||
+            !user_range_ok(frame->rdi, frame->rsi)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        process::exec(*frame, reinterpret_cast<const u8*>(frame->rdi),
+                      static_cast<usize>(frame->rsi),
+                      reinterpret_cast<char**>(frame->rdx));
         // A new image knows nothing of the old one's handlers, and their
         // addresses no longer mean anything, so dispositions go back to default.
         if (frame->rax != static_cast<u64>(-1))
