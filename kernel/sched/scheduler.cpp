@@ -29,6 +29,25 @@ constexpr usize kMaxTasks   = 32;
 constexpr u32 kNoPrevious   = 0xFFFFFFFFu;
 constexpr u32   kMaxSignals = signals::kMaxSignals;
 constexpr usize kStackSize  = 16 * 1024;
+
+// A word at the lowest address of every kernel stack, checked on every switch.
+//
+// A kernel stack grows down towards this; if it is ever not what was written
+// there, the stack has run past its own end and into whatever the heap put
+// underneath. That failure has no signature of its own - it corrupts something
+// else and shows up later as a jump to nonsense - so it is worth one compare
+// per switch to catch it where it happens instead.
+constexpr u64 kStackCanary = 0x5441434B47554152ull;   // "TACKGUAR"
+
+void plant_canary(u64 stack_base)
+{
+    *reinterpret_cast<u64*>(stack_base) = kStackCanary;
+}
+
+bool canary_intact(u64 stack_base)
+{
+    return *reinterpret_cast<const u64*>(stack_base) == kStackCanary;
+}
 constexpr u32   kQuantum    = 1;            // one 10 ms tick per slice
 
 enum class State : u8 {
@@ -333,6 +352,21 @@ void switch_to(u32 next_index)
      * nothing left on the stack to say who did it: the register dump names
      * where it went and the frame that set it up is already gone. Catching it
      * here names the task instead. */
+    if (prev->kernel_stack != 0 && !canary_intact(prev->kernel_stack)) {
+        console::printf("\n  scheduler: %s (slot %u, pid %u) ran off the bottom "
+                        "of its kernel stack\n",
+                        prev->name != nullptr ? prev->name : "?",
+                        current_index(), prev->pid);
+        panic("scheduler: kernel stack overflow");
+    }
+    if (next->kernel_stack != 0 && !canary_intact(next->kernel_stack)) {
+        console::printf("\n  scheduler: %s (slot %u, pid %u) has a smashed "
+                        "kernel stack\n",
+                        next->name != nullptr ? next->name : "?",
+                        next_index, next->pid);
+        panic("scheduler: kernel stack overflow");
+    }
+
     {
         const u64 resume = *reinterpret_cast<const u64*>(next->kernel_rsp + 48);
         if (resume < 0xFFFFFFFF80000000ull) {
@@ -410,6 +444,8 @@ u32 spawn(const char* name, Entry entry, void* arg)
         return 0;
 
     auto* stack = static_cast<u8*>(kmalloc(kStackSize));
+    if (stack != nullptr)
+        plant_canary(reinterpret_cast<u64>(stack));
     if (stack == nullptr) {
         task->state = State::Unused;
         return 0;
@@ -442,6 +478,8 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
         return 0;
 
     auto* stack = static_cast<u8*>(kmalloc(kStackSize));
+    if (stack != nullptr)
+        plant_canary(reinterpret_cast<u64>(stack));
     if (stack == nullptr) {
         task->state = State::Unused;
         return 0;
@@ -486,6 +524,8 @@ u32 spawn_thread(const TrapFrame& frame)
         return 0;
 
     auto* stack = static_cast<u8*>(kmalloc(kStackSize));
+    if (stack != nullptr)
+        plant_canary(reinterpret_cast<u64>(stack));
     if (stack == nullptr) {
         task->state = State::Unused;
         return 0;
@@ -1131,6 +1171,27 @@ void on_irq_return()
     switch_to(pick_next());
 }
 
+
+void current_stack_bounds(u64* base, u64* top)
+{
+    const Task* task = current();
+    if (base != nullptr) *base = task != nullptr ? task->kernel_stack : 0;
+    if (top != nullptr)  *top  = task != nullptr ? task->kernel_stack_top : 0;
+}
+
+const char* stack_owner(u64 address, u32* pid_out)
+{
+    for (u32 i = 0; i < g_task_count; ++i) {
+        const Task& t = g_tasks[i];
+        if (t.state == State::Unused || t.kernel_stack == 0)
+            continue;
+        if (address >= t.kernel_stack && address < t.kernel_stack_top) {
+            if (pid_out != nullptr) *pid_out = t.pid;
+            return t.name != nullptr ? t.name : "?";
+        }
+    }
+    return nullptr;
+}
 
 const char* current_name()
 {

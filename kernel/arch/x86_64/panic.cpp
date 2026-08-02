@@ -4,6 +4,7 @@
 #include <leah/vmm.hpp>
 #include <leah/cpu.hpp>
 #include <leah/panic.hpp>
+#include <leah/scheduler.hpp>
 
 namespace {
 
@@ -117,6 +118,33 @@ void stop_other_cpus()
      * a stale value that happens to look like an address will be in the list
      * too. It still beats guessing.
      */
+    /* Whether the stack pointer is even inside the running task's own stack.
+     * When it is not, everything downstream - the frames, the return addresses
+     * - is somebody else's memory being read as a stack, and saying so is more
+     * use than printing it. */
+    {
+        u64 base = 0, top = 0;
+        scheduler::current_stack_bounds(&base, &top);
+        console::printf("\n  running: %s (pid %u), kernel stack %016llx..%016llx\n",
+                        scheduler::current_name(), scheduler::current_pid(),
+                        base, top);
+        if (base != 0 && (frame.rsp < base || frame.rsp >= top)) {
+            u32 owner_pid = 0;
+            const char* owner = scheduler::stack_owner(frame.rsp, &owner_pid);
+            console::printf("  rsp is NOT in that stack; it belongs to %s\n",
+                            owner != nullptr ? owner : "no live task");
+            if (owner != nullptr)
+                console::printf("  that is pid %u\n", owner_pid);
+        }
+    }
+
+    {
+        const u64* raw = reinterpret_cast<const u64*>(frame.rsp & ~7ull);
+        console::write("\n  stack, from rsp:\n");
+        for (u32 i = 0; i < 10; ++i)
+            console::printf("    +%03u  %016llx\n", i * 8, raw[i]);
+    }
+
     {
         const u64* sp = reinterpret_cast<const u64*>(frame.rsp & ~7ull);
         console::write("\n  kernel addresses on the stack:\n");

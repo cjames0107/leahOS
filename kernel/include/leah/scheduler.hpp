@@ -183,6 +183,14 @@ u32 current_pid();
 
 // For a fault report: which program was running, and whether it was in ring 3.
 const char* current_name();
+
+// The kernel stack the running task is supposed to be using. For a panic to be
+// able to say whether the stack pointer it faulted with is even its own.
+void current_stack_bounds(u64* base, u64* top);
+
+// Which task's kernel stack an address falls inside, or nullptr. A panic uses
+// it to say whose stack a runaway pointer is actually standing on.
+const char* stack_owner(u64 address, u32* pid_out);
 bool current_is_user();
 u32 alive_count();
 
