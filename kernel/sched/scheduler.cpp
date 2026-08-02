@@ -1003,11 +1003,41 @@ bool set_current_gid(u32 gid)
     return true;
 }
 
-void set_credentials(u32 uid, u32 gid)
+u32 uid_of(u32 pid)
 {
-    Task* self = current();
-    self->uid = uid;
-    self->gid = gid;
+    KernelLock lock;
+    Task* t = find(pid);
+    // No such process reads as "not root", which is the safe way to be wrong.
+    return t == nullptr ? 0xFFFFFFFFu : t->uid;
+}
+
+bool set_credentials_of(u32 pid, u32 uid, u32 gid)
+{
+    // Root only - and in practice that means authd, which is the only thing
+    // that calls it. The ordinary setuid rule ("only root may change
+    // credentials") is exactly wrong for a login, because the whole point is
+    // that a correct password authorises the change and the person logging in
+    // is not root yet. Moving the check here keeps that: authd holds the
+    // privilege, checks the password, and then asks for the change on behalf
+    // of a caller who could never have asked for it themselves.
+    if (current()->uid != 0)
+        return false;
+
+    KernelLock lock;
+    Task* target = find(pid);
+    if (target == nullptr)
+        return false;
+
+    // Every thread of the process, not just the one that asked. Credentials
+    // that differ between threads of one program are a bug with no upside.
+    const u32 group = target->tgid;
+    for (u32 i = 0; i < g_task_count; ++i) {
+        if (g_tasks[i].state == State::Unused || g_tasks[i].tgid != group)
+            continue;
+        g_tasks[i].uid = uid;
+        g_tasks[i].gid = gid;
+    }
+    return true;
 }
 
 u32 current_tid()  { return current()->pid; }

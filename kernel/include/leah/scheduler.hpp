@@ -102,7 +102,16 @@ bool set_current_gid(u32 gid);
 // The one legitimate caller is the authentication path, which has just proved
 // the caller knows the account's password - that check *is* the authorisation,
 // and applying the ordinary rule on top would make a correct password fail.
-void set_credentials(u32 uid, u32 gid);
+// The identity of another process, for a server that has to decide what its
+// caller may do. Not privileged: a uid is not a secret, and the alternative is
+// servers believing whatever uid arrives in the message.
+u32 uid_of(u32 pid);
+
+// Set a process's identity outright, skipping the "only root may change
+// credentials" rule that would refuse every successful login by a non-root
+// user. Root only, which means authd: the password check that authorises this
+// lives there now, along with the file it has to read to make it.
+bool set_credentials_of(u32 pid, u32 uid, u32 gid);
 
 // --- signals ----------------------------------------------------------------
 //

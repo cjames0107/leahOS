@@ -141,7 +141,7 @@ vmm::AddressSpace build_image(const char* path, const Args& args,
         const isize got = vfs::read(path, 0, owned, info.size);
         if (got < 0 || static_cast<u64>(got) != info.size) {
             kfree(owned);
-            console::printf("  process: %s: cannot be read\n", path);
+            console::printf("  process: %s: cannot be read (got %d of %u)\n", path, (int)got, (unsigned)info.size);
             return 0;
         }
         image_bytes = owned;

@@ -39,11 +39,7 @@
 #define SYS_chmod    36
 #define SYS_chown    37
 #define SYS_futex    38
-#define SYS_login    42
 #define SYS_setecho  43
-#define SYS_username 44
-#define SYS_useradd  45
-#define SYS_passwd   46
 #define SYS_shmopen    47
 #define SYS_shmmap     48
 #define SYS_shmsize    49
@@ -69,6 +65,8 @@
 #define SYS_irqlisten   75
 #define SYS_irqwait     76
 #define SYS_ipctryrecv  77
+#define SYS_setcreds    78
+#define SYS_uidof       79
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

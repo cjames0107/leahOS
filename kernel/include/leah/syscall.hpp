@@ -54,11 +54,10 @@ enum Number : u64 {
     Chmod     = 36,
     Chown     = 37,
     Futex     = 38,
-    Login     = 42,   // authenticate and switch credentials
+    // 42, 44, 45 and 46 were Login, UserName, UserAdd and SetPasswd. The
+    // account database lives in authd now, along with the hashing it needed;
+    // the kernel's share of a login is SetCreds, below.
     SetEcho   = 43,   // console echo, off while a password is typed
-    UserName  = 44,
-    UserAdd   = 45,
-    SetPasswd = 46,
     // Shared memory: the first thing two processes can both write to.
     ShmOpen    = 47,   // open or create a segment by key
     ShmMap     = 48,   // map a segment into this process
@@ -105,7 +104,9 @@ enum Number : u64 {
     DmaAlloc    = 74,  // physically contiguous memory, and its physical address
     IrqListen   = 75,  // claim an interrupt line
     IrqWait     = 76,
-    IpcTryRecv  = 77,  // recv without blocking  // block until it fires
+    IpcTryRecv  = 77,  // recv without blocking
+    SetCreds    = 78,  // set a process's identity outright; root, i.e. authd
+    UidOf       = 79,  // the uid of a process, so a server can trust who asked
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

@@ -22,7 +22,6 @@
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/shm.hpp>
-#include <leah/sha256.hpp>
 #include <leah/smp.hpp>
 #include <leah/timer.hpp>
 #include <leah/types.hpp>
@@ -114,28 +113,6 @@ void print_pci()
 
 // Exercises split, reuse and coalescing rather than just proving that a single
 // allocation returns non-null.
-// Checked against the published digest for "abc". A hash that is subtly wrong
-// still looks like a hash, and would silently make every stored password
-// unverifiable rather than fail loudly.
-void self_test_sha256()
-{
-    static const u8 kExpected[32] = {
-        0xba,0x78,0x16,0xbf, 0x8f,0x01,0xcf,0xea, 0x41,0x41,0x40,0xde,
-        0x5d,0xae,0x22,0x23, 0xb0,0x03,0x61,0xa3, 0x96,0x17,0x7a,0x9c,
-        0xb4,0x10,0xff,0x61, 0xf2,0x00,0x15,0xad,
-    };
-    u8 digest[32];
-    crypto::sha256("abc", 3, digest);
-    if (memcmp(digest, kExpected, sizeof(digest)) != 0)
-        panic("sha256: does not match the published test vector");
-
-    // And a message long enough to need a second padding block, which is the
-    // case a one-block implementation gets wrong.
-    char long_input[200];
-    memset(long_input, 'a', sizeof(long_input));
-    crypto::sha256(long_input, sizeof(long_input), digest);
-}
-
 void self_test_heap()
 {
     const usize before = heap::used_bytes();
@@ -598,7 +575,6 @@ extern "C" void kernel_main(const boot::Info* boot_info)
 
     heap::init();
     pmm::init_refcounts();
-    self_test_sha256();
     self_test_heap();
     step("kernel heap online, self-test passed");
 

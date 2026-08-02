@@ -1,4 +1,3 @@
-#include <leah/accounts.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
@@ -646,6 +645,25 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             interrupts::wait_for(static_cast<u8>(frame->rdi)));
         break;
 
+    case SetCreds:
+        // The kernel's whole remaining share of logging in. Who is allowed to
+        // ask, and on what evidence, is authd's business; making it true of a
+        // running process is this.
+        frame->rax = static_cast<u64>(
+            scheduler::set_credentials_of(static_cast<u32>(frame->rdi),
+                                          static_cast<u32>(frame->rsi),
+                                          static_cast<u32>(frame->rdx))
+                ? 0 : -1);
+        break;
+
+    case UidOf:
+        // A server cannot take the caller's word for who the caller is - a uid
+        // inside a message is a uid the sender chose. This is the kernel
+        // saying it instead, about the pid the kernel itself reported.
+        frame->rax = static_cast<u64>(
+            scheduler::uid_of(static_cast<u32>(frame->rdi)));
+        break;
+
     case IpcTryRecv: {
         if (!user_range_ok(frame->rsi, sizeof(ipc::Message)) ||
             (frame->rdx != 0 && !user_range_ok(frame->rdx, sizeof(u32)))) {
@@ -764,82 +782,6 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         frame->rax = static_cast<u64>(
             sys_futex(frame->rdi, frame->rsi, frame->rdx));
         break;
-
-    case Login: {
-        // The password is copied in and the account file is read here, so the
-        // hash never enters a user process - which is what lets su work without
-        // being setuid and without a world-readable shadow file.
-        if (!user_range_ok(frame->rdi, 1)) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        char user[accounts::kMaxName] = {};
-        char password[128] = {};
-        char home[accounts::kMaxHome] = {};
-
-        const char* user_in = reinterpret_cast<const char*>(frame->rdi);
-        usize n = 0;
-        while (n < sizeof(user) - 1 && user_in[n] != '\0') { user[n] = user_in[n]; ++n; }
-
-        if (frame->rsi != 0 && user_range_ok(frame->rsi, 1)) {
-            const char* pw_in = reinterpret_cast<const char*>(frame->rsi);
-            usize m = 0;
-            while (m < sizeof(password) - 1 && pw_in[m] != '\0') {
-                password[m] = pw_in[m];
-                ++m;
-            }
-        }
-
-        const bool ok = accounts::login(user, frame->rsi != 0 ? password : nullptr,
-                                        home, sizeof(home));
-        if (ok && frame->rdx != 0 && user_range_ok(frame->rdx, sizeof(home)))
-            memcpy(reinterpret_cast<void*>(frame->rdx), home, sizeof(home));
-        // Wipe the copy rather than leave a password lying in kernel memory.
-        memset(password, 0, sizeof(password));
-        frame->rax = static_cast<u64>(ok ? 0 : -1);
-        break;
-    }
-
-    case UserAdd: {
-        // Strings are copied in before use, as everywhere: a user pointer that
-        // changes under the kernel is a bug waiting to happen.
-        char name[accounts::kMaxName] = {};
-        char password[128] = {};
-        char home[accounts::kMaxHome] = {};
-        if (!copy_user_string(frame->rdi, name, sizeof(name)) ||
-            !copy_user_string(frame->rsi, password, sizeof(password)) ||
-            !copy_user_string(frame->r8, home, sizeof(home))) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        const bool ok = accounts::create(name, password,
-                                         static_cast<u32>(frame->rdx),
-                                         static_cast<u32>(frame->r10), home);
-        memset(password, 0, sizeof(password));
-        frame->rax = static_cast<u64>(ok ? 0 : -1);
-        break;
-    }
-
-    case SetPasswd: {
-        char name[accounts::kMaxName] = {};
-        char old_password[128] = {};
-        char new_password[128] = {};
-        if (!copy_user_string(frame->rdi, name, sizeof(name)) ||
-            !copy_user_string(frame->rdx, new_password, sizeof(new_password))) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        const bool have_old = frame->rsi != 0 &&
-                              copy_user_string(frame->rsi, old_password,
-                                               sizeof(old_password));
-        const bool ok = accounts::set_password(name,
-                                               have_old ? old_password : nullptr,
-                                               new_password);
-        memset(old_password, 0, sizeof(old_password));
-        memset(new_password, 0, sizeof(new_password));
-        frame->rax = static_cast<u64>(ok ? 0 : -1);
-        break;
-    }
 
     case ShmOpen:
         // Create or open a segment by key. The key is the rendezvous: two
@@ -1022,20 +964,6 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         files::set_console_echo(frame->rdi != 0);
         frame->rax = 0;
         break;
-
-    case UserName: {
-        if (!user_range_ok(frame->rsi, 1)) {
-            frame->rax = static_cast<u64>(-1);
-            break;
-        }
-        char name[accounts::kMaxName] = {};
-        const bool ok = accounts::lookup_uid(static_cast<u32>(frame->rdi), name,
-                                             sizeof(name));
-        if (ok)
-            memcpy(reinterpret_cast<void*>(frame->rsi), name, sizeof(name));
-        frame->rax = static_cast<u64>(ok ? 0 : -1);
-        break;
-    }
 
     case Getuid:
         frame->rax = scheduler::current_uid();

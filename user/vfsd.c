@@ -823,7 +823,20 @@ int main(void)
                         unsigned long n = g_block_size - within;
                         if (n > want - done) n = want - done;
                         const unsigned long phys = map_block(&in, fb);
-                        if (phys == 0 || read_block(phys, g_block) != 0)
+                        if (phys == 0) {
+                            /* A hole. ext4 does not have to allocate a block
+                             * that is entirely zeros and mke2fs does not, so
+                             * an unmapped block inside the file is data - all
+                             * of it zero - and not the end of anything. Left
+                             * as an error this reads short by exactly the
+                             * hole, which is how a binary whose last eight
+                             * bytes happen to be zero fails to load while
+                             * every other binary is fine. */
+                            memset(out->data + done, 0, n);
+                            done += n;
+                            continue;
+                        }
+                        if (read_block(phys, g_block) != 0)
                             break;
                         memcpy(out->data + done, g_block + within, n);
                         done += n;

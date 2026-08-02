@@ -27,6 +27,7 @@ struct ipc_message {
 #define IPC_PORT_BLOCK 3
 #define IPC_PORT_NIC   4
 #define IPC_PORT_AUDIO 5
+#define IPC_PORT_AUTH  6
 
 /* Server side. */
 int port_create(unsigned name);
