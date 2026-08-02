@@ -34,7 +34,6 @@ const char* error_name(Error error);
 
 // Maps every PT_LOAD segment into the current address space at its own
 // p_vaddr. Returns Error::None on success.
-Error load(const char* path, Image& out);
 
 // The same, from an image already in memory.
 //

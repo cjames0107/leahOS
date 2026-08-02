@@ -25,7 +25,6 @@
 #include <leah/timer.hpp>
 #include <leah/types.hpp>
 #include <leah/string.hpp>
-#include <leah/vfs.hpp>
 #include <leah/vmm.hpp>
 
 namespace boot {
@@ -136,182 +135,6 @@ void self_test_heap()
 
 // The same shape as the ATA check: write a pattern well clear of anything that
 // matters, read it back through the controller, and compare. A DMA path can
-// fail in ways PIO cannot - a wrong physical address in the scatter/gather
-// table reads back someone else's memory rather than erroring - so the
-// round trip is the check that counts.
-// The same round-trip check the AHCI disk gets. A storage stack that reports
-// success without moving the right bytes is the failure worth catching, and
-// SCSI over bulk endpoints has plenty of places to lose them.
-
-void print_tree(const char* path, int depth)
-{
-    vfs::Entry entries[32];
-    usize count = 0;
-    if (!vfs::list(path, entries, 32, count))
-        return;
-
-    for (usize i = 0; i < count; ++i) {
-        for (int d = 0; d < depth; ++d)
-            console::write("  ");
-
-        if (entries[i].type == vfs::Type::Directory) {
-            console::set_color(console::Color::LightCyan);
-            console::printf("    %s/\n", entries[i].name);
-            console::set_color(console::Color::LightGray);
-
-            char child[vfs::kMaxPath];
-            usize n = 0;
-            for (const char* p = path; *p != '\0' && n + 1 < sizeof(child); ++p)
-                child[n++] = *p;
-            if (n > 0 && child[n - 1] != '/')
-                child[n++] = '/';
-            for (const char* p = entries[i].name; *p != '\0' && n + 1 < sizeof(child); ++p)
-                child[n++] = *p;
-            child[n] = '\0';
-
-            print_tree(child, depth + 1);
-        } else {
-            console::printf("    %s  (%llu bytes)\n", entries[i].name, entries[i].size);
-        }
-    }
-}
-
-// Reads the three cases that catch a subtly broken block map: a file smaller
-// than one block, a file spanning several blocks (which exercises the extent or
-// indirect map), and a name reached through a subdirectory. The fixtures come
-// from tools/mkext.sh.
-void self_test_fs()
-{
-    /* "Is something mounted" is now a question for the server, and the only
-     * honest way to ask it is to try. */
-    vfs::Stat root{};
-    if (!vfs::stat("/", root) || root.type != vfs::Type::Directory)
-        panic("vfs: the filesystem server has no root");
-
-    u64 size = 0;
-    char* hello = vfs::read_entire_file("/docs/hello.txt", &size);
-    if (hello == nullptr || size != 17)
-        panic("ext: /docs/hello.txt did not read back at its stated size");
-    if (memcmp(hello, "Hello from ext4.\n", 17) != 0)
-        panic("ext: /docs/hello.txt contents are wrong");
-    kfree(hello);
-
-    // Larger than one 4 KiB block, so this only passes if the block map walks
-    // past the first block correctly.
-    vfs::Stat readme{};
-    if (!vfs::stat("/docs/readme.md", readme) || readme.size < 4096)
-        panic("ext: /docs/readme.md is missing or unexpectedly small");
-
-    char* text = vfs::read_entire_file("/docs/readme.md", &size);
-    if (text == nullptr || size != readme.size)
-        panic("ext: short read on a multi-block file");
-    if (memcmp(text, "# leahOS", 8) != 0)
-        panic("ext: multi-block read returned the wrong bytes");
-    // The tail matters more than the head: a broken map still gets block 0 right.
-    if (memcmp(text + size - 8, "block. \n", 8) != 0)
-        panic("ext: the end of a multi-block file is wrong");
-    kfree(text);
-
-    // A path through a subdirectory.
-    char* notes = vfs::read_entire_file("/docs/notes.txt", &size);
-    if (notes == nullptr || size != 30)
-        panic("ext: /docs/notes.txt did not resolve");
-    kfree(notes);
-
-    if (vfs::stat("/nope.txt", readme))
-        panic("ext: stat succeeded on a file that does not exist");
-}
-
-// Writing is where a filesystem gets to corrupt itself, so this covers the
-// cases that actually allocate on ext: a fresh inode, a file that spans several
-// blocks (its extent has to grow), a subdirectory with its "." and ".." set up,
-// and deletion returning inodes and blocks to the bitmaps. tools/fsck-ext.sh
-// then has e2fsck confirm the volume is still consistent afterwards.
-void self_test_fs_write()
-{
-    // Be idempotent: fsck-ext.sh runs on a persistent disk, so a previous boot
-    // may have left these behind and create() of an existing name must fail.
-    vfs::Stat leftover{};
-    if (vfs::stat("/OUT/nested.txt", leftover))
-        vfs::remove("/OUT/nested.txt");
-    if (vfs::stat("/OUT", leftover))
-        vfs::remove("/OUT");
-
-    static const char kSmall[] = "written by leahOS\n";
-    if (!vfs::write_entire_file("/wrote.txt", kSmall, sizeof(kSmall) - 1))
-        panic("ext: could not create /wrote.txt");
-
-    u64 size = 0;
-    char* back = vfs::read_entire_file("/wrote.txt", &size);
-    if (back == nullptr || size != sizeof(kSmall) - 1 ||
-        memcmp(back, kSmall, size) != 0)
-        panic("ext: /wrote.txt did not read back as written");
-    kfree(back);
-
-    // Several 4 KiB blocks, so block allocation and extent growth both run.
-    constexpr usize kBigSize = 9000;
-    auto* big = static_cast<u8*>(kmalloc(kBigSize));
-    if (big == nullptr)
-        panic("ext: out of memory for the write test");
-    for (usize i = 0; i < kBigSize; ++i)
-        big[i] = static_cast<u8>(i * 31 + 7);
-
-    if (!vfs::write_entire_file("/BIG.BIN", big, kBigSize))
-        panic("ext: could not write a multi-block file");
-
-    auto* big_back = static_cast<u8*>(kmalloc(kBigSize));
-    if (big_back == nullptr)
-        panic("ext: out of memory verifying the write test");
-    if (vfs::read("/BIG.BIN", 0, big_back, kBigSize) != static_cast<isize>(kBigSize))
-        panic("ext: short read on a file we just wrote");
-    if (memcmp(big, big_back, kBigSize) != 0)
-        panic("ext: multi-block write did not round trip");
-    kfree(big_back);
-    kfree(big);
-
-    // Directory creation, including its "." and ".." entries, and a file in it.
-    if (!vfs::create("/OUT", vfs::Type::Directory))
-        panic("ext: could not create a directory");
-    if (!vfs::write_entire_file("/OUT/nested.txt", kSmall, sizeof(kSmall) - 1))
-        panic("ext: could not write inside a created directory");
-
-    char* nested = vfs::read_entire_file("/OUT/nested.txt", &size);
-    if (nested == nullptr || size != sizeof(kSmall) - 1)
-        panic("ext: file in a created directory did not read back");
-    kfree(nested);
-
-    // Deletion, and the inode/blocks coming back to the bitmaps.
-    if (!vfs::write_entire_file("/temp.txt", kSmall, sizeof(kSmall) - 1))
-        panic("ext: could not create the file to be deleted");
-    if (!vfs::remove("/temp.txt"))
-        panic("ext: remove failed");
-    vfs::Stat gone{};
-    if (vfs::stat("/temp.txt", gone))
-        panic("ext: a removed file is still there");
-
-    // A non-empty directory must refuse to disappear and orphan its contents.
-    if (vfs::remove("/OUT"))
-        panic("ext: removed a directory that still had a file in it");
-
-    // Rename is a re-link, no data copy: move the nested file up a level.
-    if (!vfs::rename("/OUT/nested.txt", "/moved.txt"))
-        panic("ext: rename failed");
-    if (vfs::stat("/OUT/nested.txt", gone))
-        panic("ext: rename left the source behind");
-    char* moved = vfs::read_entire_file("/moved.txt", &size);
-    if (moved == nullptr || size != sizeof(kSmall) - 1 ||
-        memcmp(moved, kSmall, size) != 0)
-        panic("ext: renamed file did not read back");
-    kfree(moved);
-
-    // Clean up so a persistent re-run starts fresh and e2fsck sees no leftovers
-    // beyond a consistent volume.
-    vfs::remove("/moved.txt");
-    vfs::remove("/OUT");
-    vfs::remove("/wrote.txt");
-    vfs::remove("/BIG.BIN");
-}
-
 // Loads a real ELF off the filesystem and calls it. Still ring 0 and still the
 // Resolves the gateway's MAC over ARP - proving the NIC transmits (the request)
 // and receives (the reply), and that the ARP layer works, all against QEMU's
@@ -366,14 +189,11 @@ void run_userland()
     if (!start_servers())
         panic("no filesystem: nothing can be loaded");
 
-    /* The same checks the kernel's own ext4 used to pass, against the server
-     * that replaced it. They run here rather than during the hardware bring-up
-     * because this is the first moment in the boot at which a filesystem
-     * exists at all. */
-    self_test_fs();
-    step("ext4 read path verified through vfsd");
-    self_test_fs_write();
-    step("ext4 write path verified through vfsd");
+    /* The kernel used to verify the filesystem here, back when it had a
+     * client to verify it with. It has none: reading a file is not something
+     * the kernel does any more, and a test it cannot perform is a test that
+     * belongs to whoever can. `tests` covers ext4 from ring 3, which is also
+     * the only place it matters. */
 
     console::set_color(console::Color::White);
     console::write("\n  starting init\n\n");

@@ -2,7 +2,6 @@
 #include <leah/heap.hpp>
 #include <leah/pmm.hpp>
 #include <leah/string.hpp>
-#include <leah/vfs.hpp>
 #include <leah/vmm.hpp>
 
 namespace elf {
@@ -93,7 +92,7 @@ isize fetch(const Source& src, u64 offset, void* out, usize length)
         memcpy(out, src.memory + offset, static_cast<usize>(n));
         return static_cast<isize>(n);
     }
-    return vfs::read(src.path, offset, out, length);
+    return -1;
 }
 
 Error load_from(const Source& src, Image& out)
@@ -202,15 +201,6 @@ Error load_from(const Source& src, Image& out)
 }
 
 } // namespace
-
-Error load(const char* path, Image& out)
-{
-    vfs::Stat info{};
-    if (!vfs::stat(path, info) || info.type != vfs::Type::File)
-        return Error::NotFound;
-    const Source src{ path, nullptr, info.size };
-    return load_from(src, out);
-}
 
 Error load_memory(const u8* image, usize size, Image& out)
 {

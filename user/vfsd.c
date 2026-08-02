@@ -1137,6 +1137,49 @@ int main(void)
                 in.size = 0;
                 r.word[0] = write_inode(ino, &in, inode_links(ino));
             }
+        } else if (m.tag == VFS_RENAME) {
+            /* A real rename: the directory entry moves and the inode stays
+             * where it is. The kernel used to emulate this by reading the
+             * whole file, writing it somewhere else and deleting the original
+             * - correct, and honest about being slow, but it also meant a move
+             * could half-succeed and it could not move a directory at all.
+             * Moving the entry can do neither of those things.
+             *
+             * The two paths arrive packed as consecutive strings. */
+            char oldp[256], oldn[64], newp[256], newn[64];
+            const char* second = (const char*)m.data;
+            struct inode from_dir, to_dir, victim;
+            unsigned from_ino = 0, to_ino = 0, ino = 0;
+
+            while (*second != '\0') ++second;
+            ++second;                       /* past the first NUL */
+
+            if (split_path((const char*)m.data, oldp, oldn) == 0 &&
+                split_path(second, newp, newn) == 0 &&
+                (from_ino = lookup(oldp, &from_dir)) != 0 &&
+                (to_ino = lookup(newp, &to_dir)) != 0 &&
+                lookup((const char*)m.data, &victim) != 0 &&
+                may_access(&victim, from, 1) &&
+                dir_search(&to_dir, newn, 0, 0, 0) == 0) {
+
+                const unsigned type =
+                    (victim.mode & 0xF000) == 0x4000 ? 2u : 1u;
+
+                /* Same directory is the common case and needs care: the two
+                 * inodes are copies of one on-disk directory, so writing the
+                 * stale one back afterwards would undo the other's edit. */
+                if (from_ino == to_ino) {
+                    if (dir_remove(&from_dir, oldn, &ino) == 0 && ino != 0 &&
+                        dir_add(&from_dir, from_ino, newn, ino, type) == 0)
+                        r.word[0] = write_inode(from_ino, &from_dir,
+                                                dir_links(from_ino));
+                } else if (dir_remove(&from_dir, oldn, &ino) == 0 && ino != 0) {
+                    if (dir_add(&to_dir, to_ino, newn, ino, type) == 0 &&
+                        write_inode(to_ino, &to_dir, dir_links(to_ino)) == 0)
+                        r.word[0] = write_inode(from_ino, &from_dir,
+                                                dir_links(from_ino));
+                }
+            }
         } else if (m.tag == VFS_SYNC) {
             r.word[0] = write_superblock();
         }

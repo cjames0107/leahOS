@@ -18,7 +18,6 @@
 #include <leah/spinlock.hpp>
 #include <leah/string.hpp>
 #include <leah/syscall.hpp>
-#include <leah/vfs.hpp>
 #include <leah/vmm.hpp>
 
 extern "C" void syscall_entry();
@@ -705,62 +704,13 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         frame->rax = scheduler::current_tgid();
         break;
 
-    case Open:
-        frame->rax = static_cast<u64>(
-            files::open(reinterpret_cast<const char*>(frame->rdi),
-                        static_cast<u32>(frame->rsi)));
-        break;
-
     case Close:
         frame->rax = static_cast<u64>(files::close(static_cast<int>(frame->rdi)));
-        break;
-
-    case Lseek:
-        frame->rax = static_cast<u64>(
-            files::lseek(static_cast<int>(frame->rdi),
-                         static_cast<i64>(frame->rsi), static_cast<int>(frame->rdx)));
-        break;
-
-    case Stat:
-        frame->rax = static_cast<u64>(
-            files::stat(reinterpret_cast<const char*>(frame->rdi),
-                        reinterpret_cast<void*>(frame->rsi)));
-        break;
-
-    case Getdents:
-        frame->rax = static_cast<u64>(
-            files::getdents(reinterpret_cast<const char*>(frame->rdi),
-                            reinterpret_cast<void*>(frame->rsi), frame->rdx));
-        break;
-
-    case Chdir:
-        frame->rax = static_cast<u64>(
-            files::chdir(reinterpret_cast<const char*>(frame->rdi)));
-        break;
-
-    case Getcwd:
-        frame->rax = static_cast<u64>(
-            files::getcwd(reinterpret_cast<char*>(frame->rdi), frame->rsi));
-        break;
-
-    case Mkdir:
-        frame->rax = static_cast<u64>(
-            files::mkdir(reinterpret_cast<const char*>(frame->rdi)));
-        break;
-
-    case Unlink:
-        frame->rax = static_cast<u64>(
-            files::unlink(reinterpret_cast<const char*>(frame->rdi)));
         break;
 
     case Pipe:
         frame->rax = static_cast<u64>(
             files::pipe(reinterpret_cast<int*>(frame->rdi)));
-        break;
-
-    case Dup2:
-        frame->rax = static_cast<u64>(
-            files::dup2(static_cast<int>(frame->rdi), static_cast<int>(frame->rsi)));
         break;
 
     case Sbrk:
@@ -990,19 +940,6 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             scheduler::set_current_gid(static_cast<u32>(frame->rdi)) ? 0 : -1);
         break;
 
-    case Chmod:
-        frame->rax = static_cast<u64>(
-            files::chmod(reinterpret_cast<const char*>(frame->rdi),
-                         static_cast<u16>(frame->rsi)));
-        break;
-
-    case Chown:
-        frame->rax = static_cast<u64>(
-            files::chown(reinterpret_cast<const char*>(frame->rdi),
-                         static_cast<u32>(frame->rsi),
-                         static_cast<u32>(frame->rdx)));
-        break;
-
     case Kill:
         frame->rax = static_cast<u64>(
             scheduler::signal_send(static_cast<u32>(frame->rdi),
@@ -1027,12 +964,6 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         // every other call, this one must not overwrite frame->rax afterwards.
         sys_sigreturn(frame);
         return;
-
-    case Rename:
-        frame->rax = static_cast<u64>(
-            files::rename(reinterpret_cast<const char*>(frame->rdi),
-                          reinterpret_cast<const char*>(frame->rsi)));
-        break;
 
     case Fork:
         frame->rax = scheduler::fork_current(to_trap_frame(*frame));

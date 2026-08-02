@@ -527,15 +527,32 @@ int unlink(const char* path)
 
 int rename(const char* oldpath, const char* newpath)
 {
-    /* Still the kernel's, because vfsd has no rename and adding one is a change
-     * to the filesystem rather than to where descriptors live. It is handed an
-     * absolute path, so it no longer depends on a working directory the kernel
-     * has stopped being told about. */
     char from[PATH_MAX], to[PATH_MAX];
+    struct ipc_message q, a;
+    unsigned at = 0, i;
+
     start();
+    if (vfs_port() < 0)
+        return -1;
     __fd_resolve(oldpath, from);
     __fd_resolve(newpath, to);
-    return (int)__syscall(SYS_rename, (long)from, (long)to, 0, 0, 0);
+
+    /* Two paths in one message, packed as consecutive strings - the only call
+     * here that names two files. */
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_RENAME;
+    q.shm_key = (int)g_buf_key;
+    q.shm_bytes = sizeof(struct vfs_shared);
+    for (i = 0; from[i] != '\0' && at + 2 < sizeof(q.data); ++i)
+        q.data[at++] = from[i];
+    q.data[at++] = '\0';
+    for (i = 0; to[i] != '\0' && at + 2 < sizeof(q.data); ++i)
+        q.data[at++] = to[i];
+    q.data[at++] = '\0';
+    q.bytes = at;
+
+    memset(&a, 0, sizeof(a));
+    return ipc_call(g_vfs, &q, &a) == 0 && a.word[0] >= 0 ? 0 : -1;
 }
 
 int chmod(const char* path, unsigned mode)

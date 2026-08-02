@@ -2,7 +2,6 @@
 #include <leah/cpu.hpp>
 #include <leah/elf.hpp>
 #include <leah/heap.hpp>
-#include <leah/vfs.hpp>
 #include <leah/memory.hpp>
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>

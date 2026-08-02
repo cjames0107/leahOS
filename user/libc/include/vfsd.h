@@ -33,6 +33,7 @@ struct vfs_shared {
 #define VFS_CHMOD   10  /* data = path, w1 = mode                             */
 #define VFS_CHOWN   11  /* data = path, w1 = uid, w2 = gid                    */
 #define VFS_TRUNC   12  /* data = path -> length zero, blocks returned        */
+#define VFS_RENAME  13  /* data = old\0new\0 -> the entry moves, inode stays   */
 
 #define VFS_KIND_FILE 0
 #define VFS_KIND_DIR  1

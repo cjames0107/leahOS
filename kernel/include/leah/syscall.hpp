@@ -22,19 +22,9 @@ enum Number : u64 {
     Execve  = 5,
     Wait    = 6,
     Yield   = 7,
-    Open    = 8,
     Close   = 9,
-    Lseek   = 10,
-    Stat    = 11,
-    Getdents = 12,
-    Chdir   = 13,
-    Getcwd  = 14,
-    Mkdir   = 15,
-    Unlink  = 16,
     Pipe    = 17,
-    Dup2    = 18,
     Sbrk    = 19,
-    Rename  = 20,
     // 21-24 and 39-41 were the network: netinfo, ping, arp, resolve, connect,
     // send and receive. The stack is a process now and is reached by message
     // rather than by trap. The numbers are left as a gap rather than reused -
@@ -51,8 +41,6 @@ enum Number : u64 {
     Setuid    = 33,
     Getgid    = 34,
     Setgid    = 35,
-    Chmod     = 36,
-    Chown     = 37,
     Futex     = 38,
     // 42, 44, 45 and 46 were Login, UserName, UserAdd and SetPasswd. The
     // account database lives in authd now, along with the hashing it needed;
