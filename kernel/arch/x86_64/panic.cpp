@@ -138,6 +138,29 @@ void stop_other_cpus()
         }
     }
 
+    /* The syscall frame at the top of the running task's kernel stack.
+     * syscall::Frame is seventeen words, so it occupies exactly the last 136
+     * bytes and its base - the `frame` pointer syscall_dispatch is handed - is
+     * kernel_stack_top - 136. Printed labelled because that address is what
+     * the 2-CPU wild jumps land on, and seeing the frame beside the registers
+     * is what identified it. */
+    {
+        u64 base = 0, top = 0;
+        scheduler::current_stack_bounds(&base, &top);
+        if (top != 0) {
+            const u64* words = reinterpret_cast<const u64*>(top - 136);
+            static const char* kNames[17] = {
+                "r15", "r14", "r13", "r12", "rbp", "rbx",
+                "r11", "r10", "r9 ", "r8 ", "rdx", "rsi", "rdi", "rax",
+                "urip", "uflg", "ursp" };
+            console::printf("\n  syscall frame at the top of that stack "
+                            "(base %016llx):\n", top - 136);
+            for (u32 i = 0; i < 17; ++i)
+                console::printf("    top-%03u  %-4s  %016llx\n",
+                                136 - i * 8, kNames[i], words[i]);
+        }
+    }
+
     {
         const u64* raw = reinterpret_cast<const u64*>(frame.rsp & ~7ull);
         console::write("\n  stack, from rsp:\n");
