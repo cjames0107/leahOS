@@ -41,7 +41,7 @@ EXT_MIB         := 64             # the ext4 root filesystem on disk 1
 # Override on the command line, e.g. `make run MEM=2G` or
 # `make headless TIMEOUT=15`.
 MEM        ?= 1024M
-CPUS       ?= 1
+CPUS       ?= 2
 TIMEOUT    ?= 6
 # Where the AC'97 controller's output goes. `coreaudio` is the host's speakers;
 # `none` still presents the device to the guest but throws the samples away,

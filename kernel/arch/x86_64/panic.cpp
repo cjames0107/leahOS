@@ -156,7 +156,7 @@ void stop_other_cpus()
             console::printf("\n  syscall frame at the top of that stack "
                             "(base %016llx):\n", top - 136);
             for (u32 i = 0; i < 17; ++i)
-                console::printf("    top-%03u  %-4s  %016llx\n",
+                console::printf("    top-%03u  %s\t%016llx\n",
                                 136 - i * 8, kNames[i], words[i]);
         }
     }

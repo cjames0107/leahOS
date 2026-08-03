@@ -181,6 +181,46 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
 {
     using namespace interrupts;
 
+    /* Is this frame even shaped like a frame?
+     *
+     * Checked on the way *in*, because by the time a malformed one reaches the
+     * IRETQ on the way out it has already been turned into a wild jump and the
+     * register dump is the wreckage rather than the cause. Three things are
+     * true of every real frame the CPU pushes: CS is one of exactly two
+     * selectors, bit 1 of RFLAGS is hardwired to 1, and a frame from ring 3
+     * carries a user RSP. Catching a violation here says the frame was already
+     * wrong when the handler was entered - which puts the fault before this
+     * point, not after it. */
+    {
+        const u64 cs = frame->cs;
+        const bool ring3 = (cs & 3) == 3;
+        const bool cs_ok = cs == 0x08 || cs == (0x20 | 3) || cs == (0x18 | 3) ||
+                           cs == (0x28 | 3) || cs == 0x10;
+        if (!cs_ok || (frame->rflags & 2) == 0 ||
+            (ring3 && frame->rsp >= 0xFFFF800000000000ull)) {
+            console::printf("\n  interrupt_dispatch: malformed frame at %p\n"
+                            "    vector %llu err %llx rip %016llx cs %04llx\n"
+                            "    rflags %016llx rsp %016llx ss %04llx\n",
+                            frame, frame->vector, frame->error_code,
+                            frame->rip, cs, frame->rflags, frame->rsp,
+                            frame->ss);
+            {
+                u64 base = 0, top = 0;
+                scheduler::current_stack_bounds(&base, &top);
+                console::printf("    task %s stack %016llx..%016llx\n"
+                                "    frame is %llu bytes below the top\n",
+                                scheduler::current_name(), base, top,
+                                top - reinterpret_cast<u64>(frame));
+                const u64* w = reinterpret_cast<const u64*>(frame);
+                for (u32 i = 0; i < 26; ++i)
+                    console::printf("    +%03u %016llx%s\n", i * 8, w[i],
+                                    i == 15 ? "  <- vector slot" :
+                                    i == 17 ? "  <- rip slot" : "");
+            }
+            panic("interrupt_dispatch: the frame was already malformed on entry");
+        }
+    }
+
     // A TLB shootdown is serviced before anything else and without the kernel
     // lock: the CPU that sent it is holding that lock and waiting for this
     // acknowledgement, so taking it here would deadlock the pair.

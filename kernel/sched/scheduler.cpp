@@ -334,7 +334,20 @@ void switch_to(u32 next_index)
                 ++g_busy_by_cpu[cpu];
         }
     }
-    __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELEASE);
+    /* Nobody else may already be running this task. pick_next refuses a task
+     * with on_cpu set, but that is a check made before the lock is necessarily
+     * still held all the way to here - and two processors executing on one
+     * kernel stack is precisely the shape of the fault being chased: frames
+     * interleaving, RSP ending up with a value that was never a stack. Assert
+     * it at the moment of the switch, where the other CPU can still be named. */
+    if (__atomic_exchange_n(&next->on_cpu, true, __ATOMIC_ACQ_REL)) {
+        console::printf("\n  scheduler: cpu %u switching to %s (slot %u, pid %u) "
+                        "which is already on another cpu\n",
+                        percpu::active(),
+                        next->name != nullptr ? next->name : "?",
+                        next_index, next->pid);
+        panic("scheduler: two processors on one task");
+    }
     percpu::current().previous_task = current_index();
     current_index() = next_index;
     g_quantum = kQuantum;
@@ -620,12 +633,23 @@ namespace {
         // a context switch from a task that held it, so this CPU owns it on
         // arrival - and halting while owning it would freeze every other
         // processor out of the kernel entirely.
-        const u32 held = sync::bkl::release_all();
+        sync::bkl::release_all();
         cpu::wait_for_interrupt();       // sti; hlt until something happens
-        sync::bkl::reacquire(held);
 
-        // Something woke us; go and look for work.
+        // Something woke us; go and look for work - holding the lock, which is
+        // the part that used to be missing.
+        //
+        // This said reacquire(held), and reacquire does nothing when held is
+        // zero. A CPU really can arrive at idle holding nothing: switch_to
+        // hands the incoming task its own saved depth, and idle's is zero, so
+        // the handoff *releases*. release_all then returned zero, reacquire
+        // declined to take anything, and pick_next and switch_to ran with no
+        // lock at all. Two idle processors would both see the same freshly
+        // woken task with on_cpu still clear, and both switch to it - two CPUs
+        // executing on one kernel stack, which is what every wild jump in this
+        // bug turned out to be.
         cpu::cli();
+        sync::bkl::acquire();
         switch_to(pick_next());
     }
 }
@@ -670,9 +694,13 @@ void start_idle() { start_idle_for(0); }
     for (;;) {
         switch_to(pick_next());
 
-        const u32 held = sync::bkl::release_all();
+        sync::bkl::release_all();
         cpu::wait_for_interrupt();      // sti; hlt - lets other CPUs in
-        sync::bkl::reacquire(held);
+        // Unconditionally, not reacquire(held): see the idle loop above. A
+        // depth of zero on the way in must not mean "schedule without the
+        // lock", which is what reacquire's early return amounted to.
+        cpu::cli();
+        sync::bkl::acquire();
         cpu::cli();
     }
 }
