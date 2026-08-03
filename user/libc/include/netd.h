@@ -36,6 +36,11 @@
 #define NET6_NEIGH  13  /* data = 16-byte address -> data = 6-byte MAC          */
 #define NET6_PING   14  /* data = 16-byte address, w1 = seq -> w0 = hop limit   */
 #define NET6_LOOKUP 15  /* data = a host name -> data = 16 address bytes        */
-#define NET6_TCP_CONNECT 16 /* data = 16-byte address, w1 = port -> w0 = conn   */
+#define NET6_TCP_CONNECT 16
+#define NET6_UDP_SEND 17 /* data = 16-byte addr + payload, w1 = port,
+                          * w2 = source port. The reply comes back through
+                          * NET_UDP_RECV, which does not care which family
+                          * carried it - a datagram is a datagram once it has
+                          * arrived. */ /* data = 16-byte address, w1 = port -> w0 = conn   */
 
 #endif

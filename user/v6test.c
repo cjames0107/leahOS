@@ -14,8 +14,11 @@
  * the parser instead of the stack.
  */
 
+#include <ipc.h>
 #include <net.h>
+#include <netd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -146,10 +149,76 @@ int main(int argc, char** argv)
     tcp_close(c);
 
     printf("v6test: %ld bytes, stream closed by the peer\n", total);
-    if (saw_http && total > 0) {
-        printf("v6test: PASS - TCP over IPv6 carried a real exchange\n");
-        return 0;
+    if (!saw_http || total == 0) {
+        printf("v6test: FAILED - nothing that looks like a reply\n");
+        return 1;
     }
-    printf("v6test: FAILED - nothing that looks like a reply\n");
-    return 1;
+    printf("v6test: TCP over IPv6 carried a real exchange\n");
+
+    /* And a datagram, to the same host, echoed back.
+     *
+     * The receiver is posted before the sender runs, in a child, because
+     * NET_UDP_RECV blocks and a datagram that arrives with nobody waiting is
+     * dropped on the floor - netd matches an arrival against the waiting list
+     * and there is no queue behind it. Sending first and asking afterwards
+     * loses the race every time, which is worth writing down because the API
+     * gives no hint of it. */
+    {
+        const int child = fork();
+        if (child == 0) {
+            const int net = port_open(IPC_PORT_NET);
+            struct ipc_message q, a;
+            if (net < 0)
+                exit(2);
+            memset(&q, 0, sizeof(q));
+            q.tag = NET_UDP_RECV;
+            q.word[0] = 41234;
+            memset(&a, 0, sizeof(a));
+            if (ipc_call(net, &q, &a) != 0 || a.word[0] < 0 || a.bytes == 0)
+                exit(3);
+            a.data[a.bytes < sizeof(a.data) ? a.bytes : sizeof(a.data) - 1] = 0;
+            printf("v6test: echo says '%s'\n", a.data);
+            exit(0);
+        }
+        if (child < 0) {
+            printf("v6test: FAILED - cannot fork a receiver\n");
+            return 1;
+        }
+
+        msleep(200);                    /* let the receiver get posted */
+        {
+            const int net = port_open(IPC_PORT_NET);
+            struct ipc_message q, a;
+            static const char note[] = "leahos udp over ipv6";
+            int tries;
+            for (tries = 0; tries < 3; ++tries) {
+                memset(&q, 0, sizeof(q));
+                q.tag = NET6_UDP_SEND;
+                memcpy(q.data, addr, 16);
+                memcpy(q.data + 16, note, sizeof(note) - 1);
+                q.bytes = 16 + (unsigned)(sizeof(note) - 1);
+                q.word[1] = (long)(port + 1);
+                q.word[2] = 41234;
+                memset(&a, 0, sizeof(a));
+                /* The first send may only start neighbour discovery; the
+                 * answer to that is what makes the route. */
+                if (ipc_call(net, &q, &a) == 0 && a.word[0] >= 0)
+                    break;
+                msleep(300);
+            }
+            printf("v6test: datagram sent, waiting for the echo\n");
+        }
+
+        {
+            int status = 0;
+            wait(&status);
+            if (status != 0) {
+                printf("v6test: FAILED - no datagram came back\n");
+                return 1;
+            }
+        }
+    }
+
+    printf("v6test: PASS - TCP and UDP both carried over IPv6\n");
+    return 0;
 }

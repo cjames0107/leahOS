@@ -281,6 +281,18 @@ static void send_ping(unsigned ip, unsigned seq, const uint8_t* mac)
 /* An IPv6 address. Defined here rather than with the rest of IPv6 because DNS
  * sits above both families and has to name one before either exists. */
 struct in6 { uint8_t b[16]; };
+
+/* Link-local is fe80::/10 - the top ten bits, not the top eight.
+ *
+ * Testing only b[0] == 0xFE calls fec0::/10 link-local too, and this network's
+ * router and resolver both live there. The consequences were quiet: a packet
+ * to fec0::3 was sent from the link-local address rather than the global one,
+ * and was never handed to the router because it looked like it was already on
+ * the link. ICMP survived that; a DNS query did not. */
+static int is_link_local(const struct in6* a)
+{
+    return a->b[0] == 0xFE && (a->b[1] & 0xC0) == 0x80;
+}
 static int send_udp6(const struct in6* dst, const uint8_t* dst_mac,
                      unsigned src_port, unsigned dst_port,
                      const uint8_t* payload, unsigned length);
@@ -953,7 +965,7 @@ static int send_udp6(const struct in6* dst, const uint8_t* dst_mac,
     static uint8_t body[1400];
     if (length > sizeof(body) - 8)
         return -1;
-    const struct in6* me = (dst->b[0] == 0xFE) ? &g_ll
+    const struct in6* me = is_link_local(dst) ? &g_ll
                          : (g_have_global ? &g_global : &g_ll);
     wr16(body + 0, src_port);
     wr16(body + 2, dst_port);
@@ -974,7 +986,7 @@ static int send_udp6(const struct in6* dst, const uint8_t* dst_mac,
 static const uint8_t* route6(const struct in6* to, struct in6* via_out)
 {
     struct in6 via = *to;
-    if (to->b[0] != 0xFE && g_have_router)
+    if (!is_link_local(to) && g_have_router)
         via = g_router;
     if (via_out != 0)
         *via_out = via;
@@ -1417,7 +1429,7 @@ static int tcp_send6(struct conn* c, unsigned flags, unsigned seq,
     if (length > sizeof(body) - 20)
         return -1;
 
-    const struct in6* me = (c->peer6.b[0] == 0xFE) ? &g_ll
+    const struct in6* me = is_link_local(&c->peer6) ? &g_ll
                          : (g_have_global ? &g_global : &g_ll);
     wr16(body + 0, c->local_port);
     wr16(body + 2, c->peer_port);
@@ -1731,6 +1743,26 @@ int main(void)
                                      m.bytes);
             }
             ipc_reply(handle, &r);
+        } else if (m.tag == NET6_UDP_SEND) {
+            /* The address is the first sixteen bytes, the datagram the rest.
+             * netd has been able to send these since IPv6 went in - it is how
+             * a DNS question travels - but nothing outside netd could ask for
+             * one, which is why the path went unexercised for so long. */
+            struct in6 dst;
+            struct in6 via;
+            const uint8_t* mac;
+            memcpy(dst.b, m.data, 16);
+            mac = route6(&dst, &via);
+            if (mac == 0) {
+                nd_solicit(&via);
+                r.word[0] = -1;
+            } else {
+                r.word[0] = send_udp6(&dst, mac, (unsigned)m.word[2],
+                                      (unsigned)m.word[1],
+                                      (const uint8_t*)m.data + 16,
+                                      m.bytes > 16 ? m.bytes - 16 : 0);
+            }
+            ipc_reply(handle, &r);
         } else if (m.tag == NET_UDP_RECV) {
             struct pending* p = pending_add(WAIT_UDP, handle, 0,
                                             (unsigned)m.word[0]);
@@ -1888,7 +1920,7 @@ int main(void)
             /* Off the link, ask the router - which is found the same way any
              * other neighbour is, because it is one. */
             struct in6 via = target;
-            if (target.b[0] != 0xFE && g_have_router)
+            if (!is_link_local(&target) && g_have_router)
                 via = g_router;
             const uint8_t* mac = neigh_lookup(&via);
 
