@@ -229,6 +229,76 @@ static void damage_all(void)
 
 /* --- drawing into the backbuffer ---------------------------------------- */
 
+/* --- soft edges --------------------------------------------------------------
+ *
+ * Two things give the chrome its shape: corners that are not square, and a
+ * shadow that says which surface is on top. Both are drawn by not drawing -
+ * a rounded corner is a pixel the window declines to paint, so whatever
+ * compose already put there shows through, and a shadow is the pixels around
+ * the window darkened rather than replaced. Neither needs an alpha channel
+ * the framebuffer does not have. */
+
+#define CORNER_R   8
+#define SHADOW_PAD 7
+#define SHADOW_DROP 2       /* pushed down, so the light reads as overhead */
+#define SHADOW_MAX 110      /* darkest the shadow gets, out of 255 */
+
+static int isqrt_of(int v)
+{
+    int r = 0;
+    while ((r + 1) * (r + 1) <= v)
+        ++r;
+    return r;
+}
+
+/* Is this pixel inside a rectangle whose corners have been rounded off? */
+static int inside_rounded(int px, int py, int x, int y, int w, int h, int r)
+{
+    int dx = 0, dy = 0;
+    if (px < x + r)            dx = x + r - px;
+    else if (px > x + w - 1 - r) dx = px - (x + w - 1 - r);
+    if (py < y + r)            dy = y + r - py;
+    else if (py > y + h - 1 - r) dy = py - (y + h - 1 - r);
+    if (dx == 0 || dy == 0)
+        return 1;                       /* an edge, not a corner */
+    return dx * dx + dy * dy <= r * r;
+}
+
+/* How far outside a rectangle a pixel is, near enough for a shadow. */
+static int distance_outside(int px, int py, int x, int y, int w, int h)
+{
+    int dx = 0, dy = 0;
+    if (px < x)            dx = x - px;
+    else if (px > x + w - 1) dx = px - (x + w - 1);
+    if (py < y)            dy = y - py;
+    else if (py > y + h - 1) dy = py - (y + h - 1);
+    if (dx == 0 && dy == 0)
+        return 0;
+    return isqrt_of(dx * dx + dy * dy);
+}
+
+/* Darken what is already there, rather than painting over it. */
+static void back_shade(int x, int y, int weight)
+{
+    uint32_t p;
+    if (x < g_clip.x || y < g_clip.y ||
+        x >= g_clip.x + g_clip.w || y >= g_clip.y + g_clip.h)
+        return;
+    if (weight <= 0)
+        return;
+    if (weight > 255)
+        weight = 255;
+    p = g_back[(unsigned)y * g_fb.width + (unsigned)x];
+    g_back[(unsigned)y * g_fb.width + (unsigned)x] =
+        ((((p >> 16) & 0xFF) * (255 - weight) / 255) << 16) |
+        ((((p >> 8) & 0xFF) * (255 - weight) / 255) << 8) |
+        (((p & 0xFF) * (255 - weight) / 255));
+}
+
+/* Defined below, where fill() exists; used above it, where the frame is drawn. */
+static void fill_rounded(int x, int y, int w, int h, uint32_t colour, int r);
+static void draw_shadow(int x, int y, int w, int h);
+
 static void back_plot(int x, int y, uint32_t colour)
 {
     if (x < g_clip.x || y < g_clip.y ||
@@ -308,8 +378,12 @@ static struct rect frame_rect(int slot)
 
 static void damage_window(int slot)
 {
+    /* Grown by the shadow, which falls outside the frame: repainting only the
+     * frame leaves the old shadow behind when a window moves. */
     const struct rect r = frame_rect(slot);
-    damage_rect(r.x, r.y, r.w, r.h);
+    damage_rect(r.x - SHADOW_PAD, r.y - SHADOW_PAD,
+                r.w + SHADOW_PAD * 2,
+                r.h + SHADOW_PAD * 2 + SHADOW_DROP);
 }
 
 /* The grow box, bottom-right, inside the grip bar. */
@@ -350,13 +424,15 @@ static void draw_window(int slot, int focused)
         return;
     }
 
-    fill(w->x, w->y, fw, fh, FACE);
-    bevel(w->x, w->y, fw, fh, 1);
-    bevel(w->x + 1, w->y + 1, fw - 2, fh - 2, 1);   /* thickness */
+    draw_shadow(w->x, w->y, (int)fw, (int)fh);
+    fill_rounded(w->x, w->y, fw, fh, FACE, CORNER_R);
 
     const int tx = w->x + BORDER, ty = w->y + BORDER;
-    fill(tx, ty, fw - BORDER * 2, TITLE_HEIGHT,
-         focused ? TITLE_ACTIVE : TITLE_IDLE);
+    /* The title bar is rounded at the top only - its bottom edge runs into the
+     * content, which is square. */
+    fill_rounded(tx, ty, fw - BORDER * 2, TITLE_HEIGHT + CORNER_R,
+                 focused ? TITLE_ACTIVE : TITLE_IDLE, CORNER_R - 2);
+    fill(tx, ty + TITLE_HEIGHT - 1, fw - BORDER * 2, 1, SHADOW);
 
     int cx, cy;
     close_box(w, &cx, &cy);
@@ -549,6 +625,45 @@ static void damage_cursor(int x, int y)
  * is no alpha channel anywhere in this system and adding one for this would
  * mean touching every surface; averaging two opaque colours is the same
  * arithmetic where it actually matters. */
+/* A filled rectangle with its corners taken off. The middle band goes through
+ * the fast path; only the corner rows are narrowed, a row at a time. */
+static void fill_rounded(int x, int y, int w, int h, uint32_t colour, int r)
+{
+    int i;
+    if (r <= 0 || w < 2 * r || h < 2 * r) {
+        fill(x, y, w, h, colour);
+        return;
+    }
+    fill(x, y + r, w, h - 2 * r, colour);
+    for (i = 0; i < r; ++i) {
+        const int dy = r - i;
+        const int inset = r - isqrt_of(r * r - dy * dy);
+        fill(x + inset, y + i, w - 2 * inset, 1, colour);
+        fill(x + inset, y + h - 1 - i, w - 2 * inset, 1, colour);
+    }
+}
+
+/* The shadow a window casts. Drawn before the window, over whatever is already
+ * composed, and skipping the area the window is about to cover - so it costs
+ * nothing where it would not be seen. */
+static void draw_shadow(int x, int y, int w, int h)
+{
+    const int top = y + SHADOW_DROP;
+    int px, py;
+    for (py = top - SHADOW_PAD; py < top + h + SHADOW_PAD; ++py) {
+        for (px = x - SHADOW_PAD; px < x + w + SHADOW_PAD; ++px) {
+            int d;
+            /* Where the window itself will land, nothing needs shading. */
+            if (inside_rounded(px, py - SHADOW_DROP, x, y, w, h, CORNER_R))
+                continue;
+            d = distance_outside(px, py, x, top, w, h);
+            if (d >= SHADOW_PAD)
+                continue;
+            back_shade(px, py, (SHADOW_PAD - d) * SHADOW_MAX / SHADOW_PAD);
+        }
+    }
+}
+
 static uint32_t blend_half(uint32_t over, uint32_t under)
 {
     return (((over >> 16) & 0xFF) + ((under >> 16) & 0xFF)) / 2 << 16 |
