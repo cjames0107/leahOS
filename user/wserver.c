@@ -231,73 +231,12 @@ static void damage_all(void)
 
 /* --- soft edges --------------------------------------------------------------
  *
- * Two things give the chrome its shape: corners that are not square, and a
- * shadow that says which surface is on top. Both are drawn by not drawing -
- * a rounded corner is a pixel the window declines to paint, so whatever
- * compose already put there shows through, and a shadow is the pixels around
- * the window darkened rather than replaced. Neither needs an alpha channel
- * the framebuffer does not have. */
-
-#define CORNER_R   8
-#define SHADOW_PAD 7
-#define SHADOW_DROP 2       /* pushed down, so the light reads as overhead */
-#define SHADOW_MAX 110      /* darkest the shadow gets, out of 255 */
-
-static int isqrt_of(int v)
-{
-    int r = 0;
-    while ((r + 1) * (r + 1) <= v)
-        ++r;
-    return r;
-}
-
-/* Is this pixel inside a rectangle whose corners have been rounded off? */
-static int inside_rounded(int px, int py, int x, int y, int w, int h, int r)
-{
-    int dx = 0, dy = 0;
-    if (px < x + r)            dx = x + r - px;
-    else if (px > x + w - 1 - r) dx = px - (x + w - 1 - r);
-    if (py < y + r)            dy = y + r - py;
-    else if (py > y + h - 1 - r) dy = py - (y + h - 1 - r);
-    if (dx == 0 || dy == 0)
-        return 1;                       /* an edge, not a corner */
-    return dx * dx + dy * dy <= r * r;
-}
-
-/* How far outside a rectangle a pixel is, near enough for a shadow. */
-static int distance_outside(int px, int py, int x, int y, int w, int h)
-{
-    int dx = 0, dy = 0;
-    if (px < x)            dx = x - px;
-    else if (px > x + w - 1) dx = px - (x + w - 1);
-    if (py < y)            dy = y - py;
-    else if (py > y + h - 1) dy = py - (y + h - 1);
-    if (dx == 0 && dy == 0)
-        return 0;
-    return isqrt_of(dx * dx + dy * dy);
-}
-
-/* Darken what is already there, rather than painting over it. */
-static void back_shade(int x, int y, int weight)
-{
-    uint32_t p;
-    if (x < g_clip.x || y < g_clip.y ||
-        x >= g_clip.x + g_clip.w || y >= g_clip.y + g_clip.h)
-        return;
-    if (weight <= 0)
-        return;
-    if (weight > 255)
-        weight = 255;
-    p = g_back[(unsigned)y * g_fb.width + (unsigned)x];
-    g_back[(unsigned)y * g_fb.width + (unsigned)x] =
-        ((((p >> 16) & 0xFF) * (255 - weight) / 255) << 16) |
-        ((((p >> 8) & 0xFF) * (255 - weight) / 255) << 8) |
-        (((p & 0xFF) * (255 - weight) / 255));
-}
+ * Square corners and a hard black edge. There was a version of this with
+ * rounded corners and a soft drop shadow; it looked like something from
+ * twenty years later, which is the wrong twenty years. A window here is a
+ * grey panel with a bevel inside a black outline, and nothing outside it. */
 
 /* Defined below, where fill() exists; used above it, where the frame is drawn. */
-static void fill_rounded(int x, int y, int w, int h, uint32_t colour, int r);
-static void draw_shadow(int x, int y, int w, int h);
 
 static void back_plot(int x, int y, uint32_t colour)
 {
@@ -321,6 +260,17 @@ static void fill(int x, int y, unsigned w, unsigned h, uint32_t colour)
 
 /* Raised (or, inverted, sunken): light on the top and left edges, shadow on the
  * bottom and right. */
+/* A one-pixel border, drawn as four fills. Every panel in this interface has
+ * one: the hard black edge is what separates a window from the desktop, and
+ * the bevel inside it is what gives it depth. */
+static void outline_rect(int x, int y, int w, int h, uint32_t colour)
+{
+    fill(x, y, w, 1, colour);
+    fill(x, y + h - 1, w, 1, colour);
+    fill(x, y, 1, h, colour);
+    fill(x + w - 1, y, 1, h, colour);
+}
+
 static void bevel(int x, int y, unsigned w, unsigned h, int raised)
 {
     const uint32_t tl = raised ? LIGHT : SHADOW;
@@ -378,12 +328,10 @@ static struct rect frame_rect(int slot)
 
 static void damage_window(int slot)
 {
-    /* Grown by the shadow, which falls outside the frame: repainting only the
-     * frame leaves the old shadow behind when a window moves. */
+    /* Exactly the frame. Nothing is drawn outside it any more - the shadow that
+     * used to spill past the edge is what this had to be grown for. */
     const struct rect r = frame_rect(slot);
-    damage_rect(r.x - SHADOW_PAD, r.y - SHADOW_PAD,
-                r.w + SHADOW_PAD * 2,
-                r.h + SHADOW_PAD * 2 + SHADOW_DROP);
+    damage_rect(r.x, r.y, r.w, r.h);
 }
 
 /* The grow box, bottom-right, inside the grip bar. */
@@ -424,28 +372,57 @@ static void draw_window(int slot, int focused)
         return;
     }
 
-    draw_shadow(w->x, w->y, (int)fw, (int)fh);
-    fill_rounded(w->x, w->y, fw, fh, FACE, CORNER_R);
+    /* Square, outlined, and raised. A window of this era is a grey panel with
+     * a hard black edge - the depth comes from the bevel inside that edge, not
+     * from anything soft outside it. */
+    fill(w->x, w->y, (int)fw, (int)fh, FACE);
+    outline_rect(w->x, w->y, (int)fw, (int)fh, OUTLINE);
+    bevel(w->x + 1, w->y + 1, (int)fw - 2, (int)fh - 2, 1);
 
     const int tx = w->x + BORDER, ty = w->y + BORDER;
-    /* The title bar is rounded at the top only - its bottom edge runs into the
-     * content, which is square. */
-    fill_rounded(tx, ty, fw - BORDER * 2, TITLE_HEIGHT + CORNER_R,
-                 focused ? TITLE_ACTIVE : TITLE_IDLE, CORNER_R - 2);
-    fill(tx, ty + TITLE_HEIGHT - 1, fw - BORDER * 2, 1, SHADOW);
+    const int tw = (int)fw - BORDER * 2;
+    fill(tx, ty, tw, TITLE_HEIGHT, focused ? TITLE_ACTIVE : TITLE_IDLE);
+
+    /* The pinstripes. Six lines across the bar say "this window is active",
+     * and their absence says it is not - which is the whole signal, done
+     * without a second colour. */
+    if (focused) {
+        for (int line = 0; line < 6; ++line) {
+            const int ly = ty + 3 + line * 2;
+            if (ly < ty + TITLE_HEIGHT - 3)
+                fill(tx + 2, ly, tw - 4, 1, SHADOW);
+        }
+    }
+    fill(tx, ty + TITLE_HEIGHT - 1, tw, 1, OUTLINE);
 
     int cx, cy;
     close_box(w, &cx, &cy);
+    /* The close box sits in a gap punched through the stripes, or it reads as
+     * part of them. */
+    fill(cx - 2, ty + 1, CLOSE_SIZE + 4, TITLE_HEIGHT - 2,
+         focused ? TITLE_ACTIVE : TITLE_IDLE);
     fill(cx, cy, CLOSE_SIZE, CLOSE_SIZE, FACE);
-    bevel(cx, cy, CLOSE_SIZE, CLOSE_SIZE, 1);
-    for (unsigned i = 3; i < CLOSE_SIZE - 3; ++i)
-        back_plot(cx + (int)i, cy + CLOSE_SIZE / 2, OUTLINE);
+    outline_rect(cx, cy, CLOSE_SIZE, CLOSE_SIZE, OUTLINE);
+    bevel(cx + 1, cy + 1, CLOSE_SIZE - 2, CLOSE_SIZE - 2, 1);
 
     char title[WS_TITLE_LEN];
     memcpy(title, (const void*)w->title, WS_TITLE_LEN);
     title[WS_TITLE_LEN - 1] = '\0';
-    draw_text(cx + CLOSE_SIZE + 6, ty + (TITLE_HEIGHT - 16) / 2 + 1,
-              title, TITLE_TEXT);
+    {
+        /* Centred, with the stripes cleared behind it - which is how the title
+         * stays readable without a box drawn round it. */
+        const int text_w = (int)strlen(title) * 8;
+        int text_x = tx + (tw - text_w) / 2;
+        const int least = cx + CLOSE_SIZE + 8;
+        if (text_x < least)
+            text_x = least;
+        if (text_w > 0 && text_x + text_w < tx + tw) {
+            fill(text_x - 6, ty + 1, text_w + 12, TITLE_HEIGHT - 2,
+                 focused ? TITLE_ACTIVE : TITLE_IDLE);
+            draw_text(text_x, ty + (TITLE_HEIGHT - 16) / 2 + 1, title,
+                      TITLE_TEXT);
+        }
+    }
 
     /* The grip bar, and the grow box at its right end: three diagonal lines,
      * which is the whole of the idiom. */
@@ -537,6 +514,9 @@ static void compose_rect(const struct rect* r)
                 case WS_PATTERN_WEAVE:
                     c = (((gx >> 2) + (y >> 2)) & 1) ? lit : dim;
                     break;
+                case WS_PATTERN_DITHER:
+                    c = ((gx + y) & 1) ? lit : dim;
+                    break;
                 default:
                     break;
                 }
@@ -613,55 +593,6 @@ static void compose_cursor(void)
 static void damage_cursor(int x, int y)
 {
     damage_rect(x, y, CURSOR_W, CURSOR_H);
-}
-
-/* --- the thing being dragged ---------------------------------------------
- *
- * Drawn here rather than by whoever started the drag, because it has to appear
- * over every window including ones belonging to other processes, and a client
- * can only paint inside itself.
- *
- * Half transparent, by averaging with what is already in the backbuffer. There
- * is no alpha channel anywhere in this system and adding one for this would
- * mean touching every surface; averaging two opaque colours is the same
- * arithmetic where it actually matters. */
-/* A filled rectangle with its corners taken off. The middle band goes through
- * the fast path; only the corner rows are narrowed, a row at a time. */
-static void fill_rounded(int x, int y, int w, int h, uint32_t colour, int r)
-{
-    int i;
-    if (r <= 0 || w < 2 * r || h < 2 * r) {
-        fill(x, y, w, h, colour);
-        return;
-    }
-    fill(x, y + r, w, h - 2 * r, colour);
-    for (i = 0; i < r; ++i) {
-        const int dy = r - i;
-        const int inset = r - isqrt_of(r * r - dy * dy);
-        fill(x + inset, y + i, w - 2 * inset, 1, colour);
-        fill(x + inset, y + h - 1 - i, w - 2 * inset, 1, colour);
-    }
-}
-
-/* The shadow a window casts. Drawn before the window, over whatever is already
- * composed, and skipping the area the window is about to cover - so it costs
- * nothing where it would not be seen. */
-static void draw_shadow(int x, int y, int w, int h)
-{
-    const int top = y + SHADOW_DROP;
-    int px, py;
-    for (py = top - SHADOW_PAD; py < top + h + SHADOW_PAD; ++py) {
-        for (px = x - SHADOW_PAD; px < x + w + SHADOW_PAD; ++px) {
-            int d;
-            /* Where the window itself will land, nothing needs shading. */
-            if (inside_rounded(px, py - SHADOW_DROP, x, y, w, h, CORNER_R))
-                continue;
-            d = distance_outside(px, py, x, top, w, h);
-            if (d >= SHADOW_PAD)
-                continue;
-            back_shade(px, py, (SHADOW_PAD - d) * SHADOW_MAX / SHADOW_PAD);
-        }
-    }
 }
 
 static uint32_t blend_half(uint32_t over, uint32_t under)
@@ -1234,29 +1165,32 @@ int main(void)
      * as one surface, and dark text on both. The desktop colour is only seen
      * when there is no wallpaper, so it is a muted green that sits under the
      * photograph rather than fighting it. */
-    g_control->theme.desktop      = 0x6E9457;
-    g_control->theme.face         = 0xF0EFE7;
+    /* Platinum. The face is the grey everything is made of; light and shadow
+     * are the two shades a bevel needs either side of it, and they are far
+     * enough apart to read as moulded rather than tinted. The title bar is the
+     * same grey as the face - what marks it as a title bar is the pinstripes,
+     * not a colour, which is the thing this era got right. */
+    g_control->theme.desktop      = 0x8894A8;   /* the blue-grey behind it all */
+    g_control->theme.face         = 0xDDDDDD;
     g_control->theme.light        = 0xFFFFFF;
-    g_control->theme.shadow       = 0xC6C4BA;
-    g_control->theme.title_active = 0xF0EFE7;
-    g_control->theme.title_idle   = 0xE6E5DC;
-    g_control->theme.title_text   = 0x2A2A28;
+    g_control->theme.shadow       = 0x888888;
+    g_control->theme.title_active = 0xDDDDDD;
+    g_control->theme.title_idle   = 0xDDDDDD;
+    g_control->theme.title_text   = 0x000000;
     g_control->theme.cursor       = 0xFFFFFF;
-    g_control->theme.selection    = 0xCFE3D8;
-    g_control->theme.body         = 0xF7F6F0;
-    g_control->theme.text         = 0x2A2A28;
+    g_control->theme.selection    = 0x000080;   /* the classic selection navy */
+    g_control->theme.body         = 0xFFFFFF;
+    g_control->theme.text         = 0x000000;
     g_control->theme.text_scale   = 1;
     g_control->theme.contrast     = 0;
-    g_control->theme.pattern      = WS_PATTERN_FLAT;
-    {
-        /* The wallpaper the image ships with. Settings can replace or clear
-         * it; this is only what a fresh machine looks like. */
-        static const char kPaper[] = "/share/wallpaper.png";
-        unsigned i = 0;
-        for (; kPaper[i] != '\0' && i < sizeof(g_control->theme.wallpaper) - 1; ++i)
-            g_control->theme.wallpaper[i] = kPaper[i];
-        g_control->theme.wallpaper[i] = '\0';
-    }
+    g_control->theme.pattern      = WS_PATTERN_DITHER;
+
+    /* No wallpaper. The desktop is the dither above, which is what this
+     * interface looked like - a photograph behind it belongs to a later era
+     * and fought with the grey. Settings can still set one; nothing here
+     * stops it. */
+    g_control->theme.wallpaper[0] = '\0';
+
     g_control->theme.generation   = 1;
     for (int i = 0; i < WS_MAX_WINDOWS; ++i)
         g_order[i] = -1;

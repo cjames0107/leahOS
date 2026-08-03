@@ -30,11 +30,11 @@
 
 #define SERVER_COUNT 6
 
-#define BG      0x00101418u
-#define BAR_BG  0x00202830u
-#define BAR_FG  0x0038B0A0u
-#define TEXT    0x00C8D0D4u
-#define DIM     0x00707880u
+#define BG      0x008894A8u
+#define BAR_BG  0x00DDDDDDu
+#define BAR_FG  0x00555555u
+#define TEXT    0x00000000u
+#define DIM     0x00333333u
 
 static int g_have_screen;
 static int g_done;
@@ -65,7 +65,10 @@ static void splash_progress(const char* what)
     filled = g_done * w / SERVER_COUNT;
     if (filled > 0)
         screen_fill(x, y, filled, h, BAR_FG);
-    screen_frame(x - 1, y - 1, w + 2, h + 2, DIM);
+    /* Sunken, with a hard edge: a progress bar of this era is a well with
+     * something filling it, not a floating capsule. */
+    screen_bevel(x - 1, y - 1, w + 2, h + 2, 0);
+    screen_frame(x - 2, y - 2, w + 4, h + 4, 0x00000000u);
 
     /* Cleared first, or a shorter name leaves the tail of a longer one. */
     screen_fill(x - 40, y + h + 12, w + 80, screen_glyph_height(), BG);

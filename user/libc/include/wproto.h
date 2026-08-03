@@ -225,7 +225,11 @@ struct ws_theme {
 #define WS_PATTERN_GRID   1
 #define WS_PATTERN_DOTS   2
 #define WS_PATTERN_WEAVE  3
-#define WS_PATTERN_COUNT  4
+/* Alternate pixels, which at this distance reads as a shade between the two
+ * and is what the desktop of this era actually was - a one-bit machine making
+ * a grey it did not have. */
+#define WS_PATTERN_DITHER 4
+#define WS_PATTERN_COUNT  5
 
 struct ws_shared {
     volatile uint32_t magic;

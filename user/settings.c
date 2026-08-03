@@ -158,7 +158,7 @@ static void apply_saved_theme(void)
     g_ws->theme.text       = prefs_get_u32("theme.text", g_ws->theme.text);
     g_ws->theme.text_scale = prefs_get_u32("theme.scale", 1);
     g_ws->theme.contrast   = (int32_t)prefs_get_u32("theme.contrast", 100) - 100;
-    g_ws->theme.pattern    = prefs_get_u32("theme.pattern", WS_PATTERN_FLAT);
+    g_ws->theme.pattern    = prefs_get_u32("theme.pattern", WS_PATTERN_DITHER);
     const char* paper = prefs_get_str("theme.wallpaper", "");
     int n = 0;
     while (paper[n] != '\0' && n < 126) { g_ws->theme.wallpaper[n] = paper[n]; ++n; }

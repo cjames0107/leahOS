@@ -62,6 +62,30 @@ void screen_fill(int x, int y, int w, int h, unsigned rgb)
     }
 }
 
+/* Two colours on alternate pixels, which at any distance reads as a shade
+ * between them. Written straight into the framebuffer rather than through
+ * screen_fill: a screenful is nearly a million pixels, and a function call with
+ * bounds checks for each of them is slow enough to see. */
+void screen_dither(int x, int y, int w, int h, unsigned a, unsigned b)
+{
+    int row, col;
+    if (!g_ready)
+        return;
+    for (row = 0; row < h; ++row) {
+        const int py = y + row;
+        unsigned char* line;
+        if (py < 0 || (unsigned)py >= g_fb.height)
+            continue;
+        line = g_pixels + (unsigned)py * g_fb.pitch;
+        for (col = 0; col < w; ++col) {
+            const int px = x + col;
+            if (px < 0 || (unsigned)px >= g_fb.width)
+                continue;
+            *(unsigned*)(line + (unsigned)px * 4) = ((px + py) & 1) ? a : b;
+        }
+    }
+}
+
 /* A one-pixel outline, drawn as four fills - which is shorter than the loop
  * that would draw it a pixel at a time and no less clear. */
 void screen_frame(int x, int y, int w, int h, unsigned rgb)
@@ -70,6 +94,19 @@ void screen_frame(int x, int y, int w, int h, unsigned rgb)
     screen_fill(x, y + h - 1, w, 1, rgb);
     screen_fill(x, y, 1, h, rgb);
     screen_fill(x + w - 1, y, 1, h, rgb);
+}
+
+/* Light above and left, dark below and right, and the eye reads it as raised -
+ * inverted, as sunken, which is what a text field is. The whole visual language
+ * of this interface is these two lines. */
+void screen_bevel(int x, int y, int w, int h, int raised)
+{
+    const unsigned tl = raised ? 0xFFFFFFu : 0x888888u;
+    const unsigned br = raised ? 0x888888u : 0xFFFFFFu;
+    screen_fill(x, y, w, 1, tl);
+    screen_fill(x, y, 1, h, tl);
+    screen_fill(x, y + h - 1, w, 1, br);
+    screen_fill(x + w - 1, y, 1, h, br);
 }
 
 void screen_char(int x, int y, char c, unsigned fg, unsigned bg, int transparent)

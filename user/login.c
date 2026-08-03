@@ -95,13 +95,16 @@ static void session(void)
  * gives back a cooked line, which is the wrong shape for both.
  */
 
-#define BG      0x00101418u
-#define PANEL   0x001C232Au
-#define FIELD   0x00131A20u
-#define TEXT    0x00C8D0D4u
-#define DIM     0x00707880u
-#define ACCENT  0x0038B0A0u
-#define BAD     0x00C05048u
+/* The same greys the window server uses, so signing in and what comes after
+ * look like one machine rather than two. */
+#define BG      0x008894A8u     /* the desktop blue-grey */
+#define BG_DIM  0x007C8799u     /* its dither partner */
+#define PANEL   0x00DDDDDDu
+#define FIELD   0x00FFFFFFu
+#define TEXT    0x00000000u
+#define DIM     0x00555555u
+#define OUTLINE 0x00000000u
+#define BAD     0x00AA0000u
 
 #define FIELD_MAX 32
 
@@ -115,9 +118,12 @@ static void draw_field(int x, int y, int w, const char* label, const char* value
     char shown[FIELD_MAX + 1];
     int i;
 
-    screen_text(x, y, label, DIM, PANEL, 0);
+    screen_text(x, y, label, TEXT, PANEL, 0);
+    /* Sunken, because a field is a hole in the panel - and outlined, because
+     * everything here has a hard edge. */
     screen_fill(x, y + gh + 4, w, gh + 8, FIELD);
-    screen_frame(x, y + gh + 4, w, gh + 8, focused ? ACCENT : DIM);
+    screen_bevel(x, y + gh + 4, w, gh + 8, 0);
+    screen_frame(x, y + gh + 4, w, gh + 8, OUTLINE);
 
     for (i = 0; value[i] != '\0' && i < FIELD_MAX; ++i)
         shown[i] = masked ? '*' : value[i];
@@ -126,8 +132,7 @@ static void draw_field(int x, int y, int w, const char* label, const char* value
 
     /* A caret, so an empty focused field still says where typing goes. */
     if (focused)
-        screen_fill(x + 6 + screen_text_width(shown), y + gh + 8,
-                    2, gh, ACCENT);
+        screen_fill(x + 6 + screen_text_width(shown), y + gh + 8, 1, gh, TEXT);
 }
 
 static void draw_login(const char* user, const char* password, int focus,
@@ -137,14 +142,27 @@ static void draw_login(const char* user, const char* password, int focus,
     const int x = (int)screen_width() / 2 - w / 2;
     const int y = (int)screen_height() / 2 - h / 2;
 
-    screen_fill(0, 0, (int)screen_width(), (int)screen_height(), BG);
     screen_fill(x, y, w, h, PANEL);
-    screen_frame(x, y, w, h, DIM);
+    screen_bevel(x, y, w, h, 1);
+    screen_frame(x, y, w, h, OUTLINE);
 
-    screen_text_centred(x + w / 2, y + 18, "leahOS", TEXT, PANEL, 0);
+    /* A title bar with the pinstripes the window server draws, so this reads as
+     * a window even though there is no server yet to make it one. */
+    screen_fill(x + 3, y + 3, w - 6, 20, PANEL);
+    {
+        int line;
+        for (line = 0; line < 6; ++line)
+            screen_fill(x + 5, y + 6 + line * 2, w - 10, 1, 0x00888888u);
+    }
+    {
+        const int tw = screen_text_width("leahOS");
+        screen_fill(x + w / 2 - tw / 2 - 6, y + 4, tw + 12, 18, PANEL);
+        screen_text_centred(x + w / 2, y + 5, "leahOS", TEXT, PANEL, 0);
+    }
+    screen_fill(x + 3, y + 23, w - 6, 1, OUTLINE);
 
-    draw_field(x + 30, y + 56, w - 60, "username", user, 0, focus == 0);
-    draw_field(x + 30, y + 118, w - 60, "password", password, 1, focus == 1);
+    draw_field(x + 30, y + 64, w - 60, "username", user, 0, focus == 0);
+    draw_field(x + 30, y + 126, w - 60, "password", password, 1, focus == 1);
 
     if (message != 0)
         screen_text_centred(x + w / 2, y + h - 26, message, BAD, PANEL, 0);
@@ -164,6 +182,10 @@ static int prompt_on_screen(char* user, char* password, const char* message)
     fields[1] = password;
     user[0] = '\0';
     password[0] = '\0';
+
+    /* Once. draw_login runs on every keystroke, and a screenful of dither on
+     * each of them would be visible as lag on a machine this size. */
+    screen_dither(0, 0, (int)screen_width(), (int)screen_height(), BG, BG_DIM);
     draw_login(user, password, focus, message);
 
     for (;;) {

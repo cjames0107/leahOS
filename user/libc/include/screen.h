@@ -18,6 +18,13 @@ unsigned screen_height(void);
 void screen_fill(int x, int y, int w, int h, unsigned rgb);
 void screen_frame(int x, int y, int w, int h, unsigned rgb);
 
+/* Two colours on alternate pixels - the desktop of this era, made by a machine
+ * that did not have the shade it wanted. */
+void screen_dither(int x, int y, int w, int h, unsigned a, unsigned b);
+
+/* Raised, or sunken when `raised` is 0. */
+void screen_bevel(int x, int y, int w, int h, int raised);
+
 /* `transparent` leaves the background pixels alone, which is what text over
  * something already drawn needs. */
 void screen_char(int x, int y, char c, unsigned fg, unsigned bg, int transparent);
