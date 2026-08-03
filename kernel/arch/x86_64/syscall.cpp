@@ -992,9 +992,23 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             frame->rax = static_cast<u64>(-1);
             break;
         }
-        process::exec(*frame, reinterpret_cast<const u8*>(frame->rdi),
-                      static_cast<usize>(frame->rsi),
-                      reinterpret_cast<char**>(frame->rdx));
+        /* execve(image, bytes, argv, entry, segments, count). The caller read
+         * the program *and* worked out what its segments are; the kernel maps
+         * what it is told and knows nothing about the format they came in. */
+        if (!user_range_ok(frame->r10, 16 + 16 * 40)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        {
+            const auto* request = reinterpret_cast<const u64*>(frame->r10);
+            const u64 entry_point = request[0];
+            const u32 count = static_cast<u32>(request[1] & 0xFFFFFFFFu);
+            process::exec(*frame, reinterpret_cast<const u8*>(frame->rdi),
+                          static_cast<usize>(frame->rsi),
+                          reinterpret_cast<char**>(frame->rdx),
+                          entry_point,
+                          reinterpret_cast<const u8*>(frame->r10) + 16, count);
+        }
         // A new image knows nothing of the old one's handlers, and their
         // addresses no longer mean anything, so dispositions go back to default.
         if (frame->rax != static_cast<u64>(-1))

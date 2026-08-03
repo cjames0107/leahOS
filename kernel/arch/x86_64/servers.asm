@@ -8,6 +8,11 @@
 ;
 ; Every other program comes off the disk, read by whoever is exec-ing it.
 ;
+; Boot images rather than ELFs: the build reads the program headers and writes
+; out what they meant (tools/mkbootimage.py), so the kernel maps segments from
+; a fixed table and has no ELF parser at all. Every other program is exec'd by
+; a process that can read the file and do its own parsing.
+;
 ; incbin rather than a generated array because the linker is already the thing
 ; that knows how to put bytes in a binary, and a C array of two hundred
 ; thousand entries is a compile nobody wants to wait for.
@@ -23,15 +28,15 @@ global g_server_init_end
 
 align 16
 g_server_blockd:
-    incbin "build/blockd.elf"
+    incbin "build/blockd.img"
 g_server_blockd_end:
 
 align 16
 g_server_vfsd:
-    incbin "build/vfsd.elf"
+    incbin "build/vfsd.img"
 g_server_vfsd_end:
 
 align 16
 g_server_init:
-    incbin "build/init.elf"
+    incbin "build/init.img"
 g_server_init_end:
