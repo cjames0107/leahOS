@@ -72,7 +72,16 @@ long_mode:
     mov gs, ax
 
     ; Its own stack, allocated by the kernel; then into C, never to return.
+    ;
+    ; The push is not decoration. SysV guarantees a function starts with RSP
+    ; eight past a 16-byte boundary, because a CALL has just pushed a return
+    ; address, and the compiler places 16-aligned locals on that assumption.
+    ; Jumping to a C function with a 16-aligned RSP leaves every one of them
+    ; eight bytes out - harmless until something needs real alignment, and then
+    ; a #GP the moment an application processor executes FXSAVE. A zero also
+    ; ends the frame chain for anything walking back up this stack.
     mov rsp, [param_stack]
+    push 0
     mov rax, [param_entry]
     jmp rax
 

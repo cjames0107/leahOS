@@ -191,14 +191,20 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 # User programs are freestanding C linked against leahOS's own libc. They run
 # in ring 3 and reach the kernel only through the SYSCALL ABI, so they get the
 # gcc freestanding headers but none of the host libc.
-# -mno-sse and friends: the kernel has not enabled the FPU or SSE state for
-# ring 3 (no OSFXSR in CR4, no XMM save on context switch), so an SSE
-# instruction faults with #UD. GCC emits them freely otherwise - even a struct
-# copy becomes movaps. Disabling them keeps user code to the general registers,
-# exactly as the kernel does for itself. Programs link low (user.ld), so the
-# default small code model is all they need.
+# -msse -msse2 -mfpmath=sse: ring 3 has a floating-point unit now. The kernel
+# sets OSFXSR and clears CR0.EM on every processor, and carries the registers
+# across a context switch, a fork and a signal - see kernel/arch/x86_64/fpu.cpp.
+# SSE2 is the baseline for x86-64 and is where doubles live, so -mfpmath=sse
+# keeps arithmetic off the x87 stack; x87 remains enabled and is what long
+# double still uses.
+#
+# The *kernel* stays integer-only, deliberately. It is compiled -mno-sse below,
+# which is what makes entering the kernel free: with no kernel code touching
+# these registers there is nothing to save until one user task gives way to
+# another. Programs link low (user.ld), so the default small code model is all
+# they need.
 USER_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
-               -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+               -msse -msse2 -mfpmath=sse \
                -O2 -g -Wall -Wextra -Iuser/libc/include
 
 LIBC_CSRCS := $(shell find user/libc -name '*.c' | sort)

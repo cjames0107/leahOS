@@ -1,6 +1,7 @@
 #include <leah/acpi.hpp>
 #include <leah/apic.hpp>
 #include <leah/cpu.hpp>
+#include <leah/fpu.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
 #include <leah/interrupts.hpp>
@@ -71,6 +72,11 @@ extern "C" [[noreturn]] void ap_main()
     gdt::init_cpu(slot);
     interrupts::load_on_this_cpu();
     percpu::init(slot, apic::local_id());
+
+    // Floating point is a per-processor setting: CR0 and CR4 are not shared,
+    // and an AP that skips this faults with #UD on the first SSE instruction
+    // any task executes there - which is to say, almost immediately.
+    fpu::init_this_cpu();
 
     // Its own local APIC still has to be switched on; only the bootstrap
     // processor's was touched during boot.

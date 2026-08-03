@@ -71,7 +71,16 @@ syscall_entry:
 
     cld                             ; SysV requires DF clear on entry to C
     mov rdi, rsp                    ; syscall::Frame* - first argument
+
+    ; Re-align the stack before entering C. A syscall::Frame is seventeen
+    ; words - an odd number - so building it flipped the 16-byte alignment the
+    ; SysV ABI promises a function, and the compiler places 16-aligned locals
+    ; on that promise. Nothing noticed while the kernel was integer-only;
+    ; FXRSTOR notices immediately, with a #GP. RDI already points at the frame,
+    ; so the gap costs nothing but eight bytes of stack.
+    sub rsp, 8
     call syscall_dispatch
+    add rsp, 8
 
     ; RAX in the frame now holds the return value. A handler may also have
     ; rewritten the whole frame (execve does, to jump into the new image), so

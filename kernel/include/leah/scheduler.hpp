@@ -245,6 +245,12 @@ files::Table& current_files();
 u64  current_brk();
 void set_current_brk(u64 brk);
 
+/* Give the running task a freshly initialised floating-point unit, in its
+ * saved state *and* in the registers themselves. execve wants both: the task
+ * is not switched away before it enters the new image, so clearing only the
+ * saved copy would leave the previous program's registers live. */
+void reset_current_fpu();
+
 // The running task's next free mmap address.
 u64  current_mmap_next();
 void set_current_mmap_next(u64 next);

@@ -7,6 +7,7 @@
 #include <leah/panic.hpp>
 #include <leah/percpu.hpp>
 #include <leah/file.hpp>
+#include <leah/fpu.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/shm.hpp>
 #include <leah/smp.hpp>
@@ -115,6 +116,10 @@ struct Task {
      * across fork - a driver that forks a worker meant the worker to be able to
      * do the work. */
     u8* io_bitmap;
+    /* The x87/SSE registers, when this task is not the one holding them.
+     * Only user tasks have any: the kernel is built -mno-sse, so a kernel
+     * thread cannot put anything in them to lose. */
+    fpu::State fpu_state;
 };
 
 Task g_tasks[kMaxTasks];
@@ -370,6 +375,20 @@ void switch_to(u32 next_index)
     percpu::set_syscall_stack_for_this_cpu(next->kernel_stack_top);
     vmm::switch_address_space(next->space != 0 ? next->space : vmm::kernel_space());
 
+    /* The floating-point registers travel with the task too, and for the same
+     * reason. Saved eagerly rather than on a #NM fault: lazy switching means
+     * tracking which CPU's registers belong to which task, and this kernel has
+     * already paid once for machine-wide state that should have been per-CPU.
+     *
+     * Only user tasks are involved on either side. If a kernel thread runs in
+     * between, the registers simply keep whatever the last user task left in
+     * them until the next user task loads its own - which is correct, because
+     * nothing in between can read them. */
+    if (prev->is_user)
+        fpu::save(prev->fpu_state);
+    if (next->is_user)
+        fpu::restore(next->fpu_state);
+
     // The kernel lock travels with the task, not the CPU: save what this one
     // was holding and give the incoming task back what it had. A task entered
     // for the first time has depth 0, so the lock is dropped here rather than
@@ -564,6 +583,9 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
     task->sig_restorer = 0;
     task->bkl_depth    = 0;
     memset(task->sig_handler, 0, sizeof(task->sig_handler));
+    /* A clean unit rather than a zeroed buffer - see fpu::init_state for why
+     * the difference matters. */
+    fpu::init_state(task->fpu_state);
     task->uid = 0;
     task->gid = 0;
     files::init_table(task->files);
@@ -629,6 +651,9 @@ u32 spawn_thread(const TrapFrame& frame)
     task->sig_restorer = 0;
     task->bkl_depth    = 0;
     memset(task->sig_handler, 0, sizeof(task->sig_handler));
+    /* Threads share an address space but not registers, and these are
+     * registers. A new thread starts with a clean unit, not the creator's. */
+    fpu::init_state(task->fpu_state);
     // The fd table is the leader's; this copy is never consulted (current_files
     // redirects to the group leader), but zero it so close_all cannot double-free.
     files::init_table(task->files);
@@ -820,6 +845,13 @@ u32 fork_current(const TrapFrame& parent_user)
                sizeof(child_task->sig_handler));
         child_task->sig_restorer = parent->sig_restorer;
         child_task->sig_pending  = 0;
+
+        /* The child resumes inside the same expression the parent is in, so it
+         * needs the parent's registers - these as much as the general ones.
+         * The parent is the task making this call, so what is live in the unit
+         * right now is what has to be copied; saving first is not optional. */
+        fpu::save(parent->fpu_state);
+        child_task->fpu_state = parent->fpu_state;
 
         /* Port permissions carry across, with a copy of their own: a driver
          * that forks a worker meant the worker to be able to do the work, and
@@ -1195,6 +1227,13 @@ files::Table& current_files() { return group_leader(current())->files; }
 // would hand two threads the same addresses.
 u64  current_brk()            { return group_leader(current())->brk; }
 void set_current_brk(u64 brk) { group_leader(current())->brk = brk; }
+
+void reset_current_fpu()
+{
+    Task* task = current();
+    fpu::init_state(task->fpu_state);
+    fpu::restore(task->fpu_state);
+}
 
 u64  current_mmap_next()             { return group_leader(current())->mmap_next; }
 void set_current_mmap_next(u64 next) { group_leader(current())->mmap_next = next; }

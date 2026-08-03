@@ -928,6 +928,117 @@ static void test_png(void)
           img_read_png("/share/icons/nothing.png", &w, &h) == 0);
 }
 
+
+/* --- floating point --------------------------------------------------------
+ *
+ * The arithmetic working is the easy half. The half worth testing is that the
+ * registers belong to the task: that another task running in between does not
+ * disturb them, that a thread has its own, that a child gets the parent's, and
+ * that a signal handler cannot quietly change them underneath the code it
+ * interrupted.
+ */
+
+/* volatile throughout, so the compiler computes these at runtime rather than
+ * folding them and testing nothing. */
+static volatile double g_fp_shared;
+
+static void fp_spinner(void* arg)
+{
+    (void)arg;
+    /* Churn the unit hard, so a task that fails to save its registers is
+     * overwhelmingly likely to come back to these values rather than its own. */
+    volatile double x = 1.0;
+    for (int i = 0; i < 20000; ++i)
+        x = x * 1.000001 + 0.5;
+    g_fp_shared = x;
+}
+
+static volatile double g_handler_seen;
+
+static void fp_signal_handler(int signo)
+{
+    (void)signo;
+    /* Arithmetic inside the handler, which must not be visible outside it. */
+    volatile double y = 3.0;
+    for (int i = 0; i < 50; ++i)
+        y = y * 1.5 - 0.25;
+    g_handler_seen = y;
+}
+
+static void test_float(void)
+{
+    printf("floating point:\n");
+
+    volatile double a = 1.0, b = 3.0;
+    check("division produces a fraction", a / b > 0.3333 && a / b < 0.3334);
+
+    volatile double big = 1.0;
+    for (int i = 0; i < 300; ++i)
+        big *= 10.0;
+    check("a double reaches past what an integer holds", big > 1e299);
+
+    volatile float f = 1.0f;
+    check("float and double are different widths",
+          sizeof(f) == 4 && sizeof(a) == 8);
+
+    /* printf has to be able to show it, or the unit is unusable in practice. */
+    char text[64];
+    snprintf(text, sizeof(text), "%.3f", 3.14159);
+    check("printf renders a fixed-point number", strcmp(text, "3.142") == 0);
+    snprintf(text, sizeof(text), "%.2f", 9.999);
+    check("rounding carries into the integer part", strcmp(text, "10.00") == 0);
+    snprintf(text, sizeof(text), "%.2e", 12345.0);
+    check("printf renders an exponent", strcmp(text, "1.23e+04") == 0);
+    snprintf(text, sizeof(text), "%g", 0.0001);
+    check("%g drops the trailing zeros", strcmp(text, "0.0001") == 0);
+    snprintf(text, sizeof(text), "%g", 1250000.0);
+    check("%g switches to an exponent when it is shorter",
+          strcmp(text, "1.25e+06") == 0);
+    snprintf(text, sizeof(text), "%g", 2.0);
+    check("%g leaves a whole number whole", strcmp(text, "2") == 0);
+    snprintf(text, sizeof(text), "%.1f", -2.25);
+    check("a negative number keeps its sign", text[0] == '-');
+
+    /* The registers survive other tasks running. Four threads each grinding
+     * through their own arithmetic, while this one checks its value is still
+     * its own afterwards. */
+    volatile double mine = 1.0;
+    for (int i = 0; i < 1000; ++i)
+        mine = mine * 1.0001 + 0.001;
+    const double before = mine;
+
+    tid_t made[4];
+    for (int i = 0; i < 4; ++i)
+        made[i] = thread_create(fp_spinner, 0);
+    for (int i = 0; i < 4; ++i)
+        if (made[i] >= 0)
+            thread_join();
+    check("a task's registers survive other tasks using them", mine == before);
+    check("the threads did their own arithmetic", g_fp_shared > 1.0);
+
+    /* A child continues from the parent's registers: it must see the value
+     * that was live at the fork, not a fresh unit. */
+    int pid = fork();
+    if (pid == 0)
+        exit(mine == before ? 0 : 1);
+    int status = 0;
+    wait(&status);          /* the only child alive at this point */
+    check("a forked child inherits the parent's registers", status == 0);
+
+    /* And a handler cannot disturb them. The signal arrives between these two
+     * reads, so an unsaved unit shows up as a changed value. */
+    signal(SIGUSR1, fp_signal_handler);
+    g_handler_seen = 0.0;
+    volatile double guarded = mine;
+    raise(SIGUSR1);
+    /* A syscall, because a signal is delivered on the way out of one. */
+    (void)getpid();
+    check("the handler ran", g_handler_seen != 0.0);
+    check("a signal handler leaves the registers as it found them",
+          guarded == before && mine == before);
+    signal(SIGUSR1, SIG_DFL);
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -944,6 +1055,7 @@ int main(void)
     test_driver_abi();
     test_exit_churn();
     test_png();
+    test_float();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

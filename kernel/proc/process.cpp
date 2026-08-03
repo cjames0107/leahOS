@@ -319,7 +319,9 @@ void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
     vmm::destroy_address_space(old_space);
 
     // Rewrite the syscall frame so SYSRET enters the new program on its fresh
-    // argv stack with a clean register file.
+    // argv stack with a clean register file - the floating-point ones
+    // included, which the frame does not carry.
+    scheduler::reset_current_fpu();
     frame.r15 = frame.r14 = frame.r13 = frame.r12 = frame.rbp = frame.rbx = 0;
     frame.r11 = frame.r10 = frame.r9 = frame.r8 = 0;
     frame.rdx = frame.rsi = frame.rdi = frame.rax = 0;

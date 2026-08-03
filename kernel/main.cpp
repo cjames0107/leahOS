@@ -5,6 +5,7 @@
 #include <leah/cpu.hpp>
 #include <leah/syscall.hpp>
 #include <leah/framebuffer.hpp>
+#include <leah/fpu.hpp>
 #include <leah/gdt.hpp>
 #include <leah/heap.hpp>
 #include <leah/hpet.hpp>
@@ -374,6 +375,15 @@ extern "C" void kernel_main(const boot::Info* boot_info)
 
     interrupts::init();
     step("IDT installed, 256 vectors");
+
+    // Floating point, before anything runs that might use it. Only user code
+    // does - the kernel is still built -mno-sse - but the control bits are
+    // per-CPU and have to be set on each one, so this is paired with the
+    // matching call in ap_main.
+    if (fpu::init_this_cpu())
+        step("x87/SSE enabled, FPU state saved per task");
+    else
+        step("no FXSAVE on this CPU: floating point stays off");
 
     // Memory next, because every driver past this point wants to allocate.
     pmm::init(*info);

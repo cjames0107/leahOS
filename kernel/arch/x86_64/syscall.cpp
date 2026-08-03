@@ -12,6 +12,7 @@
 #include <leah/percpu.hpp>
 #include <leah/keyboard.hpp>
 #include <leah/ipc.hpp>
+#include <leah/fpu.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
 #include <leah/signal.hpp>
@@ -213,19 +214,40 @@ bool push_signal_frame(const SavedContext& saved, u64& new_rsp)
 {
     u64 sp = saved.rsp;
     sp -= 128;                          // skip the SysV red zone
+
+    /* The floating-point registers, above the context and 16-aligned for
+     * FXSAVE. A handler is ordinary compiled code and may use SSE without
+     * meaning to - a struct copy is enough - so without this it would return
+     * having quietly changed the interrupted code's arithmetic. The general
+     * registers were always saved here; these are no different. */
+    sp -= sizeof(fpu::State);
+    sp &= ~0xFull;
+    const u64 fpu_at = sp;
+
     sp -= sizeof(SavedContext);
     sp &= ~0xFull;                      // the ABI's 16-byte alignment
 
     const u64 restorer = scheduler::signal_restorer();
-    if (restorer == 0 || !user_range_ok(sp - 8, sizeof(SavedContext) + 8))
+    if (restorer == 0 ||
+        !user_range_ok(sp - 8, (fpu_at + sizeof(fpu::State)) - (sp - 8)))
         return false;
 
+    fpu::save(*reinterpret_cast<fpu::State*>(fpu_at));
     *reinterpret_cast<SavedContext*>(sp) = saved;
     sp -= 8;
     *reinterpret_cast<u64*>(sp) = restorer;   // where the handler's RET goes
 
     new_rsp = sp;
     return true;
+}
+
+/* Where push_signal_frame put the saved unit, given the stack pointer
+ * sigreturn sees. Derived rather than stored: the handler's RET has already
+ * popped the restorer address, so the context sits exactly at RSP and the
+ * unit directly above it. */
+u64 signal_fpu_slot(u64 context_sp)
+{
+    return (context_sp + sizeof(SavedContext) + 15) & ~0xFull;
 }
 
 // Called on the way out of every syscall. Takes at most one pending signal per
@@ -303,6 +325,14 @@ void handle_pending_signals(Frame* frame)
     restored.ss = kUserData;
     constexpr u64 kSafeFlags = 0x8D5;    // CF PF AF ZF SF DF OF
     restored.rflags = (restored.rflags & kSafeFlags) | kUserFlags;
+
+    /* And the floating-point registers the handler was given a clean shot at.
+     * This image is in the user's own memory and so is not trusted: fpu
+     * ::restore masks MXCSR to the bits this CPU implements, because a
+     * reserved bit set there is a #GP inside the kernel. */
+    const u64 fpu_at = signal_fpu_slot(sp);
+    if (user_range_ok(fpu_at, sizeof(fpu::State)))
+        fpu::restore_untrusted(*reinterpret_cast<const fpu::State*>(fpu_at));
 
     // This path leaves through IRETQ rather than returning, so the dispatcher's
     // scope guard will never fire: drop the kernel lock by hand first.
