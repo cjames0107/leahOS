@@ -12,6 +12,8 @@
 #include <unistd.h>
 #include <shm.h>
 #include <signal.h>
+#include <display.h>
+#include <screen.h>
 #include <window.h>
 
 /* Distinct from any status a shell is likely to return, so the parent can tell
@@ -81,6 +83,122 @@ static void session(void)
     printf("login: cannot start a shell\n");
 }
 
+/* --- the login screen ---------------------------------------------------------
+ *
+ * Drawn onto the framebuffer directly, because this runs before the window
+ * server does - and since the kernel's console became serial-only there is
+ * nothing on the screen at all until something puts it there.
+ *
+ * Keys come from input_poll rather than read(), because this wants them one at
+ * a time: a password field has to echo something without echoing the password,
+ * and Tab has to move between fields rather than being a character. read()
+ * gives back a cooked line, which is the wrong shape for both.
+ */
+
+#define BG      0x00101418u
+#define PANEL   0x001C232Au
+#define FIELD   0x00131A20u
+#define TEXT    0x00C8D0D4u
+#define DIM     0x00707880u
+#define ACCENT  0x0038B0A0u
+#define BAD     0x00C05048u
+
+#define FIELD_MAX 32
+
+static int g_have_screen;
+
+/* One field, drawn with its own frame so the focused one is obvious. */
+static void draw_field(int x, int y, int w, const char* label, const char* value,
+                       int masked, int focused)
+{
+    const int gh = screen_glyph_height();
+    char shown[FIELD_MAX + 1];
+    int i;
+
+    screen_text(x, y, label, DIM, PANEL, 0);
+    screen_fill(x, y + gh + 4, w, gh + 8, FIELD);
+    screen_frame(x, y + gh + 4, w, gh + 8, focused ? ACCENT : DIM);
+
+    for (i = 0; value[i] != '\0' && i < FIELD_MAX; ++i)
+        shown[i] = masked ? '*' : value[i];
+    shown[i] = '\0';
+    screen_text(x + 6, y + gh + 8, shown, TEXT, FIELD, 0);
+
+    /* A caret, so an empty focused field still says where typing goes. */
+    if (focused)
+        screen_fill(x + 6 + screen_text_width(shown), y + gh + 8,
+                    2, gh, ACCENT);
+}
+
+static void draw_login(const char* user, const char* password, int focus,
+                       const char* message)
+{
+    const int w = 380, h = 210;
+    const int x = (int)screen_width() / 2 - w / 2;
+    const int y = (int)screen_height() / 2 - h / 2;
+
+    screen_fill(0, 0, (int)screen_width(), (int)screen_height(), BG);
+    screen_fill(x, y, w, h, PANEL);
+    screen_frame(x, y, w, h, DIM);
+
+    screen_text_centred(x + w / 2, y + 18, "leahOS", TEXT, PANEL, 0);
+
+    draw_field(x + 30, y + 56, w - 60, "username", user, 0, focus == 0);
+    draw_field(x + 30, y + 118, w - 60, "password", password, 1, focus == 1);
+
+    if (message != 0)
+        screen_text_centred(x + w / 2, y + h - 26, message, BAD, PANEL, 0);
+    else
+        screen_text_centred(x + w / 2, y + h - 26,
+                            "tab to move, enter to sign in", DIM, PANEL, 0);
+}
+
+/* Returns 1 when the two fields have been filled in and submitted. */
+static int prompt_on_screen(char* user, char* password, const char* message)
+{
+    int focus = 0;
+    int lengths[2] = { 0, 0 };
+    char* fields[2];
+
+    fields[0] = user;
+    fields[1] = password;
+    user[0] = '\0';
+    password[0] = '\0';
+    draw_login(user, password, focus, message);
+
+    for (;;) {
+        struct input_state in;
+        char c;
+
+        if (input_poll(&in) != 0)
+            return 0;
+        if (in.key == 0) {
+            msleep(15);
+            continue;
+        }
+        c = (char)in.key;
+
+        if (c == '\t') {
+            focus = focus == 0 ? 1 : 0;
+        } else if (c == '\n' || c == '\r') {
+            if (focus == 0) {
+                focus = 1;                  /* enter moves on, like tab */
+            } else {
+                return 1;                   /* and submits from the last field */
+            }
+        } else if (c == '\b') {
+            if (lengths[focus] > 0)
+                fields[focus][--lengths[focus]] = '\0';
+        } else if (c >= ' ' && c < 127 && lengths[focus] < FIELD_MAX) {
+            fields[focus][lengths[focus]++] = c;
+            fields[focus][lengths[focus]] = '\0';
+        } else {
+            continue;                       /* arrows and the rest: not text */
+        }
+        draw_login(user, password, focus, message);
+    }
+}
+
 /* Wait for one particular child, reaping anything else that turns up.
  *
  * login is what init became - execve keeps the process - so every server init
@@ -134,19 +252,37 @@ static int password_accepted(const char* user, const char* password)
 
 int main(void)
 {
+    int incorrect = 0;
+
+    /* If there is a framebuffer, this is where it starts being used - the boot
+     * splash drew the last thing on it and login takes over from there. */
+    g_have_screen = screen_open() == 0;
+
     for (;;) {
         char user[64] = {};
         char password[128] = {};
 
-        printf("\n");
-        if (read_line("leahOS login: ", user, sizeof(user), 1) <= 0)
-            continue;
-        if (read_line("Password: ", password, sizeof(password), 0) < 0)
-            continue;
+        if (g_have_screen) {
+            if (!prompt_on_screen(user, password, incorrect ? "login incorrect" : 0))
+                continue;
+        } else {
+            /* No framebuffer: the serial line is the only thing anyone can be
+             * looking at, so ask there instead. */
+            printf("\n");
+            if (incorrect)
+                printf("Login incorrect\n");
+            if (read_line("leahOS login: ", user, sizeof(user), 1) <= 0)
+                continue;
+            if (read_line("Password: ", password, sizeof(password), 0) < 0)
+                continue;
+        }
+        incorrect = 0;
 
         if (!password_accepted(user, password)) {
             /* Deliberately says nothing about which half was wrong. */
-            printf("Login incorrect\n");
+            incorrect = 1;
+            if (!g_have_screen)
+                printf("Login incorrect\n");
             continue;
         }
 
