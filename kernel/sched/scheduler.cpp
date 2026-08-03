@@ -8,6 +8,7 @@
 #include <leah/percpu.hpp>
 #include <leah/file.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/shm.hpp>
 #include <leah/smp.hpp>
 #include <leah/signal.hpp>
 #include <leah/spinlock.hpp>
@@ -896,8 +897,16 @@ void exit_current(i32 code)
      * dies owing an answer would otherwise leave its clients asleep on a reply
      * that is never coming - which in a system built on message passing is how
      * one crash becomes a frozen machine. */
-    if (self->is_user && !group_still_alive(self))
+    if (self->is_user && !group_still_alive(self)) {
         ipc::abandon(self->tgid);
+        /* And the shared segments it made. libc opens one per process to talk
+         * to vfsd, keyed by pid so no two processes share a transfer buffer -
+         * so every process that touches a file makes one, and nothing was
+         * giving them back. Braced, because unbraced this ran for every
+         * exiting *thread* and would tear down a live process's segments. */
+        shm::abandon(self->tgid);
+    }
+
 
     self->state = self->is_user ? State::Zombie : State::Dead;
 

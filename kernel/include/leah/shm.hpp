@@ -22,7 +22,12 @@
 
 namespace shm {
 
-constexpr usize kMaxSegments = 32;
+/* Thirty-two was chosen when a segment meant a window. It now also means "a
+ * process that has touched a file", because that is how libc reaches vfsd, and
+ * a desktop with a dozen servers, several windows and a handful of short-lived
+ * programs runs out during ordinary use - at which point every later open
+ * fails and the machine stops being able to read anything. */
+constexpr usize kMaxSegments = 256;
 
 // The keys the window server and its clients agree on.
 constexpr u32 kWindowServerKey = 1;         // the control block
@@ -52,6 +57,10 @@ bool accessible(i32 id, u32 uid);
 // again. Mappings that already exist hold their own references and keep the
 // frames alive, so this is safe while the other side is still reading.
 bool destroy(i32 id, u32 uid);
+
+// Give back every segment a dying process created. Without this a segment
+// outlives its owner forever, and the table is small.
+void abandon(u32 pid);
 
 // Physical frame `index` of a segment, for the syscall layer to map.
 paddr_t frame_of(i32 id, usize index);

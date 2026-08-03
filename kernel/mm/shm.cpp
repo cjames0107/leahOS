@@ -13,6 +13,7 @@ struct Segment {
     bool     used;
     u32      key;
     u32      owner_uid;
+    u32      owner_pid;     // who created it, so it can be reclaimed
     u64      bytes;
     u32      flags;
     usize    pages;
@@ -118,6 +119,7 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
         segment.used      = true;
         segment.key       = key;
         segment.owner_uid = uid;
+        segment.owner_pid = scheduler::current_tgid();
         segment.bytes     = bytes;
         segment.flags     = flags;
         if (!allocate(segment, pages)) {
@@ -127,6 +129,26 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
         return static_cast<i32>(i);
     }
     return -1;
+}
+
+void abandon(u32 pid)
+{
+    /* Segments belong to the process that made them, and nothing was giving
+     * them back. libc opens one per process for talking to vfsd, keyed by pid
+     * so two processes never share a transfer buffer - which means a fresh key
+     * every time and a segment that outlived its owner. There are thirty-two;
+     * a few dozen program launches exhausted them, every later open failed,
+     * and the machine stopped being able to read files. It looked like the
+     * desktop falling apart under use, because that is what it was. */
+    for (usize i = 0; i < kMaxSegments; ++i) {
+        Segment& segment = g_segments[i];
+        if (!segment.used || segment.owner_pid != pid)
+            continue;
+        for (usize page = 0; page < segment.pages; ++page)
+            pmm::release(segment.frames[page]);
+        kfree(segment.frames);
+        memset(&segment, 0, sizeof(segment));
+    }
 }
 
 bool destroy(i32 id, u32 uid)
