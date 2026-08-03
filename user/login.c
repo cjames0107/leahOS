@@ -81,6 +81,36 @@ static void session(void)
     printf("login: cannot start a shell\n");
 }
 
+/* Wait for one particular child, reaping anything else that turns up.
+ *
+ * login is what init became - execve keeps the process - so every server init
+ * started is still a child of this process. An unqualified wait() therefore
+ * returns whichever of them dies first, and on a machine with no xHCI
+ * controller usbd exits during boot and leaves a zombie pending before login
+ * has even drawn its prompt.
+ *
+ * That was two bugs. The session was declared over the moment any server
+ * exited, so the desktop never appeared and the screen said "logout". And, far
+ * worse, the password check below read that stranger's exit status as its own
+ * verdict: a dead server that exited 0 or 1 is not AUTH_FAILED, so a *wrong
+ * password was accepted*. Confirmed by typing one and being let in.
+ *
+ * Reaping the strangers as they go is the right thing to do with them anyway. */
+static int wait_for(int want, int* status_out)
+{
+    for (;;) {
+        int status = 0;
+        const int got = wait(&status);
+        if (got < 0)
+            return -1;                  /* no children left at all */
+        if (got == want) {
+            if (status_out != 0)
+                *status_out = status;
+            return got;
+        }
+    }
+}
+
 /* Check the password without giving this process away.
  *
  * login() changes the credentials of whoever calls it, and this process has to
@@ -97,7 +127,8 @@ static int password_accepted(const char* user, const char* password)
         exit(login(user, password, home) < 0 ? AUTH_FAILED : 0);
     }
     int status = 0;
-    wait(&status);
+    if (wait_for(pid, &status) < 0)
+        return 0;                       /* it vanished; refuse rather than guess */
     return status != AUTH_FAILED;
 }
 
@@ -157,14 +188,14 @@ int main(void)
         }
         (void)pid;
 
-        wait(0);                /* the session */
+        wait_for(pid, 0);       /* this session, not whatever exits first */
 
         /* The server has no reason of its own to stop if the session ended
          * without ever opening a window, so say so rather than leaving it
          * running behind the next login prompt. */
         if (server > 0) {
             kill(server, SIGTERM);
-            wait(0);
+            wait_for(server, 0);
         }
         printf("logout\n");
     }
