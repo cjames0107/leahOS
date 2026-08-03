@@ -30,9 +30,6 @@ u32 pitch();
 u32 bits_per_pixel();
 paddr_t physical_base();
 
-void clear(u32 colour);
-void draw_glyph(u32 column, u32 row, char c, u32 foreground, u32 background);
-void scroll_up(u32 background);
 
 // Packs to whatever the mode's pixel format is.
 u32 rgb(u8 r, u8 g, u8 b);
@@ -43,13 +40,11 @@ u32 rgb(u8 r, u8 g, u8 b);
 // in pixels and composes off-screen, so it needs to put single pixels down and
 // to push a finished rectangle out in one go.
 
-void plot(u32 x, u32 y, u32 colour);
 
 // Copy a rectangle of packed 32-bit pixels from `source` (which is `stride`
 // pixels wide) onto the screen at (x, y). This is the only path the compositor
 // uses to reach the framebuffer, so every write to video memory goes through
 // one place.
-void blit(const u32* source, u32 stride, u32 x, u32 y, u32 width, u32 height);
 
 // One row of the 8x16 BIOS font, as a bitmask with bit 7 leftmost. Drawing text
 // at an arbitrary pixel position rather than on the character grid needs the
