@@ -235,7 +235,10 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_ELFS) | $
 EXT_ADDS := $(foreach p,$(BIN_PROGRAMS),BIN/$(shell echo $(p) | tr a-z A-Z).ELF=$(BUILD)/$(p).elf)
 EXT_APPS := $(foreach p,$(APP_PROGRAMS),$(p)=$(BUILD)/$(p).elf)
 
-$(EXT_IMG): $(USER_ELFS) tools/mkext.sh | $(DIST)
+$(BUILD)/wallpaper.png: assets/wallpaper.jpg tools/mkwallpaper.py | $(BUILD)
+	@python3 tools/mkwallpaper.py $< $@ 640 480
+
+$(EXT_IMG): $(USER_ELFS) $(BUILD)/wallpaper.png tools/mkext.sh | $(DIST)
 	@APPS="$(EXT_APPS)" tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
 
 $(SATA_IMG): | $(DIST)

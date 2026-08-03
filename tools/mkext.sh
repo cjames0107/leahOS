@@ -70,6 +70,11 @@ stage_bundle() {
     } > "$dir/Info"
     python3 tools/mkicon.py "$dir/Icon.png" "$app"
 }
+# The desktop background. Converted from assets/wallpaper.jpg by the build -
+# see tools/mkwallpaper.py for why it cannot simply be copied.
+mkdir -p "$STAGING/share"
+cp "$(dirname "$0")/../build/wallpaper.png" "$STAGING/share/wallpaper.png"
+
 printf 'Hello from ext4.\n' > "$STAGING/docs/hello.txt"
 printf 'Notes live in a subdirectory.\n' > "$STAGING/docs/notes.txt"
 {

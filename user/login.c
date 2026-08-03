@@ -263,6 +263,12 @@ int main(void)
         char password[128] = {};
 
         if (g_have_screen) {
+            /* Said on the serial line too, even though the prompt itself is on
+             * the screen. The kernel's console goes to serial and nothing
+             * else now, so that log is the only thing a headless operator can
+             * watch - and "the machine is waiting for someone to log in" is
+             * exactly what it should say when that is true. */
+            printf("\nleahOS login: (on screen)\n");
             if (!prompt_on_screen(user, password, incorrect ? "login incorrect" : 0))
                 continue;
         } else {

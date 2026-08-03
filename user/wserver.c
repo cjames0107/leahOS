@@ -1112,21 +1112,36 @@ int main(void)
     memset(g_control, 0, sizeof(struct ws_shared));
     g_control->server_pid = (uint32_t)getpid();
 
-    /* The palette the desktop starts with; settings may change any of it. */
-    g_control->theme.desktop      = 0x008080;
-    g_control->theme.face         = 0xC0C0C0;
+    /* The palette the desktop starts with; settings may change any of it.
+     *
+     * Soft and warm rather than the grey-and-navy it was: an off-white face,
+     * a title bar the same colour as the window under it so the chrome reads
+     * as one surface, and dark text on both. The desktop colour is only seen
+     * when there is no wallpaper, so it is a muted green that sits under the
+     * photograph rather than fighting it. */
+    g_control->theme.desktop      = 0x6E9457;
+    g_control->theme.face         = 0xF0EFE7;
     g_control->theme.light        = 0xFFFFFF;
-    g_control->theme.shadow       = 0x606060;
-    g_control->theme.title_active = 0x000080;
-    g_control->theme.title_idle   = 0x808080;
-    g_control->theme.title_text   = 0xFFFFFF;
+    g_control->theme.shadow       = 0xC6C4BA;
+    g_control->theme.title_active = 0xF0EFE7;
+    g_control->theme.title_idle   = 0xE6E5DC;
+    g_control->theme.title_text   = 0x2A2A28;
     g_control->theme.cursor       = 0xFFFFFF;
-    g_control->theme.selection    = 0xB0C4DE;
-    g_control->theme.body         = 0xFFFFFF;
-    g_control->theme.text         = 0x000000;
+    g_control->theme.selection    = 0xCFE3D8;
+    g_control->theme.body         = 0xF7F6F0;
+    g_control->theme.text         = 0x2A2A28;
     g_control->theme.text_scale   = 1;
     g_control->theme.contrast     = 0;
     g_control->theme.pattern      = WS_PATTERN_FLAT;
+    {
+        /* The wallpaper the image ships with. Settings can replace or clear
+         * it; this is only what a fresh machine looks like. */
+        static const char kPaper[] = "/share/wallpaper.png";
+        unsigned i = 0;
+        for (; kPaper[i] != '\0' && i < sizeof(g_control->theme.wallpaper) - 1; ++i)
+            g_control->theme.wallpaper[i] = kPaper[i];
+        g_control->theme.wallpaper[i] = '\0';
+    }
     g_control->theme.generation   = 1;
     for (int i = 0; i < WS_MAX_WINDOWS; ++i)
         g_order[i] = -1;
