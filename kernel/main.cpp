@@ -3,7 +3,6 @@
 #include <leah/bootinfo.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
-#include <leah/elf.hpp>
 #include <leah/syscall.hpp>
 #include <leah/framebuffer.hpp>
 #include <leah/gdt.hpp>

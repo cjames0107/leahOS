@@ -1,6 +1,5 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
-#include <leah/elf.hpp>
 #include <leah/heap.hpp>
 #include <leah/memory.hpp>
 #include <leah/pmm.hpp>
@@ -118,9 +117,85 @@ vaddr_t build_stack(const Args& args)
 // reads it themselves now and hands over the bytes.
 //
 // `name` is only for the error message.
+/* What the kernel maps: an address, some bytes, and how much of it is memory.
+ * Not a format - the caller has already worked out the format, whether that was
+ * libc reading a file or the build reading it years earlier. */
+struct Segment {
+    u64 vaddr;
+    u64 offset;         // into the blob these segments came with
+    u64 filesz;
+    u64 memsz;
+    u32 flags;          // ELF program-header flags: 1 execute, 2 write, 4 read
+    u32 reserved;
+};
+
+constexpr u32 kSegExecute = 1;
+constexpr u32 kSegWrite   = 2;
+
+/* Map one program's segments into the address space that is currently active.
+ *
+ * This is all that is left of loading a program. Deciding *which* bytes go
+ * where is parsing, and parsing is somebody else's job now - libc's for an
+ * ordinary exec, the build's for the three programs the kernel carries. */
+bool map_segments(const Segment* segments, u32 count, const u8* blob,
+                  u64 blob_size)
+{
+    if (count == 0 || count > 16)
+        return false;
+
+    for (u32 i = 0; i < count; ++i) {
+        const Segment& s = segments[i];
+        if (s.memsz == 0)
+            continue;
+        if (s.filesz > s.memsz || s.offset + s.filesz > blob_size)
+            return false;
+        if (s.vaddr >= memory::kKernelBase)
+            return false;               // a user program, in the user half
+
+        /* A segment rarely starts on a page boundary, and the bytes in front
+         * of it inside the first page belong to it too - so round outward. */
+        const vaddr_t start = s.vaddr & ~(vmm::kPageSize - 1);
+        const vaddr_t end   = (s.vaddr + s.memsz + vmm::kPageSize - 1) &
+                              ~(vmm::kPageSize - 1);
+
+        /* Writable while loading, because the loader has to write into it. A
+         * read-only segment is tightened once its contents are in place. */
+        u64 flags = vmm::Write | vmm::User;
+        if ((s.flags & kSegExecute) == 0)
+            flags |= vmm::NoExecute;
+
+        for (vaddr_t page = start; page < end; page += vmm::kPageSize) {
+            const paddr_t frame = pmm::alloc();
+            if (frame == 0)
+                return false;
+            if (!vmm::map(page, frame, flags)) {
+                pmm::free(frame);
+                return false;
+            }
+            /* Cleared, which is also what makes .bss read as zero: everything
+             * past filesz is already the zeros it has to be. */
+            memset(reinterpret_cast<void*>(page), 0, vmm::kPageSize);
+        }
+
+        if (s.filesz > 0)
+            memcpy(reinterpret_cast<void*>(s.vaddr), blob + s.offset,
+                   static_cast<usize>(s.filesz));
+
+        if ((s.flags & kSegWrite) == 0) {
+            u64 readonly = vmm::User;
+            if ((s.flags & kSegExecute) == 0)
+                readonly |= vmm::NoExecute;
+            for (vaddr_t page = start; page < end; page += vmm::kPageSize)
+                vmm::map(page, vmm::translate(page), readonly);
+        }
+    }
+    return true;
+}
+
 vmm::AddressSpace build_image(const char* name, const Args& args,
                               vaddr_t& entry_out, vaddr_t& stack_out,
-                              const u8* image_bytes, usize image_size)
+                              u64 entry, const Segment* segments, u32 count,
+                              const u8* blob, u64 blob_size)
 {
     const vmm::AddressSpace previous = vmm::current_space();
 
@@ -130,18 +205,15 @@ vmm::AddressSpace build_image(const char* name, const Args& args,
 
     vmm::switch_address_space(space);
 
-    elf::Image image{};
-    const elf::Error error = elf::load_memory(image_bytes, image_size, image);
-    if (error != elf::Error::None || !map_user_stack()) {
+    if (!map_segments(segments, count, blob, blob_size) || !map_user_stack()) {
         vmm::switch_address_space(previous);
         vmm::destroy_address_space(space);
-        if (error != elf::Error::None)
-            console::printf("  process: %s: %s\n", name, elf::error_name(error));
+        console::printf("  process: %s: could not be mapped\n", name);
         return 0;
     }
 
     stack_out = build_stack(args);
-    entry_out = image.entry;
+    entry_out = entry;
 
     vmm::switch_address_space(previous);
     return space;
@@ -164,13 +236,30 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
 {
     cpu::InterruptGuard guard;
 
+    /* A boot image, not an ELF: the build already read the program headers and
+     * wrote out what they meant. See tools/mkbootimage.py - the layout is a
+     * magic word, an entry point, a count, that many segment descriptors, and
+     * then the bytes they point at. */
+    if (size < 24 || memcmp(image, "LEAHIMG1", 8) != 0) {
+        console::printf("  process: %s: not a boot image\n", name);
+        return 0;
+    }
+    const u64 entry_point = *reinterpret_cast<const u64*>(image + 8);
+    const u32 count = *reinterpret_cast<const u32*>(image + 16);
+    const auto* segments = reinterpret_cast<const Segment*>(image + 24);
+    if (count == 0 || count > 16 || 24 + count * sizeof(Segment) > size) {
+        console::printf("  process: %s: boot image is malformed\n", name);
+        return 0;
+    }
+
     Args args;
     single_arg(name, args);
 
     vaddr_t entry = 0;
     vaddr_t stack = 0;
     const vmm::AddressSpace space =
-        build_image(name, args, entry, stack, image, size);
+        build_image(name, args, entry, stack, entry_point, segments, count,
+                    image, size);
     if (space == 0)
         return 0;
 
@@ -183,7 +272,8 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
     return pid;
 }
 
-void exec(syscall::Frame& frame, const u8* image, usize size, char** argv)
+void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
+          u64 entry_point, const void* user_segments, u32 count)
 {
     const vmm::AddressSpace old_space = scheduler::current_task_space();
 
@@ -192,6 +282,13 @@ void exec(syscall::Frame& frame, const u8* image, usize size, char** argv)
      * mapped in every address space and so is reachable from both sides of the
      * switch. The caller read the file; this is only the copy across the
      * boundary, which is the part that has to be here. */
+    if (count == 0 || count > 16) {
+        frame.rax = static_cast<u64>(-1);
+        return;
+    }
+    Segment segments[16];
+    memcpy(segments, user_segments, count * sizeof(Segment));
+
     u8* owned = static_cast<u8*>(kmalloc(size));
     if (owned == nullptr) {
         frame.rax = static_cast<u64>(-1);
@@ -208,7 +305,8 @@ void exec(syscall::Frame& frame, const u8* image, usize size, char** argv)
     vaddr_t stack = 0;
     const char* name = args.argc > 0 ? args.storage + args.offset[0] : "program";
     const vmm::AddressSpace space =
-        build_image(name, args, entry, stack, owned, size);
+        build_image(name, args, entry, stack, entry_point, segments, count,
+                    owned, size);
     kfree(owned);
     if (space == 0) {
         frame.rax = static_cast<u64>(-1);

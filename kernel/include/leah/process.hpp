@@ -32,6 +32,7 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
 // Bytes, not a path: the kernel has no filesystem client left, and reaching
 // into one from the middle of building an address space was the last place it
 // blocked as somebody else's client.
-void exec(syscall::Frame& frame, const u8* image, usize size, char** argv);
+void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
+          u64 entry_point, const void* segments, u32 count);
 
 } // namespace process

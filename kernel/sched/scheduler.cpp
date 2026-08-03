@@ -25,7 +25,13 @@ extern "C" void first_user_entry();
 namespace scheduler {
 namespace {
 
-constexpr usize kMaxTasks   = 32;
+/* Thirty-two was enough when the drivers were in the kernel. They are not:
+ * every one of them is a process now, ps2d brings a thread as well, and each
+ * processor has an idle task. A desktop session with a few windows open is
+ * most of the way there before a program forks anything - and eight children
+ * at once, which the suite does deliberately, went over on two CPUs. Running
+ * out is not an error anyone sees; fork simply starts failing. */
+constexpr usize kMaxTasks   = 96;
 // "this CPU has not switched away from anything yet"
 constexpr u32 kNoPrevious   = 0xFFFFFFFFu;
 constexpr u32   kMaxSignals = signals::kMaxSignals;
