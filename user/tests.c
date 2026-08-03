@@ -19,6 +19,7 @@
 #include <driver.h>
 #include <image.h>
 #include <ipc.h>
+#include <math.h>
 #include <unistd.h>
 
 static int g_failures;
@@ -1039,6 +1040,128 @@ static void test_float(void)
     signal(SIGUSR1, SIG_DFL);
 }
 
+
+/* --- the maths library -------------------------------------------------------
+ *
+ * Checked against exact values rather than against another implementation,
+ * because there is no other implementation on this machine to check against.
+ * The tolerances are the ones math.h documents, applied as relative error.
+ */
+
+static int close_to(double got, double want, double tolerance)
+{
+    if (want == 0.0)
+        return fabs(got) <= tolerance;
+    const double relative = fabs((got - want) / want);
+    return relative <= tolerance;
+}
+
+static void test_math(void)
+{
+    printf("maths:\n");
+
+    /* Square root is the hardware's, so it is exact where the answer is. */
+    check("sqrt is exact on squares",
+          sqrt(4.0) == 2.0 && sqrt(1024.0) == 32.0 && sqrt(0.25) == 0.5);
+    check("sqrt of two is right to the last bits",
+          close_to(sqrt(2.0), M_SQRT2, 1e-15) && sqrt(2.0) * sqrt(2.0) != 0.0);
+    check("sqrt of a negative is not a number", isnan(sqrt(-1.0)));
+
+    /* The identity that catches a wrong sign or a wrong quadrant anywhere in
+     * the fold - checked right around the circle, not just near zero. */
+    int pythagorean = 1;
+    for (int i = -400; i <= 400; ++i) {
+        const double x = (double)i * 0.37;
+        const double s = sin(x), c = cos(x);
+        if (!close_to(s * s + c * c, 1.0, 1e-14))
+            pythagorean = 0;
+    }
+    check("sin^2 + cos^2 is one all the way round", pythagorean);
+
+    check("sin of nothing is nothing, cos of nothing is one",
+          sin(0.0) == 0.0 && cos(0.0) == 1.0);
+    check("sin and cos hit the quarter turns",
+          close_to(sin(M_PI_2), 1.0, 1e-15) &&
+          fabs(cos(M_PI_2)) < 1e-15 &&
+          close_to(cos(M_PI), -1.0, 1e-15));
+    check("sin of a third of pi is root three over two",
+          close_to(sin(M_PI / 3.0), sqrt(3.0) / 2.0, 1e-15));
+    /* The fold still works far from zero, which is the part that is easy to
+     * get wrong and impossible to notice near the origin. */
+    check("the angle folds correctly a long way out",
+          close_to(sin(1000.0 * M_PI + M_PI_2), 1.0, 1e-9) &&
+          close_to(sin(100000.5 * M_PI), 1.0, 1e-9));
+    check("tan agrees with sin over cos",
+          close_to(tan(0.7), sin(0.7) / cos(0.7), 1e-14));
+
+    check("exp of nothing is one", exp(0.0) == 1.0);
+    check("exp of one is e", close_to(exp(1.0), M_E, 1e-15));
+    check("log undoes exp", close_to(log(exp(3.75)), 3.75, 1e-14));
+    check("exp undoes log", close_to(exp(log(1234.5)), 1234.5, 1e-14));
+    check("log of one is nothing, log of e is one",
+          log(1.0) == 0.0 && close_to(log(M_E), 1.0, 1e-15));
+    check("log of zero and below are told apart",
+          log(0.0) == -HUGE_VAL && isnan(log(-2.0)));
+    check("log2 and log10 land on their own powers",
+          close_to(log2(1024.0), 10.0, 1e-15) &&
+          close_to(log10(1000.0), 3.0, 1e-15));
+    /* Over the whole range a double can hold, not just near one. */
+    int wide = 1;
+    for (int e = -300; e <= 300; e += 11)
+        if (!close_to(log(pow(10.0, (double)e)), (double)e * M_LN10, 1e-14))
+            wide = 0;
+    check("log holds up across the exponent range", wide);
+
+    /* Whole exponents go through repeated squaring, and are exact whenever the
+     * answer is - which is the reason that path exists. */
+    check("whole powers are exact",
+          pow(2.0, 10.0) == 1024.0 && pow(10.0, 3.0) == 1000.0 &&
+          pow(3.0, 4.0) == 81.0 && pow(2.0, -2.0) == 0.25);
+    int exact_powers = 1;
+    for (int n = -60; n <= 60; ++n) {
+        double built = 1.0;
+        for (int i = 0; i < (n < 0 ? -n : n); ++i)
+            built *= 2.0;
+        if (n < 0)
+            built = 1.0 / built;
+        if (pow(2.0, (double)n) != built)
+            exact_powers = 0;
+    }
+    check("every power of two is exact", exact_powers);
+    check("ten to the tenth is ten billion", pow(10.0, 10.0) == 1e10);
+
+    check("a fractional exponent is a root",
+          close_to(pow(9.0, 0.5), 3.0, 1e-15) &&
+          close_to(pow(27.0, 1.0/3.0), 3.0, 1e-14));
+    check("a negative base keeps the sign of an odd power",
+          pow(-2.0, 3.0) == -8.0 && pow(-2.0, 2.0) == 4.0);
+    check("a negative base with a fractional power has no answer",
+          isnan(pow(-8.0, 1.0/3.0)));
+    check("anything to the zero is one, one to anything is one",
+          pow(0.0, 0.0) == 1.0 && pow(1.0, 42.0) == 1.0);
+    check("the infinities go the right way",
+          isinf(exp(1000.0)) && exp(-1000.0) == 0.0 &&
+          pow(2.0, 5000.0) == HUGE_VAL);
+
+    check("floor, ceil, trunc and round differ where they should",
+          floor(-2.5) == -3.0 && ceil(-2.5) == -2.0 &&
+          trunc(-2.7) == -2.0 && round(-2.5) == -3.0 && round(2.5) == 3.0);
+    check("fmod keeps the sign of the numerator",
+          fmod(7.0, 3.0) == 1.0 && fmod(-7.0, 3.0) == -1.0 &&
+          fmod(7.5, 2.0) == 1.5);
+    check("frexp and ldexp are inverses",
+          ldexp(1.0, 60) == 1152921504606846976.0);
+    int split_ok = 1;
+    for (int i = 1; i < 500; ++i) {
+        int e = 0;
+        const double x = (double)i * 3.75;
+        const double m = frexp(x, &e);
+        if (!(fabs(m) >= 0.5 && fabs(m) < 1.0) || ldexp(m, e) != x)
+            split_ok = 0;
+    }
+    check("frexp splits and ldexp puts back, exactly", split_ok);
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -1056,6 +1179,7 @@ int main(void)
     test_exit_churn();
     test_png();
     test_float();
+    test_math();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

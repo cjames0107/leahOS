@@ -217,6 +217,15 @@ $(BUILD)/user/%.o: user/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -MMD -MP -c $< -o $@
 
+# The maths library is the one file that must not be built against the
+# compiler's own idea of what these functions do. GCC recognises exp(y*log(x))
+# and rewrites it as a call to pow - which, inside pow, is a call to itself.
+# The same hazard applies to every identity it knows. An explicit rule beats
+# the pattern rule above.
+$(BUILD)/user/libc/math.o: user/libc/math.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -fno-builtin -MMD -MP -c $< -o $@
+
 # One rule builds any user program: crt0 first, the program object, then libc.
 $(BUILD)/%.elf: $(CRT0_OBJ) $(BUILD)/user/%.o $(LIBC_OBJS) user/user.ld
 	$(LD) -nostdlib -T user/user.ld -o $@ $(CRT0_OBJ) $(BUILD)/user/$*.o $(LIBC_OBJS)
