@@ -29,9 +29,15 @@ int img_write_gif(const char* path, const uint32_t* px,
 
 /* Read a PNG back. Returns a malloc'd buffer of `width * height` pixels, or 0.
  *
- * It reads what this system writes: 8-bit truecolour, no interlacing, stored
- * deflate blocks. A compressed one needs an inflate that does not exist here
- * yet, and this says so by failing rather than by showing noise. */
+ * This reads PNGs generally, not just the ones written above: real deflate via
+ * <inflate.h>, all five row filters, and grey, truecolour, palettised and
+ * either of the alpha forms. What it does not read is interlaced images, or
+ * bit depths other than 8 - both are rare, and failing is better than showing
+ * something wrong.
+ *
+ * Pixels come back as 0xAARRGGBB. An image with no alpha channel is opaque, so
+ * the high byte is 0xFF rather than 0; code that samples these straight into a
+ * window buffer wants `& 0xFFFFFF`, and code drawing an icon wants the alpha. */
 uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height);
 
 #endif /* _IMAGE_H */

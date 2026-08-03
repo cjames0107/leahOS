@@ -254,7 +254,9 @@ static void draw(void)
                                            * g_paper_w];
             uint32_t* dst = &g_px[(unsigned long)y * g_w];
             for (unsigned x = 0; x < g_w; ++x)
-                dst[x] = src[x * g_paper_w / g_w];
+                /* & 0xFFFFFF: img_read_png reports opacity in the high byte,
+                 * and a window buffer holds colour there and nothing else. */
+                dst[x] = src[x * g_paper_w / g_w] & 0xFFFFFF;
         }
     } else {
         wg_fill(0, 0, (int)g_w, (int)g_h,

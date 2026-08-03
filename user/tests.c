@@ -17,6 +17,7 @@
 #include <thread.h>
 #include <display.h>
 #include <driver.h>
+#include <image.h>
 #include <ipc.h>
 #include <unistd.h>
 
@@ -837,6 +838,96 @@ static void test_exit_churn(void)
     check("eight overlapping children are all collected", collected == started);
 }
 
+/* FNV-1a over the decoded pixels. The expected values are computed on the host
+ * from the same files by an independent decoder, so a match means this system
+ * agrees with something that was not written from the same misunderstanding. */
+static uint32_t pixel_hash(const uint32_t* px, unsigned long n)
+{
+    uint32_t h = 2166136261u;
+    for (unsigned long i = 0; i < n; ++i)
+        h = (h ^ px[i]) * 16777619u;
+    return h;
+}
+
+static void test_png(void)
+{
+    printf("png decoding:\n");
+
+    /* Every icon in the set, which between them use both fixed and dynamic
+     * Huffman codes and all of the row filters. */
+    static const char* const names[] = {
+        "binary", "calculator", "edit", "elements", "file", "files",
+        "folder-empty", "folder-opened", "folder-populated", "images",
+        "paint", "settings", "tasks", "terminal"
+    };
+    int loaded = 0, right_size = 0;
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        char path[64];
+        snprintf(path, sizeof(path), "/share/icons/%s.png", names[i]);
+        unsigned w = 0, h = 0;
+        uint32_t* px = img_read_png(path, &w, &h);
+        if (px != 0) {
+            ++loaded;
+            if (w == 32 && h == 32)
+                ++right_size;
+            free(px);
+        }
+    }
+    check("every icon in the set decodes", loaded == 14);
+    check("each one is 32x32", right_size == 14);
+
+    /* Two of them checked pixel for pixel: one written with fixed Huffman
+     * codes, one with dynamic. A decoder that is merely plausible fails here. */
+    unsigned w = 0, h = 0;
+    uint32_t* px = img_read_png("/share/icons/binary.png", &w, &h);
+    check("a fixed-Huffman PNG decodes to the exact pixels",
+          px != 0 && pixel_hash(px, 32 * 32) == 0x1A55598Fu);
+    if (px != 0) {
+        /* The alpha channel has to survive: these are cut-out icons, and an
+         * opaque square is what you get when it does not. */
+        int clear = 0;
+        for (int i = 0; i < 32 * 32; ++i)
+            if ((px[i] >> 24) == 0)
+                ++clear;
+        check("transparent pixels come through as transparent", clear == 436);
+        free(px);
+    }
+    px = img_read_png("/share/icons/calculator.png", &w, &h);
+    check("a dynamic-Huffman PNG decodes to the exact pixels",
+          px != 0 && pixel_hash(px, 32 * 32) == 0xD47D12CDu);
+    free(px);
+
+    /* What this system writes, it still reads - the stored-block path through
+     * the same decoder, which nothing else here would cover now that the icons
+     * are compressed. It goes in the root and is removed again, which is where
+     * the permission test puts its file and for the same reason: there is no
+     * /tmp on this filesystem. */
+    static uint32_t made[64 * 48];
+    for (int y = 0; y < 48; ++y)
+        for (int x = 0; x < 64; ++x)
+            made[y * 64 + x] = (uint32_t)((x * 4) << 16 | (y * 5) << 8 | (x ^ y));
+    check("a PNG this system wrote can be written",
+          img_write_png("/roundtrip.png", made, 64, 48) == 0);
+    px = img_read_png("/roundtrip.png", &w, &h);
+    check("and read back at the same size", px != 0 && w == 64 && h == 48);
+    if (px != 0) {
+        int same = 1;
+        for (int i = 0; i < 64 * 48; ++i)
+            if ((px[i] & 0xFFFFFF) != made[i])
+                same = 0;
+        check("with every pixel unchanged", same);
+        check("and marked opaque, having no alpha channel",
+              (px[0] >> 24) == 0xFF);
+        free(px);
+    }
+    unlink("/roundtrip.png");
+
+    check("a file that is not a PNG is refused",
+          img_read_png("/docs/readme.md", &w, &h) == 0);
+    check("a missing file is refused",
+          img_read_png("/share/icons/nothing.png", &w, &h) == 0);
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -852,6 +943,7 @@ int main(void)
     test_ipc();
     test_driver_abi();
     test_exit_churn();
+    test_png();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

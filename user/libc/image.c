@@ -1,5 +1,6 @@
 #include <fcntl.h>
 #include <image.h>
+#include <inflate.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -268,6 +269,78 @@ static uint32_t be32_of(const unsigned char* p)
            ((uint32_t)p[2] << 8) | p[3];
 }
 
+/* Undo a row's filter, in place. Every filter predicts each byte from its
+ * neighbours - `a` to the left, `b` above, `c` above-left - and stores the
+ * difference, so decoding adds the prediction back. The bytes to the left and
+ * above have already been decoded by the time they are read, which is what
+ * makes this work in one pass and in place.
+ *
+ * `bpp` is the distance to the pixel on the left, in bytes. Off the left edge
+ * and above the top row the standard says to use zero rather than to wrap. */
+static int unfilter(unsigned char* row, const unsigned char* above,
+                    unsigned long stride, unsigned bpp, unsigned char filter)
+{
+    unsigned long i;
+
+    switch (filter) {
+    case 0:                                     /* none */
+        break;
+    case 1:                                     /* sub: the pixel to the left */
+        for (i = bpp; i < stride; ++i)
+            row[i] = (unsigned char)(row[i] + row[i - bpp]);
+        break;
+    case 2:                                     /* up: the pixel above */
+        if (above != 0)
+            for (i = 0; i < stride; ++i)
+                row[i] = (unsigned char)(row[i] + above[i]);
+        break;
+    case 3:                                     /* average of left and above */
+        for (i = 0; i < stride; ++i) {
+            const unsigned a = (i >= bpp) ? row[i - bpp] : 0u;
+            const unsigned b = (above != 0) ? above[i] : 0u;
+            row[i] = (unsigned char)(row[i] + (a + b) / 2u);
+        }
+        break;
+    case 4:                                     /* Paeth */
+        for (i = 0; i < stride; ++i) {
+            const int a = (i >= bpp) ? row[i - bpp] : 0;
+            const int b = (above != 0) ? above[i] : 0;
+            const int c = (above != 0 && i >= bpp) ? above[i - bpp] : 0;
+            /* Pick whichever of the three neighbours the linear estimate
+             * a + b - c lands nearest to, with ties going left, then up. */
+            const int estimate = a + b - c;
+            int pa = estimate - a, pb = estimate - b, pc = estimate - c;
+            if (pa < 0) pa = -pa;
+            if (pb < 0) pb = -pb;
+            if (pc < 0) pc = -pc;
+            const int nearest = (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
+            row[i] = (unsigned char)(row[i] + nearest);
+        }
+        break;
+    default:
+        return -1;
+    }
+    return 0;
+}
+
+/* The unfiltered scanlines, kept between calls and grown as needed. free() is
+ * a no-op in this libc, so a program that loads fifteen icons in a row would
+ * otherwise leave fifteen buffers behind it. */
+static unsigned char* g_raw;
+static unsigned long  g_raw_cap;
+
+static unsigned char* raw_buffer(unsigned long need)
+{
+    if (need > g_raw_cap) {
+        unsigned char* grown = (unsigned char*)malloc(need);
+        if (grown == 0)
+            return 0;
+        g_raw = grown;
+        g_raw_cap = need;
+    }
+    return g_raw;
+}
+
 uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height)
 {
     const int fd = open(path, O_RDONLY);
@@ -285,84 +358,105 @@ uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height)
     unsigned long i = 8;
     unsigned char* idat = 0;
     unsigned long idat_len = 0;
+    unsigned char palette[256 * 3];
+    unsigned char palette_alpha[256];
+    unsigned palette_len = 0;
     unsigned w = 0, h = 0, depth = 0, colour = 0, interlace = 0;
+
+    memset(palette_alpha, 0xFF, sizeof(palette_alpha));
+
     while (i + 12 <= (unsigned long)len) {
         const uint32_t clen = be32_of(&g_out[i]);
         const unsigned char* type = &g_out[i + 4];
         unsigned char* data = &g_out[i + 8];
         if (i + 12 + clen > (unsigned long)len)
             break;
-        if (memcmp(type, "IHDR", 4) == 0) {
+        if (memcmp(type, "IHDR", 4) == 0 && clen >= 13) {
             w = be32_of(data); h = be32_of(data + 4);
             depth = data[8]; colour = data[9]; interlace = data[12];
+        } else if (memcmp(type, "PLTE", 4) == 0) {
+            palette_len = (clen > sizeof(palette)) ? sizeof(palette) : clen;
+            memcpy(palette, data, palette_len);
+            palette_len /= 3;
+        } else if (memcmp(type, "tRNS", 4) == 0 && colour == 3) {
+            memcpy(palette_alpha, data, clen > 256 ? 256 : clen);
         } else if (memcmp(type, "IDAT", 4) == 0) {
-            if (idat == 0) idat = data;
+            /* The stream may be split across any number of chunks, with chunk
+             * headers between the pieces. Slide each piece up against the one
+             * before it, which is always a move towards the front of the
+             * buffer and so never overwrites data still to be read. */
+            if (idat == 0)
+                idat = data;
+            else
+                memmove(idat + idat_len, data, clen);
             idat_len += clen;
         }
         i += 12 + clen;
     }
-    if (w == 0 || h == 0 || depth != 8 || colour != 2 || interlace != 0)
+
+    if (w == 0 || h == 0 || depth != 8 || interlace != 0)
         return 0;
-    if ((unsigned long)w * h > 4u * 1024u * 1024u || idat == 0 || idat_len < 2)
+    if (colour != 0 && colour != 2 && colour != 3 && colour != 4 && colour != 6)
+        return 0;
+    if (colour == 3 && palette_len == 0)
+        return 0;
+    if ((unsigned long)w * h > 4u * 1024u * 1024u || idat == 0 || idat_len < 6)
+        return 0;
+
+    /* Bytes per pixel, which is both how wide a sample group is and how far
+     * back the filters look. */
+    const unsigned bpp = (colour == 0) ? 1 : (colour == 2) ? 3 :
+                         (colour == 3) ? 1 : (colour == 4) ? 2 : 4;
+    const unsigned long stride = (unsigned long)w * bpp;
+    const unsigned long raw_len = (stride + 1ul) * h;   /* a filter byte a row */
+
+    unsigned char* raw = raw_buffer(raw_len);
+    if (raw == 0)
+        return 0;
+    if (inflate_zlib(idat, idat_len, raw, raw_len) != (long)raw_len)
         return 0;
 
     uint32_t* out = (uint32_t*)malloc((unsigned long)w * h * 4);
     if (out == 0)
         return 0;
 
-    /* Walk the stored blocks straight into the pixel array, keeping the
-     * position in explicit counters for the same reason the writer does: a
-     * block boundary does not fall on a row boundary. */
-    unsigned long p = 2;                        /* past the zlib header */
-    unsigned row = 0, col = 0, ch = 0;
-    int want_filter = 1;
-    for (;;) {
-        if (p + 5 > idat_len)
-            break;
-        const unsigned char header = idat[p];
-        const int final = header & 1;
-        if (((header >> 1) & 3) != 0) {         /* compressed: no inflate here */
+    /* Unfilter and expand a row at a time. The filtered bytes and the finished
+     * pixels live in different buffers, so a row can be read after it has been
+     * unfiltered and still serve as `above` for the next one. */
+    unsigned char* previous = 0;
+    for (unsigned y = 0; y < h; ++y) {
+        unsigned char* row = &raw[y * (stride + 1ul)];
+        const unsigned char filter = row[0];
+        ++row;                                  /* past the filter byte */
+
+        if (unfilter(row, previous, stride, bpp, filter) != 0) {
             free(out);
             return 0;
         }
-        const unsigned blen = (unsigned)idat[p + 1] | ((unsigned)idat[p + 2] << 8);
-        p += 5;
-        if (p + blen > idat_len)
-            break;
-        for (unsigned k = 0; k < blen; ++k) {
-            const unsigned char byte = idat[p + k];
-            if (want_filter) {
-                if (byte != 0) {                /* only "none" is understood */
-                    free(out);
-                    return 0;
-                }
-                want_filter = 0;
-                ch = 0;
-                continue;
+        previous = row;
+
+        uint32_t* px = &out[(unsigned long)y * w];
+        for (unsigned x = 0; x < w; ++x) {
+            const unsigned char* s = &row[(unsigned long)x * bpp];
+            unsigned r, g, b, a = 0xFF;
+            switch (colour) {
+            case 0:  r = g = b = s[0]; break;
+            case 2:  r = s[0]; g = s[1]; b = s[2]; break;
+            case 3: {
+                const unsigned index = (s[0] < palette_len) ? s[0] : 0u;
+                r = palette[index * 3];
+                g = palette[index * 3 + 1];
+                b = palette[index * 3 + 2];
+                a = palette_alpha[s[0]];
+                break;
             }
-            uint32_t* px = &out[(unsigned long)row * w + col];
-            if (ch == 0)      *px = (uint32_t)byte << 16;
-            else if (ch == 1) *px |= (uint32_t)byte << 8;
-            else              *px |= byte;
-            if (++ch == 3) {
-                ch = 0;
-                if (++col == w) {
-                    col = 0;
-                    if (++row == h)
-                        goto done;
-                    want_filter = 1;
-                }
+            case 4:  r = g = b = s[0]; a = s[1]; break;
+            default: r = s[0]; g = s[1]; b = s[2]; a = s[3]; break;
             }
+            px[x] = (a << 24) | (r << 16) | (g << 8) | b;
         }
-        p += blen;
-        if (final)
-            break;
     }
-done:
-    if (row < h) {          /* truncated */
-        free(out);
-        return 0;
-    }
+
     *width = w;
     *height = h;
     return out;

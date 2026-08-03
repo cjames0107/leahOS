@@ -494,7 +494,10 @@ static void compose_rect(const struct rect* r)
             const unsigned sy = (unsigned)y * g_paper_h / g_fb.height;
             const uint32_t* src = &g_paper[(unsigned long)sy * g_paper_w];
             for (int x = 0; x < r->w; ++x)
-                row[x] = src[(unsigned)(r->x + x) * g_paper_w / g_fb.width];
+                /* & 0xFFFFFF: the decoder reports opacity in the high byte,
+                 * which is not part of a colour once it is on the screen. */
+                row[x] = src[(unsigned)(r->x + x) * g_paper_w / g_fb.width]
+                         & 0xFFFFFF;
         } else {
             /* A pattern is drawn from the desktop colour rather than a second
              * one, so it stays consistent with whatever was chosen. */

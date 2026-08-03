@@ -116,6 +116,14 @@ stage_app Tasks     taskman  ""              "End task"
 stage_app Clock     clock    ""              ""
 stage_app Elements  uitest   ""              ""
 
+# The icon set, copied in as-is. These are ordinary compressed PNGs - nothing
+# converts them at build time, because img_read_png inflates a real deflate
+# stream now and can simply read them.
+if [ -d media/icons ]; then
+    mkdir -p "$STAGING/share/icons"
+    cp media/icons/*.png "$STAGING/share/icons/"
+fi
+
 # A desktop with three things on it, for every account that has one. An empty
 # desktop is a correct desktop and a poor first impression: these say what is
 # here and give somewhere to start.
