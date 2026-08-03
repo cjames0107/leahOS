@@ -63,6 +63,40 @@ void wg_plot(int x, int y, uint32_t colour)
     g_px[(unsigned)y * g_w + (unsigned)x] = colour;
 }
 
+/* An icon: 32x32 pixels with one bit of alpha, drawn straight over whatever is
+ * already there. Transparent pixels are skipped rather than blended, because
+ * these are cut-out shapes over an arbitrary background and there is nothing
+ * to blend with that is not already on the screen. */
+void wg_icon_scaled(int x, int y, const uint32_t* px, int sw, int sh,
+                    int dw, int dh)
+{
+    if (g_px == 0 || px == 0 || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+        return;
+    for (int row = 0; row < dh; ++row) {
+        const int py = y + row;
+        if (py < 0 || (unsigned)py >= g_h)
+            continue;
+        const int sy = row * sh / dh;
+        for (int col = 0; col < dw; ++col) {
+            const int pxx = x + col;
+            if (pxx < 0 || (unsigned)pxx >= g_w)
+                continue;
+            /* Nearest neighbour, which for halving a pixel-drawn icon means
+             * taking every other pixel - the right answer for artwork with
+             * hard edges, where averaging would only make it muddy. */
+            const uint32_t s = px[(unsigned)sy * (unsigned)sw +
+                                  (unsigned)(col * sw / dw)];
+            if ((s >> 24) != 0)
+                g_px[(unsigned)py * g_w + (unsigned)pxx] = s & 0xFFFFFF;
+        }
+    }
+}
+
+void wg_icon(int x, int y, const uint32_t* px, int w, int h)
+{
+    wg_icon_scaled(x, y, px, w, h, w, h);
+}
+
 void wg_fill(int x, int y, int w, int h, uint32_t colour)
 {
     /* Clipped once here rather than per pixel: filling a window's background is

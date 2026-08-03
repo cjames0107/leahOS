@@ -12,6 +12,7 @@
  */
 
 #include <bundle.h>
+#include <icon.h>
 #include <clipboard.h>
 #include <display.h>
 #include <dialog.h>
@@ -222,21 +223,45 @@ static void reload_paper(void)
                                &g_paper_w, &g_paper_h);
 }
 
-static void folder_icon(int x, int y)
+/* What an item on the desktop looks like.
+ *
+ * An alias is drawn as the thing it points at, not as the file it is. That is
+ * the whole point of a shortcut: the Files alias should look like Files. The
+ * target is followed one hop, the same as opening it does, and if it cannot be
+ * followed the alias is drawn as an ordinary document rather than as nothing.
+ */
+static void item_icon(int x, int y, int i)
 {
-    wg_fill(x, y + 3, 14, 4, 0xC8A030);
-    wg_fill(x, y + 6, 32, 22, 0xE8C860);
-    wg_bevel(x, y + 6, 32, 22, 1);
-}
+    char dir[256], name[128];
+    snprintf(dir, sizeof(dir), "%s", g_dir);
+    snprintf(name, sizeof(name), "%s", g_items[i].d_name);
+    int is_dir = g_items[i].d_type == S_IFDIR;
 
-static void file_icon(int x, int y, int program)
-{
-    wg_fill(x + 4, y + 2, 24, 28, program ? 0xB0C0D8 : WG_PAPER);
-    wg_bevel(x + 4, y + 2, 24, 28, 1);
-    for (int i = 0; i < 6; ++i)
-        wg_plot(x + 27 - i, y + 3 + i, WG_DIM);
-    for (int line = 0; line < (program ? 1 : 4); ++line)
-        wg_fill(x + 8, y + 13 + line * 4, program ? 16 : 14, 1, WG_DIM);
+    if (alias_is(name)) {
+        char full[256], target[256];
+        snprintf(full, sizeof(full), "%s/%s", g_dir, name);
+        if (alias_target(full, target, sizeof(target)) == 0) {
+            /* Split the target into the directory and the last component,
+             * which is what icon_for_entry wants. */
+            int cut = -1;
+            for (int k = 0; target[k] != '\0'; ++k)
+                if (target[k] == '/')
+                    cut = k;
+            if (cut >= 0) {
+                snprintf(name, sizeof(name), "%s", target + cut + 1);
+                target[cut == 0 ? 1 : cut] = '\0';
+                snprintf(dir, sizeof(dir), "%s", target);
+            } else {
+                snprintf(name, sizeof(name), "%s", target);
+            }
+            /* A bundle is a directory; anything else pointed at, we cannot
+             * know without asking, and the extension decides. */
+            is_dir = bundle_is_app(name);
+        }
+    }
+
+    wg_icon(x, y, icon_for_entry(dir, name, is_dir, bundle_is_app(name)),
+            ICON_SIZE, ICON_SIZE);
 }
 
 static int ends_elf(const char* s)
@@ -270,12 +295,8 @@ static void draw(void)
         const int y = g_iy[i];
         if (i == g_sel || g_marked[i])
             wg_fill(x - 2, y - 2, CELL_W - 6, CELL_H - 12, 0x4060A0);
-        const int app = bundle_is_app(g_items[i].d_name);
         const int link = alias_is(g_items[i].d_name);
-        if (g_items[i].d_type == S_IFDIR && !app)
-            folder_icon(x + 22, y);
-        else
-            file_icon(x + 22, y, app || link || ends_elf(g_items[i].d_name));
+        item_icon(x + 22, y, i);
         /* Labels are white with a dark shadow, so they stay readable over a
          * wallpaper of any brightness. */
         char label[64];

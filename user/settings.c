@@ -93,9 +93,23 @@ static const struct preset kPresets[] = {
 };
 #define PRESETS (int)(sizeof(kPresets) / sizeof(kPresets[0]))
 
-static const char* kPatterns[WS_PATTERN_COUNT] = {
-    "flat", "grid", "dots", "weave"
+/* One name per WS_PATTERN_*, and the compiler is told the count so that adding
+ * a pattern without naming it is a build error rather than a null pointer
+ * handed to strlen - which is exactly what happened when "dither" arrived. */
+/* One row of pattern buttons, sized so that all of them fit to the left of the
+ * preview. Kept next to the names because changing one without the other is
+ * how the row came to overlap in the first place. */
+#define PATTERN_W    52
+#define PATTERN_STEP 55
+
+static const char* kPatterns[] = {
+    "flat", "grid", "dots", "weave", "dither"
 };
+/* Deliberately unsized above, so this counts what is actually there. Written
+ * the other way round - kPatterns[WS_PATTERN_COUNT] - the array is padded with
+ * nulls to the declared length and the check cannot fail. */
+_Static_assert(sizeof(kPatterns) / sizeof(kPatterns[0]) == WS_PATTERN_COUNT,
+               "every backdrop pattern needs a name on the Appearance page");
 static int g_element;
 
 /* Where the RGB picker sits on the Appearance page, and which of its sliders
@@ -412,14 +426,17 @@ static void draw_appearance(void)
         wg_text(SIDEBAR + 166, 223, c, WG_INK);
     }
 
+    /* Narrower than they look like they should be, and the preview is further
+     * right than it was: five buttons and a 150-pixel preview both wanted the
+     * same strip. They overlapped by fourteen pixels even with four. */
     wg_text(SIDEBAR + 14, 252, "pattern", WG_DIM);
     for (int i = 0; i < WS_PATTERN_COUNT; ++i)
-        wg_button(SIDEBAR + 90 + i * 62, 248, 58, 22, kPatterns[i],
-                  g_ws && (int)g_ws->theme.pattern == i);
+        wg_button(SIDEBAR + 90 + i * PATTERN_STEP, 248, PATTERN_W, 22,
+                  kPatterns[i], g_ws && (int)g_ws->theme.pattern == i);
 
     /* A live preview, so a choice can be judged before it is made. */
-    wg_text(SIDEBAR + 320, 196, "preview", WG_DIM);
-    const int px = SIDEBAR + 320, py = 214;
+    wg_text(SIDEBAR + 366, 196, "preview", WG_DIM);
+    const int px = SIDEBAR + 366, py = 214;
     wg_fill(px, py, 150, 60, g_ws ? g_ws->theme.desktop : 0x008080);
     wg_fill(px + 12, py + 10, 110, 40, g_ws ? g_ws->theme.face : 0xC0C0C0);
     wg_bevel(px + 12, py + 10, 110, 40, 1);
@@ -757,14 +774,15 @@ int main(int argc, char** argv)
                     }
                     if (g_ws != 0 && e.y >= 248 && e.y < 270) {
                         for (int i = 0; i < WS_PATTERN_COUNT; ++i)
-                            if (e.x >= SIDEBAR + 90 + i * 62 &&
-                                e.x < SIDEBAR + 148 + i * 62)
+                            if (e.x >= SIDEBAR + 90 + i * PATTERN_STEP &&
+                                e.x < SIDEBAR + 90 + PATTERN_W +
+                                      i * PATTERN_STEP)
                                 { g_ws->theme.pattern = (uint32_t)i;
                                   theme_changed(); }
                     }
                     if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 220 &&
                         e.y >= 276 && e.y < 300)
-                        dlg_save("/", "wallpaper.png");   /* a picker, reused */
+                        dlg_save("/share/wallpapers", "");  /* a picker, reused */
                     else if (e.x >= SIDEBAR + 228 && e.x < SIDEBAR + 324 &&
                              e.y >= 276 && e.y < 300)
                         set_wallpaper("");

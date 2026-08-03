@@ -35,7 +35,7 @@ KERNEL_LBA      := 64
 KERNEL_MAX_SECTORS := 16384              # 8 MiB of image reserved for the kernel
 IMAGE_MIB       := 64
 FAT32_LBA       := 20480          # 10 MiB in, clear of the kernel's slot
-EXT_MIB         := 64             # the ext4 root filesystem on disk 1
+EXT_MIB         := 1024           # the ext4 root filesystem on disk 1
 
 # --- knobs ------------------------------------------------------------------
 # Override on the command line, e.g. `make run MEM=2G` or
@@ -235,8 +235,21 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_ELFS) | $
 EXT_ADDS := $(foreach p,$(BIN_PROGRAMS),BIN/$(shell echo $(p) | tr a-z A-Z).ELF=$(BUILD)/$(p).elf)
 EXT_APPS := $(foreach p,$(APP_PROGRAMS),$(p)=$(BUILD)/$(p).elf)
 
-$(EXT_IMG): $(USER_ELFS) tools/mkext.sh | $(DIST)
-	@APPS="$(EXT_APPS)" tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
+# The media is converted into a cache under build/, keyed on source mtime, and
+# staged from there. It is a separate step because it is slow the first time
+# and instant afterwards, and because nothing about it depends on the build.
+MEDIA_STAMP := $(BUILD)/media/.stamp
+
+$(MEDIA_STAMP): tools/mkmedia.py | $(BUILD)
+	@python3 tools/mkmedia.py $(BUILD)/media
+	@touch $@
+
+media: $(MEDIA_STAMP)
+.PHONY: media
+
+$(EXT_IMG): $(USER_ELFS) tools/mkext.sh $(MEDIA_STAMP) | $(DIST)
+	@APPS="$(EXT_APPS)" MEDIA_DIR="$(BUILD)/media" \
+	    tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
 
 $(SATA_IMG): | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=16 status=none

@@ -52,9 +52,9 @@ mkdir -p "$STAGING/BIN" "$STAGING/docs"
 # icon. Everything an application declares about itself is written here, which
 # is the point - there is no second copy of these facts anywhere in the system.
 #
-#   stage_bundle <Name> <src.elf> <opens> <menu...>
+#   stage_bundle <Name> <src.elf> <icon> <opens> <menu...>
 stage_bundle() {
-    local app="$1"; local src="$2"; local opens="$3"; shift 3
+    local app="$1"; local src="$2"; local icon="$3"; local opens="$4"; shift 4
     local dir="$STAGING/Apps/$app.app"
     local exe
     exe="$(basename "$src")"
@@ -68,7 +68,14 @@ stage_bundle() {
         local item
         for item in "$@"; do printf 'menu %s\n' "$item"; done
     } > "$dir/Info"
-    python3 tools/mkicon.py "$dir/Icon.png" "$app"
+    # A drawn icon when there is one, and a generated tile when there is not.
+    # mkicon.py stays for exactly that case: a bundle that claims an icon it
+    # does not have is worse than one that claims none.
+    if [ -n "$icon" ] && [ -f "media/icons/$icon.png" ]; then
+        cp "media/icons/$icon.png" "$dir/Icon.png"
+    else
+        python3 tools/mkicon.py "$dir/Icon.png" "$app"
+    fi
 }
 
 printf 'Hello from ext4.\n' > "$STAGING/docs/hello.txt"
@@ -99,22 +106,22 @@ done
 # The table is here rather than in the Makefile because everything on a line is
 # a fact about the application: what it is called, what it opens, and what it
 # offers when right-clicked.
-stage_app() {                       # <Name> <make-name> <opens> <menu...>
+stage_app() {                # <Name> <make-name> <icon> <opens> <menu...>
     local name="$1"; local prog="$2"; shift 2
     local src="$BUILD_DIR/$prog.elf"
     if [ -f "$src" ]; then stage_bundle "$name" "$src" "$@"; fi
 }
 BUILD_DIR="${BUILD_DIR:-build}"
-stage_app Files     browse   ""              "New window" "New folder"
-stage_app Terminal  term     ""              "New terminal"
-stage_app Edit      edit     ".TXT .MD .C .H .LEAHRC" "New document"
-stage_app Paint     paint    ".PNG .GIF"     "New drawing"
-stage_app Images    imgview  ".PNG"          "Open picture..."
-stage_app Calculator calc    ""              ""
-stage_app Settings  settings ""              "Appearance" "Users"
-stage_app Tasks     taskman  ""              "End task"
-stage_app Clock     clock    ""              ""
-stage_app Elements  uitest   ""              ""
+stage_app Files     browse   files      ""              "New window" "New folder"
+stage_app Terminal  term     terminal   ""              "New terminal"
+stage_app Edit      edit     edit       ".TXT .MD .C .H .LEAHRC" "New document"
+stage_app Paint     paint    paint      ".PNG .GIF"     "New drawing"
+stage_app Images    imgview  images     ".PNG"          "Open picture..."
+stage_app Calculator calc    calculator ""              ""
+stage_app Settings  settings settings   ""              "Appearance" "Users"
+stage_app Tasks     taskman  tasks      ""              "End task"
+stage_app Clock     clock    ""         ""              ""
+stage_app Elements  uitest   elements   ""              ""
 
 # The icon set, copied in as-is. These are ordinary compressed PNGs - nothing
 # converts them at build time, because img_read_png inflates a real deflate
@@ -122,6 +129,24 @@ stage_app Elements  uitest   ""              ""
 if [ -d media/icons ]; then
     mkdir -p "$STAGING/share/icons"
     cp media/icons/*.png "$STAGING/share/icons/"
+fi
+
+# The photographs and the music, which do need converting - JPEG and MP3 are
+# decoders this system does not have. tools/mkmedia.py has already turned them
+# into PNG and 16-bit PCM under $MEDIA_DIR; here they are only placed.
+#
+# Wallpapers go beside the icons in /share, because they are part of the system
+# rather than anyone's documents. The demos go in /Demos, at the root, where
+# somebody opening the file browser will actually find them.
+MEDIA_DIR="${MEDIA_DIR:-build/media}"
+if [ -d "$MEDIA_DIR/wallpapers" ]; then
+    mkdir -p "$STAGING/share/wallpapers"
+    cp "$MEDIA_DIR"/wallpapers/*.PNG "$STAGING/share/wallpapers/" 2>/dev/null || true
+fi
+if [ -d "$MEDIA_DIR/demos" ]; then
+    mkdir -p "$STAGING/Demos/Images" "$STAGING/Demos/Audio"
+    cp "$MEDIA_DIR"/demos/images/*.PNG "$STAGING/Demos/Images/" 2>/dev/null || true
+    cp "$MEDIA_DIR"/demos/audio/*.WAV "$STAGING/Demos/Audio/" 2>/dev/null || true
 fi
 
 # A desktop with three things on it, for every account that has one. An empty

@@ -38,11 +38,31 @@ struct stream {
     int                  failed;
 };
 
-/* A canonical code: how many symbols have each length, and the symbols
- * themselves sorted by length and then by value. */
+/* Decoding a bit at a time is correct and slow: an average literal is nine
+ * bits, so nine loop iterations and nine buffer checks per byte produced. A
+ * photograph is four megabytes of output, and it showed - about thirty seconds
+ * to open one.
+ *
+ * So the common case gets a table. FAST_BITS of the stream index straight into
+ * an array holding the symbol and how long its code was; every code that short
+ * is found in one lookup. Longer codes are rarer by construction - that is what
+ * Huffman coding means - and fall back to the walk, which is still here and
+ * still the definition of what the table must agree with.
+ *
+ * Nine bits is 512 entries, a kilobyte per code. Wider tables win less and cost
+ * more to build, and a dynamic block rebuilds this every time.
+ */
+#define FAST_BITS 9
+#define FAST_SIZE (1 << FAST_BITS)
+
+/* A canonical code: how many symbols have each length, the symbols themselves
+ * sorted by length and then by value, and the lookup table built from both. */
 struct huffman {
     short count[MAX_BITS + 1];
     short symbol[MAX_SYMS];
+    /* (length << 12) | symbol, or 0 where no code this short matches. A real
+     * entry always has a length of at least 1, so zero is unambiguous. */
+    unsigned short fast[FAST_SIZE];
 };
 
 /* One code pair per stream, and they are large enough to be worth keeping out
@@ -105,6 +125,36 @@ static int build(struct huffman* h, const unsigned char* lengths, int n)
     for (i = 0; i < n; ++i)
         if (lengths[i] != 0)
             h->symbol[offset[lengths[i]]++] = (short)i;
+
+    /* The lookup table. Canonical codes count upward within a length and carry
+     * into the next, so walking the sorted symbols in order reproduces exactly
+     * the codes decode() would have arrived at bit by bit.
+     *
+     * The stream delivers a code's high bit first, so the code is reversed to
+     * become an index. Every entry whose low `len` bits match then names this
+     * symbol, whatever the bits above them turn out to be - which is why the
+     * fill strides by 1 << len rather than writing one slot. */
+    for (i = 0; i < FAST_SIZE; ++i)
+        h->fast[i] = 0;
+    unsigned first = 0;
+    int index = 0;
+    for (len = 1; len <= MAX_BITS; ++len) {
+        if (len <= FAST_BITS) {
+            for (i = 0; i < h->count[len]; ++i) {
+                const unsigned code = first + (unsigned)i;
+                unsigned reversed = 0;
+                for (int bit = 0; bit < len; ++bit)
+                    reversed |= ((code >> bit) & 1u) << (len - 1 - bit);
+                const unsigned short entry =
+                    (unsigned short)(((unsigned)len << 12) |
+                                     (unsigned)h->symbol[index + i]);
+                for (unsigned at = reversed; at < FAST_SIZE; at += 1u << len)
+                    h->fast[at] = entry;
+            }
+        }
+        index += h->count[len];
+        first = (first + (unsigned)h->count[len]) << 1;
+    }
     return 0;
 }
 
@@ -114,6 +164,23 @@ static int build(struct huffman* h, const unsigned char* lengths, int n)
 static int decode(struct stream* s, const struct huffman* h)
 {
     int code = 0, first = 0, index = 0, len;
+
+    /* Top up to a full index's worth, then look it up. Running out of input
+     * here is not an error yet - it only means fewer bits than the table wants,
+     * which the length check below turns into the slow path. */
+    while (s->bitcount < FAST_BITS && s->in_at < s->in_len) {
+        s->bitbuf |= (unsigned long)s->in[s->in_at++] << s->bitcount;
+        s->bitcount += 8;
+    }
+    const unsigned short entry = h->fast[s->bitbuf & (FAST_SIZE - 1)];
+    /* A hit is only usable if its code fits in the bits actually read. When it
+     * does, the answer is right even at the end of the stream: the low `len`
+     * bits of the index are real bits, and only those decided the entry. */
+    if (entry != 0 && (unsigned)(entry >> 12) <= s->bitcount) {
+        s->bitbuf >>= entry >> 12;
+        s->bitcount -= entry >> 12;
+        return entry & 0xFFF;
+    }
 
     for (len = 1; len <= MAX_BITS; ++len) {
         code |= (int)bits(s, 1);

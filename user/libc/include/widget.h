@@ -58,6 +58,15 @@ int  wg_font(void);
 void wg_plot(int x, int y, uint32_t colour);
 void wg_fill(int x, int y, int w, int h, uint32_t colour);
 
+/* Blit an icon, skipping its transparent pixels. See <icon.h> for where the
+ * pixels come from. */
+void wg_icon(int x, int y, const uint32_t* px, int w, int h);
+
+/* The same, resampled - for the list view, where a 32-pixel icon in an
+ * 18-pixel row would draw over its neighbours. */
+void wg_icon_scaled(int x, int y, const uint32_t* px, int sw, int sh,
+                    int dw, int dh);
+
 /* Raised, or sunken when `raised` is 0: light on the top and left edges, shadow
  * on the bottom and right, which is the whole visual language of this era. */
 void wg_bevel(int x, int y, int w, int h, int raised);

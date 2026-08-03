@@ -14,6 +14,7 @@
  */
 
 #include <bundle.h>
+#include <icon.h>
 #include <clipboard.h>
 #include <fcntl.h>
 #include <dialog.h>
@@ -293,26 +294,15 @@ static void rebuild_tree(void)
 
 /* --- drawing ------------------------------------------------------------- */
 
-/* A folder: a tab along the top of a body, which is all it takes to read as
- * one at this size. */
-static void folder_icon(int x, int y)
+/* The icon for an entry in the folder being shown. Which picture that is, is
+ * icon.c's decision - the desktop shows files too, and it should not be able
+ * to disagree with this about what a .PNG looks like. */
+static void entry_icon(int x, int y, int i, int size)
 {
-    wg_fill(x, y + 3, 14, 4, 0xC8A030);
-    wg_fill(x, y + 6, 32, 20, 0xE8C860);
-    wg_bevel(x, y + 6, 32, 20, 1);
-}
-
-/* A document: a page with a folded corner and a couple of text lines. */
-static void file_icon(int x, int y, int program)
-{
-    wg_fill(x + 4, y + 2, 24, 26, program ? 0xB0C0D8 : WG_PAPER);
-    wg_bevel(x + 4, y + 2, 24, 26, 1);
-    for (int i = 0; i < 6; ++i)
-        wg_plot(x + 27 - i, y + 3 + i, WG_DIM);
-    for (int line = 0; line < (program ? 1 : 4); ++line)
-        wg_fill(x + 8, y + 12 + line * 4, program ? 16 : 14, 1, WG_DIM);
-    if (program)
-        wg_text(x + 9, y + 8, "*", WG_ACCENT);
+    const int app = bundle_is_app(g_entries[i].d_name);
+    const uint32_t* px = icon_for_entry(g_path, g_entries[i].d_name,
+                                        g_entries[i].d_type == S_IFDIR, app);
+    wg_icon_scaled(x, y, px, ICON_SIZE, ICON_SIZE, size, size);
 }
 
 static int content_top(void)  { return TOOLBAR_H + PATH_H; }
@@ -451,13 +441,7 @@ static void draw_icons(void)
             wg_fill(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6, wg_sel_colour());
         /* A bundle is drawn as the application it is, not as the directory it
          * happens to be made of. */
-        const int app = bundle_is_app(g_entries[i].d_name);
-        const int dir = (g_entries[i].d_type == S_IFDIR) && !app;
-        if (dir)
-            folder_icon(cx + 26, cy);
-        else
-            file_icon(cx + 26, cy,
-                      app || ends_with(g_entries[i].d_name, ".ELF"));
+        entry_icon(cx + 26, cy, i, ICON_SIZE);
         wg_text_clipped(cx, cy + 32, g_entries[i].d_name, WG_INK, CELL_W - 8);
     }
 }
@@ -483,7 +467,8 @@ static void draw_list(void)
             wg_fill(8, y, (int)g_w - 16, ROW_H, wg_sel_colour());
         const int dir = (g_entries[i].d_type == S_IFDIR) &&
                         !bundle_is_app(g_entries[i].d_name);
-        wg_text_clipped(12, y + 1, g_entries[i].d_name, WG_INK, 280);
+        entry_icon(11, y + 1, i, 16);
+        wg_text_clipped(32, y + 1, g_entries[i].d_name, WG_INK, 260);
         char size[24];
         if (dir)
             snprintf(size, sizeof(size), "--");

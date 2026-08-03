@@ -107,10 +107,14 @@ static int read_sectors(unsigned long lba, unsigned count, unsigned char* out)
         return -1;
     unsigned short* p = (unsigned short*)out;
     for (unsigned s = 0; s < count; ++s) {
+        /* Still a sector at a time: the drive raises DRQ once per sector and
+         * the status has to be read between them. Within a sector the words
+         * move in one instruction - see insw in driver.h for why that matters
+         * so much more than it looks like it should. */
         if (wait_for_data() != 0)
             return -1;
-        for (int w = 0; w < BLK_SECTOR / 2; ++w)
-            *p++ = inw(g_io + REG_DATA);
+        insw(g_io + REG_DATA, p, BLK_SECTOR / 2);
+        p += BLK_SECTOR / 2;
     }
     return 0;
 }
@@ -124,8 +128,8 @@ static int write_sectors(unsigned long lba, unsigned count,
     for (unsigned s = 0; s < count; ++s) {
         if (wait_for_data() != 0)
             return -1;
-        for (int w = 0; w < BLK_SECTOR / 2; ++w)
-            outw(g_io + REG_DATA, *p++);
+        outsw(g_io + REG_DATA, p, BLK_SECTOR / 2);
+        p += BLK_SECTOR / 2;
     }
     /* Without a flush the data can sit in the drive's own cache, and a reset
      * would lose a write this driver has already said it made. */

@@ -323,22 +323,31 @@ static int unfilter(unsigned char* row, const unsigned char* above,
     return 0;
 }
 
-/* The unfiltered scanlines, kept between calls and grown as needed. free() is
- * a no-op in this libc, so a program that loads fifteen icons in a row would
- * otherwise leave fifteen buffers behind it. */
+/* Two buffers that outlive a call: the file as read, and the unfiltered
+ * scanlines. Both are grown on demand and kept, because free() is a no-op in
+ * this libc and a program that loads fifteen icons in a row would otherwise
+ * leave thirty buffers behind it.
+ *
+ * The file buffer is why the reader does not share g_out with the writer any
+ * more. That is a fixed 2 MB, and a screen-sized photograph does not reliably
+ * fit in it - one of the wallpapers is 2.2 MB. Sizing to the file removes the
+ * ceiling rather than raising it, and costs nothing for a 251-byte icon. */
 static unsigned char* g_raw;
 static unsigned long  g_raw_cap;
+static unsigned char* g_src;
+static unsigned long  g_src_cap;
 
-static unsigned char* raw_buffer(unsigned long need)
+static unsigned char* grow(unsigned char** buffer, unsigned long* cap,
+                           unsigned long need)
 {
-    if (need > g_raw_cap) {
+    if (need > *cap) {
         unsigned char* grown = (unsigned char*)malloc(need);
         if (grown == 0)
             return 0;
-        g_raw = grown;
-        g_raw_cap = need;
+        *buffer = grown;
+        *cap = need;
     }
-    return g_raw;
+    return *buffer;
 }
 
 uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height)
@@ -346,13 +355,32 @@ uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height)
     const int fd = open(path, O_RDONLY);
     if (fd < 0)
         return 0;
-    const long len = (long)read(fd, g_out, IMG_MAX);
+    const long size = lseek(fd, 0, SEEK_END);
+    if (size < 8 || lseek(fd, 0, SEEK_SET) != 0) {
+        close(fd);
+        return 0;
+    }
+    unsigned char* file = grow(&g_src, &g_src_cap, (unsigned long)size);
+    if (file == 0) {
+        close(fd);
+        return 0;
+    }
+    /* One read may return less than the whole file, so keep asking until it
+     * stops giving. A short read that is treated as the end looks exactly like
+     * a truncated image, which is a confusing way to find out. */
+    long len = 0;
+    while (len < size) {
+        const long got = (long)read(fd, file + len, (unsigned long)(size - len));
+        if (got <= 0)
+            break;
+        len += got;
+    }
     close(fd);
-    if (len < 8)
+    if (len != size)
         return 0;
 
     static const unsigned char sig[8] = { 137, 'P', 'N', 'G', 13, 10, 26, 10 };
-    if (memcmp(g_out, sig, 8) != 0)
+    if (memcmp(file, sig, 8) != 0)
         return 0;
 
     unsigned long i = 8;
@@ -366,9 +394,9 @@ uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height)
     memset(palette_alpha, 0xFF, sizeof(palette_alpha));
 
     while (i + 12 <= (unsigned long)len) {
-        const uint32_t clen = be32_of(&g_out[i]);
-        const unsigned char* type = &g_out[i + 4];
-        unsigned char* data = &g_out[i + 8];
+        const uint32_t clen = be32_of(&file[i]);
+        const unsigned char* type = &file[i + 4];
+        unsigned char* data = &file[i + 8];
         if (i + 12 + clen > (unsigned long)len)
             break;
         if (memcmp(type, "IHDR", 4) == 0 && clen >= 13) {
@@ -410,7 +438,7 @@ uint32_t* img_read_png(const char* path, unsigned* width, unsigned* height)
     const unsigned long stride = (unsigned long)w * bpp;
     const unsigned long raw_len = (stride + 1ul) * h;   /* a filter byte a row */
 
-    unsigned char* raw = raw_buffer(raw_len);
+    unsigned char* raw = grow(&g_raw, &g_raw_cap, raw_len);
     if (raw == 0)
         return 0;
     if (inflate_zlib(idat, idat_len, raw, raw_len) != (long)raw_len)

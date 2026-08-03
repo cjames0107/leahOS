@@ -44,6 +44,24 @@ static inline void outw(unsigned short port, unsigned short v)
 { __asm__ volatile("outw %0, %1" : : "a"(v), "Nd"(port)); }
 static inline unsigned short inw(unsigned short port)
 { unsigned short v; __asm__ volatile("inw %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+
+/* Block transfers to and from a port.
+ *
+ * A loop of inw is one instruction per word, and on real hardware that is
+ * merely slow. Under emulation it is far worse: every port access leaves the
+ * guest for the device model, so a 512-byte sector costs 256 round trips out
+ * of the virtual machine and back. Reading a two-megabyte photograph that way
+ * takes about half a minute, nearly all of it spent on the way out.
+ *
+ * `rep insw` is the same transfer as one instruction. The emulator sees a
+ * single exit and moves the whole block, and real hardware is happier too.
+ * The I/O permission bitmap treats it exactly like inw, so a driver granted
+ * its ports may use it without asking for anything more.
+ */
+static inline void insw(unsigned short port, void* dst, unsigned long words)
+{ __asm__ volatile("rep insw" : "+D"(dst), "+c"(words) : "d"(port) : "memory"); }
+static inline void outsw(unsigned short port, const void* src, unsigned long words)
+{ __asm__ volatile("rep outsw" : "+S"(src), "+c"(words) : "d"(port) : "memory"); }
 static inline void outl(unsigned short port, unsigned int v)
 { __asm__ volatile("outl %0, %1" : : "a"(v), "Nd"(port)); }
 static inline unsigned int inl(unsigned short port)
