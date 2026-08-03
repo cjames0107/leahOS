@@ -22,14 +22,12 @@ void set_usb_modifiers(u32 mods);
 
 // False when the machine has no PS/2 controller at all, which is normal on
 // anything recent: the keys come from usbd instead, through the same queue.
-bool present();
 
 void init();
 
 // Feed a scancode through the decoder as though it had arrived on IRQ 1.
 // Exists so the translation tables and modifier handling can be exercised
 // without depending on the emulator's ability to inject key events.
-void inject_scancode(u8 scancode);
 
 // Feed an already-decoded character into the same buffer. USB keyboards report
 // HID usage codes rather than PS/2 scancodes, so their driver translates and

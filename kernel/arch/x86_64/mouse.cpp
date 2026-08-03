@@ -1,83 +1,27 @@
 #include <leah/framebuffer.hpp>
-#include <leah/interrupts.hpp>
-#include <leah/io.hpp>
 #include <leah/mouse.hpp>
-#include <leah/pic.hpp>
+
+// Where the pointer is - and nothing about how it got there.
+//
+// The PS/2 controller, its initialisation sequence and its three-byte packets
+// are ps2d's now, in ring 3, along with the keyboard that shares the same
+// 8042. What stays is the position itself, because InputPoll answers from it
+// and the window server should not have to know which driver is moving the
+// pointer this week - a USB mouse would report through the same call.
+//
+// The clamp stays too. The bound is the framebuffer's size, the framebuffer is
+// still the kernel's, and a pointer that accumulates past the edge has to be
+// dragged all the way back before it appears to move again.
 
 namespace mouse {
 namespace {
 
-constexpr u16 kDataPort   = 0x60;
-constexpr u16 kStatusPort = 0x64;
-constexpr u16 kCommandPort = 0x64;
-
-constexpr u8 kStatusOutputFull = 0x01;
-constexpr u8 kStatusInputFull  = 0x02;
-// The controller sets this on bytes that came from the second port, which is
-// how a mouse packet is told apart from a keystroke on the shared data port.
-constexpr u8 kStatusFromMouse  = 0x20;
-
-constexpr u8 kCmdEnablePort2      = 0xA8;
-constexpr u8 kCmdReadConfig       = 0x20;
-constexpr u8 kCmdWriteConfig      = 0x60;
-constexpr u8 kCmdWriteToPort2     = 0xD4;
-
-constexpr u8 kConfigPort2Interrupt = 1 << 1;
-constexpr u8 kConfigPort2Clock     = 1 << 5;   // set = clock disabled
-
-constexpr u8 kMouseSetDefaults  = 0xF6;
-constexpr u8 kMouseEnableReport = 0xF4;
-constexpr u8 kMouseAck          = 0xFA;
-
-constexpr u32 kPollLimit = 100000;
-
-bool wait_writable()
-{
-    for (u32 i = 0; i < kPollLimit; ++i) {
-        if ((io::in8(kStatusPort) & kStatusInputFull) == 0)
-            return true;
-        io::wait();
-    }
-    return false;
-}
-
-bool wait_readable()
-{
-    for (u32 i = 0; i < kPollLimit; ++i) {
-        if ((io::in8(kStatusPort) & kStatusOutputFull) != 0)
-            return true;
-        io::wait();
-    }
-    return false;
-}
-
-u8 read_data()
-{
-    if (!wait_readable())
-        return 0;
-    return io::in8(kDataPort);
-}
-
-// Anything destined for the mouse has to be prefixed with 0xD4, otherwise the
-// controller treats it as a keyboard command.
-u8 send_to_mouse(u8 value)
-{
-    wait_writable();
-    io::out8(kCommandPort, kCmdWriteToPort2);
-    wait_writable();
-    io::out8(kDataPort, value);
-    return read_data();
-}
-
 State g_state{};
-u64   g_packets = 0;
 
-void clamp_to_screen(i32& x, i32& y)
+void clamp(i32& x, i32& y)
 {
-    // Before the framebuffer is up there is nothing to clamp against; leaving
-    // the position alone is better than inventing a bound.
     if (!framebuffer::available())
-        return;
+        return;                         // nothing to clamp against yet
     const i32 max_x = static_cast<i32>(framebuffer::width()) - 1;
     const i32 max_y = static_cast<i32>(framebuffer::height()) - 1;
     if (x < 0) x = 0;
@@ -86,87 +30,20 @@ void clamp_to_screen(i32& x, i32& y)
     if (y > max_y) y = max_y;
 }
 
-u8 g_packet[3]{};
-u8 g_index = 0;
-
-void on_packet(interrupts::Frame&)
-{
-    const u8 status = io::in8(kStatusPort);
-    if ((status & kStatusOutputFull) == 0 || (status & kStatusFromMouse) == 0)
-        return;                         // not ours
-
-    const u8 byte = io::in8(kDataPort);
-
-    // Byte 0 always has bit 3 set. If it is clear we are out of phase - drop
-    // the byte rather than decoding garbage into cursor movement.
-    if (g_index == 0 && (byte & 0x08) == 0)
-        return;
-
-    g_packet[g_index++] = byte;
-    if (g_index < 3)
-        return;
-    g_index = 0;
-
-    const u8 flags = g_packet[0];
-
-    // Overflow means the counters saturated; the deltas are meaningless.
-    if ((flags & 0xC0) != 0)
-        return;
-
-    // 9-bit two's complement: the sign lives in the flags byte.
-    i32 dx = g_packet[1];
-    i32 dy = g_packet[2];
-    if (flags & 0x10)
-        dx |= ~0xFF;
-    if (flags & 0x20)
-        dy |= ~0xFF;
-
-    g_state.x += dx;
-    g_state.y -= dy;            // the mouse reports up as positive; screens do not
-
-    // Clamp to the screen. Without this the position keeps accumulating past
-    // the edge, and a pointer pushed into a corner has to be dragged all the
-    // way back before it appears to move again - it looks stuck, and the
-    // distance it is stuck for is however far it was pushed.
-    clamp_to_screen(g_state.x, g_state.y);
-    g_state.left   = (flags & 0x01) != 0;
-    g_state.right  = (flags & 0x02) != 0;
-    g_state.middle = (flags & 0x04) != 0;
-
-    ++g_packets;
-}
-
 } // namespace
 
-void init()
-{
-    wait_writable();
-    io::out8(kCommandPort, kCmdEnablePort2);
-
-    wait_writable();
-    io::out8(kCommandPort, kCmdReadConfig);
-    u8 config = read_data();
-
-    config |= kConfigPort2Interrupt;    // raise IRQ 12
-    config &= ~kConfigPort2Clock;       // ungate the port
-
-    wait_writable();
-    io::out8(kCommandPort, kCmdWriteConfig);
-    wait_writable();
-    io::out8(kDataPort, config);
-
-    send_to_mouse(kMouseSetDefaults);
-    send_to_mouse(kMouseEnableReport);
-
-    g_index = 0;
-    interrupts::register_irq(12, on_packet);
-
-    // IRQ 12 lives on the slave PIC, which is invisible to the CPU unless the
-    // cascade line is open too - pic::unmask handles that.
-    pic::unmask(12);
-}
+void init() {}
 
 State state() { return g_state; }
-u64 packet_count() { return g_packets; }
+
+void set_state(i32 x, i32 y, u32 buttons)
+{
+    clamp(x, y);
+    g_state.x = x;
+    g_state.y = y;
+    g_state.left   = (buttons & 1) != 0;
+    g_state.right  = (buttons & 2) != 0;
+    g_state.middle = (buttons & 4) != 0;
+}
 
 } // namespace mouse

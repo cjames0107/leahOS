@@ -654,11 +654,25 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             frame->rax = static_cast<u64>(-1);
             break;
         }
-        if (frame->rdi == 0)
-            keyboard::inject_char(static_cast<char>(frame->rsi));
-        else
-            keyboard::set_usb_modifiers(static_cast<u32>(frame->rsi));
+        switch (frame->rdi) {
+        case 0: keyboard::inject_char(static_cast<char>(frame->rsi)); break;
+        case 1: keyboard::set_usb_modifiers(static_cast<u32>(frame->rsi)); break;
+        case 2:
+            /* A pointer position and its buttons, from whichever driver owns
+             * the device. The kernel keeps the state rather than the driver
+             * because InputPoll answers from it and a window server asking
+             * where the pointer is should not have to find out who is moving
+             * it this week. */
+            mouse::set_state(static_cast<i32>(frame->rsi),
+                             static_cast<i32>(frame->rdx),
+                             static_cast<u32>(frame->r10));
+            break;
+        default:
+            frame->rax = static_cast<u64>(-1);
+            goto input_done;
+        }
         frame->rax = 0;
+    input_done:
         break;
 
     case CredsOf:

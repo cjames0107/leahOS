@@ -42,6 +42,10 @@ int main(void)
     start("/BIN/NETD.ELF", "netd", IPC_PORT_NET);
     start("/BIN/AUDIOD.ELF", "audiod", IPC_PORT_AUDIO);
     start("/BIN/AUTHD.ELF", "authd", IPC_PORT_AUTH);
+    /* Input before login, or there is nothing to type the password with. Both
+     * of these are keyboards; whichever the machine has is the one that
+     * answers. */
+    start("/BIN/PS2D.ELF", "ps2d", IPC_PORT_PS2);
     start("/BIN/USBD.ELF", "usbd", IPC_PORT_USB);
 
     // login owns the console from here: it authenticates, starts a shell as

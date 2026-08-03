@@ -29,6 +29,7 @@ struct ipc_message {
 #define IPC_PORT_AUDIO 5
 #define IPC_PORT_AUTH  6
 #define IPC_PORT_USB   7
+#define IPC_PORT_PS2   8
 
 /* Server side. */
 int port_create(unsigned name);

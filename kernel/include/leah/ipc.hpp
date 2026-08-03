@@ -45,6 +45,7 @@ constexpr u32 kPortNic   = 4;   // the raw Ethernet device
 constexpr u32 kPortAudio = 5;
 constexpr u32 kPortAuth  = 6;   // the account database
 constexpr u32 kPortUsb   = 7;   // the USB host controller
+constexpr u32 kPortPs2   = 8;   // the 8042 and what hangs off it
 
 void init();
 

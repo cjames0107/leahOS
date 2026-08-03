@@ -604,6 +604,21 @@ u32 spawn_thread(const TrapFrame& frame)
     task->mmap_next  = self->mmap_next;
     task->uid        = self->uid;
     task->gid        = self->gid;
+    /* And the I/O ports its creator was granted. A thread shares the address
+     * space; sharing what it may touch on the bus is the same statement. A
+     * driver that services two interrupt lines needs a thread on each, and
+     * without this the second one faults on its first port read - which is
+     * exactly what ps2d did, on the byte that says whether a byte is the
+     * keyboard's or the mouse's.
+     *
+     * A copy rather than the pointer, because a thread can exit on its own and
+     * free it. */
+    task->io_bitmap = nullptr;
+    if (self->io_bitmap != nullptr) {
+        task->io_bitmap = static_cast<u8*>(kmalloc(gdt::io_bitmap_bytes()));
+        if (task->io_bitmap != nullptr)
+            memcpy(task->io_bitmap, self->io_bitmap, gdt::io_bitmap_bytes());
+    }
     task->sig_pending  = 0;
     task->sig_restorer = 0;
     task->bkl_depth    = 0;

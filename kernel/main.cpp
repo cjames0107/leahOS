@@ -460,15 +460,12 @@ extern "C" void kernel_main(const boot::Info* boot_info)
         step("no ACPI tables found - staying on the PIC and PIT");
     }
 
+    /* No input drivers here. The 8042 and everything it carries - scancodes,
+     * modifiers, mouse packets - is ps2d's, in ring 3, next to usbd. All the
+     * kernel keeps is the queue a blocked reader sleeps on, because waking
+     * that reader is scheduling and nothing else in this is. */
     keyboard::init();
-
-    if (keyboard::present()) {
-        step("PS/2 keyboard on IRQ 1");
-        mouse::init();
-        step("PS/2 mouse on IRQ 12");
-    } else {
-        step("no PS/2 controller; input comes from usbd");
-    }
+    mouse::init();
 
     /* No PCI enumeration either. Every driver scans config space for itself,
      * because a driver must not trust someone else's table about hardware it
