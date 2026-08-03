@@ -24,57 +24,53 @@ static void print6(const unsigned char* a)
 }
 
 /* "fe80::5054:ff:fe12:3456" in, sixteen bytes out. */
+/* The text form, "::" included.
+ *
+ * The previous version only noticed a gap when "::" began the address: it
+ * consumed the first colon as a group terminator and then found the second one
+ * with no digits behind it and nothing that looked like a gap ahead, so
+ * "fec0::3" - the ordinary way to write any address on this network - was
+ * rejected outright. Groups are collected either side of the gap instead,
+ * which needs no lookahead at all. */
 static int parse6(const char* text, unsigned char* out)
 {
-    unsigned groups[8];
-    int n = 0, gap = -1, value = 0, digits = 0;
-    for (int i = 0; ; ++i) {
+    unsigned char head[16], tail[16];
+    int nhead = 0, ntail = 0, after_gap = 0;
+    unsigned value = 0;
+    int digits = 0, i;
+
+    memset(out, 0, 16);
+    for (i = 0;; ++i) {
         const char c = text[i];
         if (c == ':' || c == '\0') {
             if (digits > 0) {
-                if (n >= 8) return -1;
-                groups[n++] = (unsigned)value;
-            } else if (c == ':' && text[i + 1] == ':') {
-                gap = n;
-                ++i;
-            } else if (c != '\0' && n != 0) {
-                return -1;
+                unsigned char* into = after_gap ? tail : head;
+                int* count = after_gap ? &ntail : &nhead;
+                if (*count + 2 > 16) return -1;
+                into[(*count)++] = (unsigned char)(value >> 8);
+                into[(*count)++] = (unsigned char)(value & 0xFF);
+                value = 0; digits = 0;
+            } else if (i > 0 && text[i - 1] == ':') {
+                if (after_gap && c != '\0') return -1;   /* only one "::" */
+                after_gap = 1;
             }
-            value = 0;
-            digits = 0;
             if (c == '\0') break;
             continue;
         }
-        int d;
-        if (c >= '0' && c <= '9') d = c - '0';
-        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-        else return -1;
-        value = value * 16 + d;
-        if (++digits > 4) return -1;
-    }
-
-    memset(out, 0, 16);
-    if (gap < 0) {
-        if (n != 8) return -1;
-        for (int i = 0; i < 8; ++i) {
-            out[i * 2] = (unsigned char)(groups[i] >> 8);
-            out[i * 2 + 1] = (unsigned char)groups[i];
+        {
+            int d;
+            if (c >= '0' && c <= '9')      d = c - '0';
+            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+            else return -1;
+            value = value * 16 + (unsigned)d;
+            if (++digits > 4) return -1;
         }
-        return 0;
     }
-    /* Everything before the gap sits at the front, everything after at the
-     * back, and the zeroes are whatever is left in between. */
-    for (int i = 0; i < gap; ++i) {
-        out[i * 2] = (unsigned char)(groups[i] >> 8);
-        out[i * 2 + 1] = (unsigned char)groups[i];
-    }
-    const int tail = n - gap;
-    for (int i = 0; i < tail; ++i) {
-        const int slot = 8 - tail + i;
-        out[slot * 2] = (unsigned char)(groups[gap + i] >> 8);
-        out[slot * 2 + 1] = (unsigned char)groups[gap + i];
-    }
+    if (nhead + ntail > 16) return -1;
+    if (!after_gap && nhead != 16) return -1;   /* a full address or a gap */
+    memcpy(out, head, (unsigned long)nhead);
+    memcpy(out + 16 - ntail, tail, (unsigned long)ntail);
     return 0;
 }
 

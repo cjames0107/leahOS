@@ -219,6 +219,12 @@ static void answer(struct pending* p, long w0, const uint8_t* data, unsigned byt
     p->used = 0;
 }
 
+/* Ask again over IPv6 when the IPv4 resolver did not answer. Defined further
+ * down, where the v6 addresses and routing exist; declared here because this is
+ * where a question runs out of time. Returns true when it has taken the query
+ * on and it should not be failed yet. */
+static int dns_retry_over_v6(struct pending* p);
+
 static void expire_pending(void)
 {
     for (int i = 0; i < PENDING_MAX; ++i) {
@@ -229,6 +235,14 @@ static void expire_pending(void)
             /* Nothing answered; do not leave a half-open connection behind. */
             conn_close(conn_find(g_pending[i].ip));
         }
+        /* A name that got no answer over v4 is worth one more try over v6 -
+         * which is what "v4 first, v6 as the fallback" was always supposed to
+         * mean. It fell back only when there was no v4 resolver *configured*,
+         * never when the configured one failed to reply, and on a v6-only
+         * network netd invents a v4 resolver anyway. So every lookup went to
+         * an address nothing was listening at, and DNS simply did not work. */
+        if (g_pending[i].kind == WAIT_DNS && dns_retry_over_v6(&g_pending[i]))
+            continue;
         answer(&g_pending[i], -1, 0, 0);
     }
 }
@@ -986,6 +1000,26 @@ static void send_ping6(const struct in6* to, unsigned seq, const uint8_t* mac)
 static unsigned src_ip_of(const uint8_t* ip_hdr) { return rd32(ip_hdr + 12); }
 
 static void handle_udp6(const uint8_t* h, const uint8_t* udp, unsigned length);
+
+static int dns_retry_over_v6(struct pending* p)
+{
+    struct in6 via6;
+    const uint8_t* mac6;
+
+    /* Once only: a second failure is a real one, and a query that keeps
+     * renewing its own deadline would never be answered either way. */
+    if (p->over6 || !g_have_dns6 || p->name[0] == '\0')
+        return 0;
+
+    p->over6 = 1;
+    p->deadline = g_ticks + 2000;
+    mac6 = route6(&g_dns6, &via6);
+    if (mac6 != 0)
+        dns_ask6(p->name, p->seq, &g_dns6, mac6, p->want6);
+    else
+        nd_solicit(&via6);      /* the neighbour first; the reply re-sends */
+    return 1;
+}
 static void handle_tcp6(const uint8_t* f, const uint8_t* h, const uint8_t* t,
                         unsigned length);
 
