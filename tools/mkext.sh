@@ -144,6 +144,12 @@ if [ -d "$MEDIA_DIR/wallpapers" ]; then
     mkdir -p "$STAGING/share/wallpapers"
     cp "$MEDIA_DIR"/wallpapers/*.PNG "$STAGING/share/wallpapers/" 2>/dev/null || true
 fi
+# A gzip file and a tar, so gunzip and tar have something real to be pointed
+# at from inside the system rather than only in a test harness.
+if [ -d "$MEDIA_DIR/testkit" ]; then
+    mkdir -p "$STAGING/docs"
+    cp "$MEDIA_DIR"/testkit/* "$STAGING/docs/" 2>/dev/null || true
+fi
 if [ -d "$MEDIA_DIR/demos" ]; then
     mkdir -p "$STAGING/Demos/Images" "$STAGING/Demos/Audio"
     cp "$MEDIA_DIR"/demos/images/*.PNG "$STAGING/Demos/Images/" 2>/dev/null || true

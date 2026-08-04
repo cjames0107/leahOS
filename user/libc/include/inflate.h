@@ -34,4 +34,15 @@ long inflate_raw(const unsigned char* in, size_t in_len,
 long inflate_zlib(const unsigned char* in, size_t in_len,
                   unsigned char* out, size_t out_cap);
 
+/* And behind gzip's wrapper, which is the same deflate stream under a longer
+ * header and a CRC-32 rather than an Adler-32. gzip also records the
+ * uncompressed length in its trailer, which inflate_gzip_size reports without
+ * decompressing - enough to size a buffer before asking for the contents.
+ *
+ * That length is stored in 32 bits, so a member larger than 4 GiB reports its
+ * size modulo that. Nothing here is going to meet one. */
+long inflate_gzip(const unsigned char* in, size_t in_len,
+                  unsigned char* out, size_t out_cap);
+long inflate_gzip_size(const unsigned char* in, size_t in_len);
+
 #endif /* _INFLATE_H */

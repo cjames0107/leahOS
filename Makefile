@@ -115,7 +115,8 @@ KERNEL_BIN := $(BUILD)/kernel.bin
 # path instead of asking which application does the job.
 BIN_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear \
                  ifconfig ping arp nslookup tests id chmod chown su fetch whoami \
-                 login useradd passwd stat gui wserver desktop tone ipctest e1000d nictest netd nettest ping6 fetch6 blockd blktest audiod authd usbd ps2d lspci churn mvtest v6test vfsd vfstest
+                 login useradd passwd stat gui wserver desktop tone ipctest e1000d nictest netd nettest ping6 fetch6 blockd blktest audiod authd usbd ps2d lspci churn mvtest v6test vfsd vfstest \
+                 wc head tail sort grep find diff less gunzip tar screenshot
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player
 USER_PROGRAMS := $(BIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)

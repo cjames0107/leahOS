@@ -8,16 +8,56 @@
 /* --- a growable output buffer -------------------------------------------- */
 /*
  * Encoding into memory and writing once keeps the format code free of error
- * handling on every byte, and a whole image at this size is nothing.
+ * handling on every byte.
+ *
+ * It grows, and it did not always. This was a fixed two-megabyte array whose
+ * put() dropped anything past the end without a word, which is fine until an
+ * image is bigger than that - and a 1024x768 screenshot is, because these
+ * formats do not compress. The result was a file of exactly 2097152 bytes: a
+ * truncated PNG that some readers show half of and others reject, from a
+ * writer that reported success.
+ *
+ * So the size is reserved up front from the dimensions, which are known before
+ * a byte is written, and put() grows as a backstop. Running out of memory sets
+ * a flag that flush() turns into a failure, because the one thing this must
+ * not do is claim to have written a file it truncated.
  */
-#define IMG_MAX (2u * 1024u * 1024u)
-static unsigned char g_out[IMG_MAX];
-static unsigned long g_len;
+static unsigned char* g_out;
+static unsigned long  g_cap;
+static unsigned long  g_len;
+static int            g_out_of_room;
+
+static void reserve(unsigned long bytes)
+{
+    g_len = 0;
+    g_out_of_room = 0;
+    if (bytes <= g_cap)
+        return;
+    unsigned char* grown = (unsigned char*)malloc(bytes);
+    if (grown == 0) {
+        g_out_of_room = 1;
+        return;
+    }
+    g_out = grown;
+    g_cap = bytes;
+}
 
 static void put(unsigned char b)
 {
-    if (g_len < IMG_MAX)
-        g_out[g_len++] = b;
+    if (g_len >= g_cap) {
+        /* The reservation should make this unreachable; it is here so that a
+         * miscalculation is a failed write rather than a silent truncation. */
+        const unsigned long bigger = g_cap ? g_cap * 2 : 65536;
+        unsigned char* grown = (unsigned char*)malloc(bigger);
+        if (grown == 0) {
+            g_out_of_room = 1;
+            return;
+        }
+        memcpy(grown, g_out, g_len);
+        g_out = grown;
+        g_cap = bigger;
+    }
+    g_out[g_len++] = b;
 }
 
 static void put_be32(uint32_t v)
@@ -28,6 +68,8 @@ static void put_be32(uint32_t v)
 
 static int flush(const char* path)
 {
+    if (g_out_of_room || g_out == 0)
+        return -1;                      /* never write a half-made image */
     const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0)
         return -1;
@@ -90,7 +132,13 @@ int img_write_png(const char* path, const uint32_t* px,
 {
     if (width == 0 || height == 0)
         return -1;
-    g_len = 0;
+
+    /* A filter byte and three bytes a pixel per row, plus five bytes for each
+     * 65535-byte stored block, plus the chunk headers. Rounded up generously:
+     * over-reserving costs address space this program was going to touch
+     * anyway, and under-reserving costs a memcpy. */
+    const unsigned long raw = (1ul + (unsigned long)width * 3ul) * height;
+    reserve(raw + raw / 4096 + 4096);
 
     static const unsigned char sig[8] = { 137, 'P', 'N', 'G', 13, 10, 26, 10 };
     for (int i = 0; i < 8; ++i)
@@ -184,7 +232,11 @@ int img_write_gif(const char* path, const uint32_t* px,
 {
     if (width == 0 || height == 0 || width > 65535u || height > 65535u)
         return -1;
-    g_len = 0;
+
+    /* Nine bits a pixel, carved into 255-byte sub-blocks, after a header and a
+     * 768-byte palette. */
+    const unsigned long pixels = (unsigned long)width * height;
+    reserve(pixels * 2ul + pixels / 128ul + 4096ul);
 
     const char* hdr = "GIF89a";
     for (int i = 0; i < 6; ++i)

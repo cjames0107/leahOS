@@ -469,3 +469,110 @@ long inflate_zlib(const unsigned char* in, size_t in_len,
 
     return produced;
 }
+
+
+/* --- gzip ---------------------------------------------------------------------
+ *
+ * The same deflate stream as above under a different wrapper: a longer header
+ * with optional filename and comment fields, and a trailer carrying a CRC-32
+ * and the uncompressed length rather than an Adler-32.
+ *
+ * It lives here rather than in whatever program wants it because it is deflate's
+ * other container, and because a caller that had to skip the header itself would
+ * be doing exactly the parsing this file already exists to do.
+ */
+
+/* The same polynomial the PNG writer uses. Built on first use rather than
+ * carried as another kilobyte of constants. */
+static unsigned long g_crc_table[256];
+static int g_crc_ready;
+
+static unsigned long crc32_of(const unsigned char* data, size_t len)
+{
+    if (!g_crc_ready) {
+        for (unsigned long n = 0; n < 256; ++n) {
+            unsigned long c = n;
+            for (int k = 0; k < 8; ++k)
+                c = (c & 1) ? (0xEDB88320ul ^ (c >> 1)) : (c >> 1);
+            g_crc_table[n] = c;
+        }
+        g_crc_ready = 1;
+    }
+    unsigned long c = 0xFFFFFFFFul;
+    for (size_t i = 0; i < len; ++i)
+        c = g_crc_table[(c ^ data[i]) & 0xFF] ^ (c >> 8);
+    return (c ^ 0xFFFFFFFFul) & 0xFFFFFFFFul;
+}
+
+/* Where the deflate stream starts, or 0 if this is not a gzip member. */
+static size_t gzip_body(const unsigned char* in, size_t in_len)
+{
+    if (in_len < 18 || in[0] != 0x1F || in[1] != 0x8B || in[2] != 8)
+        return 0;                       /* magic, and deflate as the method */
+
+    const unsigned flags = in[3];
+    size_t at = 10;                     /* magic, method, flags, mtime, xfl, os */
+
+    if (flags & 0x04) {                 /* FEXTRA: a counted block */
+        if (at + 2 > in_len)
+            return 0;
+        at += 2 + ((size_t)in[at] | ((size_t)in[at + 1] << 8));
+    }
+    if (flags & 0x08) {                 /* FNAME: NUL-terminated */
+        while (at < in_len && in[at] != 0) ++at;
+        ++at;
+    }
+    if (flags & 0x10) {                 /* FCOMMENT: likewise */
+        while (at < in_len && in[at] != 0) ++at;
+        ++at;
+    }
+    if (flags & 0x02)                   /* FHCRC: two bytes over the header */
+        at += 2;
+
+    if (at + 8 > in_len)                /* nothing left for the trailer */
+        return 0;
+    return at;
+}
+
+long inflate_gzip_size(const unsigned char* in, size_t in_len)
+{
+    if (in == 0 || gzip_body(in, in_len) == 0)
+        return -1;
+    const unsigned char* trailer = in + in_len - 4;
+    return (long)((unsigned long)trailer[0] | ((unsigned long)trailer[1] << 8) |
+                  ((unsigned long)trailer[2] << 16) |
+                  ((unsigned long)trailer[3] << 24));
+}
+
+long inflate_gzip(const unsigned char* in, size_t in_len,
+                  unsigned char* out, size_t out_cap)
+{
+    if (in == 0 || out == 0)
+        return -1;
+    const size_t body = gzip_body(in, in_len);
+    if (body == 0)
+        return -1;
+
+    /* The last eight bytes are the trailer, not deflate. Handing them to the
+     * decompressor would be harmless - it stops at the final block - but the
+     * length is what says where they are. */
+    const long produced = inflate_raw(in + body, in_len - body - 8, out, out_cap);
+    if (produced < 0)
+        return -1;
+
+    const unsigned char* trailer = in + in_len - 8;
+    const unsigned long want_crc = (unsigned long)trailer[0] |
+                                   ((unsigned long)trailer[1] << 8) |
+                                   ((unsigned long)trailer[2] << 16) |
+                                   ((unsigned long)trailer[3] << 24);
+    const unsigned long want_len = (unsigned long)trailer[4] |
+                                   ((unsigned long)trailer[5] << 8) |
+                                   ((unsigned long)trailer[6] << 16) |
+                                   ((unsigned long)trailer[7] << 24);
+
+    if (((unsigned long)produced & 0xFFFFFFFFul) != want_len)
+        return -1;
+    if (crc32_of(out, (size_t)produced) != want_crc)
+        return -1;
+    return produced;
+}

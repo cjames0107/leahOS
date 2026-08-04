@@ -924,6 +924,34 @@ static void test_png(void)
     }
     unlink("/roundtrip.png");
 
+    /* An image too big for the writer's old fixed buffer. A screenshot is one
+     * of these, and the failure was silent: the file came out exactly
+     * 2097152 bytes and img_write_png said it had succeeded. */
+    {
+        const unsigned bw = 900, bh = 800;      /* ~2.2 MB as stored blocks */
+        uint32_t* big = (uint32_t*)malloc((unsigned long)bw * bh * 4);
+        check("room for a large test image", big != 0);
+        if (big != 0) {
+            for (unsigned y = 0; y < bh; ++y)
+                for (unsigned x = 0; x < bw; ++x)
+                    big[(unsigned long)y * bw + x] =
+                        ((x * 7) & 0xFF) << 16 | ((y * 5) & 0xFF) << 8 | ((x ^ y) & 0xFF);
+            check("an image larger than two megabytes can be written",
+                  img_write_png("/big.png", big, bw, bh) == 0);
+            unsigned gw = 0, gh = 0;
+            uint32_t* back = img_read_png("/big.png", &gw, &gh);
+            check("it reads back at the right size",
+                  back != 0 && gw == bw && gh == bh);
+            int intact = (back != 0);
+            for (unsigned long i = 0; back != 0 && i < (unsigned long)bw * bh; ++i)
+                if ((back[i] & 0xFFFFFF) != big[i]) { intact = 0; break; }
+            check("and every pixel survived, so it was not truncated", intact);
+            free(back);
+            free(big);
+        }
+        unlink("/big.png");
+    }
+
     check("a file that is not a PNG is refused",
           img_read_png("/docs/readme.md", &w, &h) == 0);
     check("a missing file is refused",
