@@ -20,6 +20,7 @@
 #include <image.h>
 #include <ipc.h>
 #include <math.h>
+#include <sound.h>
 #include <unistd.h>
 
 static int g_failures;
@@ -1234,6 +1235,212 @@ static void test_math(void)
           consistent);
 }
 
+
+/* --- reading sound files ------------------------------------------------------
+ *
+ * Built here rather than read from /Demos, so the test depends on nothing but
+ * itself - and so it can cover the shapes the demo files do not have: a rate
+ * that needs resampling, mono, and eight-bit samples with their offset
+ * encoding.
+ */
+
+static void put_le16(unsigned char* p, unsigned v)
+{
+    p[0] = (unsigned char)(v & 0xFF);
+    p[1] = (unsigned char)((v >> 8) & 0xFF);
+}
+
+static void put_le32(unsigned char* p, unsigned long v)
+{
+    p[0] = (unsigned char)(v & 0xFF);
+    p[1] = (unsigned char)((v >> 8) & 0xFF);
+    p[2] = (unsigned char)((v >> 16) & 0xFF);
+    p[3] = (unsigned char)((v >> 24) & 0xFF);
+}
+
+/* A WAV with the given shape, and a padding chunk between `fmt ` and `data` -
+ * which is not a contrivance: the files this system's own build produces have
+ * one, and a reader that assumes they are adjacent plays the padding. */
+static int write_wav(const char* path, unsigned rate, unsigned channels,
+                     unsigned bits, const void* samples, unsigned long bytes)
+{
+    unsigned char h[64];
+    unsigned n = 0;
+    const unsigned long pad = 8;
+
+    memcpy(h + n, "RIFF", 4); n += 4;
+    put_le32(h + n, 4 + 24 + (8 + pad) + 8 + bytes); n += 4;
+    memcpy(h + n, "WAVE", 4); n += 4;
+
+    memcpy(h + n, "fmt ", 4); n += 4;
+    put_le32(h + n, 16); n += 4;
+    put_le16(h + n, 1); n += 2;                          /* PCM */
+    put_le16(h + n, channels); n += 2;
+    put_le32(h + n, rate); n += 4;
+    put_le32(h + n, (unsigned long)rate * channels * (bits / 8)); n += 4;
+    put_le16(h + n, channels * (bits / 8)); n += 2;
+    put_le16(h + n, bits); n += 2;
+
+    memcpy(h + n, "JUNK", 4); n += 4;                    /* the padding chunk */
+    put_le32(h + n, pad); n += 4;
+    memset(h + n, 0, pad); n += (unsigned)pad;
+
+    memcpy(h + n, "data", 4); n += 4;
+    put_le32(h + n, bytes); n += 4;
+
+    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0)
+        return -1;
+    const int ok = (write(fd, h, n) == (long)n) &&
+                   (write(fd, samples, bytes) == (long)bytes);
+    close(fd);
+    return ok ? 0 : -1;
+}
+
+/* This libc has no strstr, and one test wanting it is not a reason to add
+ * one - the search is four lines here and carries no design decisions. */
+static int mentions(const char* haystack, const char* needle)
+{
+    for (int i = 0; haystack[i] != '\0'; ++i) {
+        int k = 0;
+        while (needle[k] != '\0' && haystack[i + k] == needle[k])
+            ++k;
+        if (needle[k] == '\0')
+            return 1;
+    }
+    return 0;
+}
+
+static void test_sound(void)
+{
+    printf("sound files:\n");
+
+    /* A second of a square wave at 48 kHz stereo: what comes out should be
+     * exactly what went in, because no conversion is needed. */
+    static int16_t stereo[48000 * 2];
+    for (int i = 0; i < 48000; ++i) {
+        stereo[i * 2]     = (int16_t)((i / 50) % 2 ? 8000 : -8000);
+        stereo[i * 2 + 1] = (int16_t)((i / 50) % 2 ? -4000 : 4000);
+    }
+    check("a WAV can be written for the test",
+          write_wav("/snd48.wav", 48000, 2, 16, stereo, sizeof(stereo)) == 0);
+
+    struct sound* s = snd_open("/snd48.wav");
+    check("it opens", s != 0);
+    if (s != 0) {
+        unsigned rate = 0, channels = 0;
+        unsigned long frames = 0;
+        const char* format = "";
+        snd_info(s, &rate, &channels, &frames, &format);
+        check("the format is read back",
+              rate == 48000 && channels == 2 && strcmp(format, "WAV") == 0);
+        check("the length is right", frames == 48000);
+
+        /* Read it all back and compare. This also steps over the padding
+         * chunk, which is the point of putting one there. */
+        static int16_t got[48000 * 2];
+        long total = 0;
+        for (;;) {
+            const long n = snd_read(s, got + total,
+                                    (long)(sizeof(got) / sizeof(got[0])) - total);
+            if (n <= 0)
+                break;
+            total += n;
+        }
+        check("every sample comes back", total == 48000 * 2);
+        int same = (total == 48000 * 2);
+        for (long i = 0; i < total && same; ++i)
+            if (got[i] != stereo[i])
+                same = 0;
+        check("and comes back unchanged", same);
+
+        /* Seeking, and the position that follows from it. */
+        check("it can seek", snd_seek(s, 24000) == 0);
+        check("the position follows the seek", snd_position(s) == 24000);
+        long n = snd_read(s, got, 64);
+        check("reading after a seek gives the samples from there",
+              n == 64 && got[0] == stereo[24000 * 2]);
+        snd_close(s);
+    }
+    unlink("/snd48.wav");
+
+    /* Mono at another rate: both conversions at once. A second in should still
+     * be a second out, and a constant should stay constant through the
+     * resampler rather than rippling. */
+    static int16_t mono[24000];
+    for (int i = 0; i < 24000; ++i)
+        mono[i] = 12345;
+    check("a mono WAV at another rate can be written",
+          write_wav("/snd24.wav", 24000, 1, 16, mono, sizeof(mono)) == 0);
+    s = snd_open("/snd24.wav");
+    check("it opens too", s != 0);
+    if (s != 0) {
+        unsigned rate = 0, channels = 0;
+        unsigned long frames = 0;
+        snd_info(s, &rate, &channels, &frames, 0);
+        check("the file's own rate and channels are reported",
+              rate == 24000 && channels == 1);
+        check("the length is given in output frames", frames == 48000);
+
+        static int16_t out[4096];
+        const long n = snd_read(s, out, (long)(sizeof(out) / sizeof(out[0])));
+        check("it produces samples", n > 0);
+        int steady = (n > 0);
+        for (long i = 2; i < n && steady; ++i)
+            if (out[i] < 12300 || out[i] > 12390)
+                steady = 0;
+        check("a constant survives the resampler", steady);
+        int both = (n >= 2) && (out[0] == out[1]);
+        check("mono is given to both channels", both);
+        snd_close(s);
+    }
+    unlink("/snd24.wav");
+
+    /* Eight-bit WAV is unsigned with a bias of 128, which is the one place the
+     * sample formats disagree about what zero means. */
+    static unsigned char eight[1000];
+    for (int i = 0; i < 1000; ++i)
+        eight[i] = 128;                     /* silence, in that encoding */
+    check("an 8-bit WAV can be written",
+          write_wav("/snd8.wav", 48000, 1, 8, eight, sizeof(eight)) == 0);
+    s = snd_open("/snd8.wav");
+    if (s != 0) {
+        static int16_t out[256];
+        const long n = snd_read(s, out, 256);
+        int silent = (n > 0);
+        for (long i = 0; i < n; ++i)
+            if (out[i] != 0)
+                silent = 0;
+        check("8-bit silence is silent, not a loud offset", silent);
+        snd_close(s);
+    } else {
+        check("8-bit silence is silent, not a loud offset", 0);
+    }
+    unlink("/snd8.wav");
+
+    /* And the refusals, which have to say which problem it was. */
+    check("a file that is not a sound file is refused",
+          snd_open("/docs/readme.md") == 0);
+    check("a missing file is refused", snd_open("/no/such/sound.wav") == 0);
+
+    /* An MP3 is recognised by its frame sync and turned down by name rather
+     * than by silence - "no decoder" and "not a sound file" are different
+     * problems and need different things from whoever hit them. */
+    static const unsigned char mp3_head[8] = { 0xFF, 0xFB, 0x90, 0x00,
+                                               0x00, 0x00, 0x00, 0x00 };
+    int fd = open("/fake.mp3", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0) { write(fd, mp3_head, sizeof(mp3_head)); close(fd); }
+    check("an MP3 is refused as an MP3, not as gibberish",
+          snd_open("/fake.mp3") == 0 && mentions(snd_error(), "MP3"));
+    unlink("/fake.mp3");
+
+    fd = open("/fake.ogg", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0) { write(fd, "OggS\0\0\0\0", 8); close(fd); }
+    check("an Ogg is refused as an Ogg",
+          snd_open("/fake.ogg") == 0 && mentions(snd_error(), "Ogg"));
+    unlink("/fake.ogg");
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -1252,6 +1459,7 @@ int main(void)
     test_png();
     test_float();
     test_math();
+    test_sound();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

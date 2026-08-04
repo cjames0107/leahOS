@@ -122,6 +122,7 @@ stage_app Settings  settings settings   ""              "Appearance" "Users"
 stage_app Tasks     taskman  tasks      ""              "End task"
 stage_app Clock     clock    ""         ""              ""
 stage_app Elements  uitest   elements   ""              ""
+stage_app Music     player   ""         ".WAV .MP3 .OGG" "Open sound..."
 
 # The icon set, copied in as-is. These are ordinary compressed PNGs - nothing
 # converts them at build time, because img_read_png inflates a real deflate
