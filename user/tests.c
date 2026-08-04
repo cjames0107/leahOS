@@ -20,6 +20,7 @@
 #include <image.h>
 #include <ipc.h>
 #include <math.h>
+#include <paths.h>
 #include <sound.h>
 #include <unistd.h>
 
@@ -865,7 +866,7 @@ static void test_png(void)
     int loaded = 0, right_size = 0;
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
         char path[64];
-        snprintf(path, sizeof(path), "/share/icons/%s.png", names[i]);
+        snprintf(path, sizeof(path), "/usr/share/icons/%s.png", names[i]);
         unsigned w = 0, h = 0;
         uint32_t* px = img_read_png(path, &w, &h);
         if (px != 0) {
@@ -881,7 +882,7 @@ static void test_png(void)
     /* Two of them checked pixel for pixel: one written with fixed Huffman
      * codes, one with dynamic. A decoder that is merely plausible fails here. */
     unsigned w = 0, h = 0;
-    uint32_t* px = img_read_png("/share/icons/binary.png", &w, &h);
+    uint32_t* px = img_read_png("/usr/share/icons/binary.png", &w, &h);
     check("a fixed-Huffman PNG decodes to the exact pixels",
           px != 0 && pixel_hash(px, 32 * 32) == 0x1A55598Fu);
     if (px != 0) {
@@ -894,7 +895,7 @@ static void test_png(void)
         check("transparent pixels come through as transparent", clear == 436);
         free(px);
     }
-    px = img_read_png("/share/icons/calculator.png", &w, &h);
+    px = img_read_png("/usr/share/icons/calculator.png", &w, &h);
     check("a dynamic-Huffman PNG decodes to the exact pixels",
           px != 0 && pixel_hash(px, 32 * 32) == 0xD47D12CDu);
     free(px);
@@ -953,9 +954,9 @@ static void test_png(void)
     }
 
     check("a file that is not a PNG is refused",
-          img_read_png("/docs/readme.md", &w, &h) == 0);
+          img_read_png("/usr/share/doc/readme.md", &w, &h) == 0);
     check("a missing file is refused",
-          img_read_png("/share/icons/nothing.png", &w, &h) == 0);
+          img_read_png("/usr/share/icons/nothing.png", &w, &h) == 0);
 }
 
 
@@ -1266,7 +1267,8 @@ static void test_math(void)
 
 /* --- reading sound files ------------------------------------------------------
  *
- * Built here rather than read from /Demos, so the test depends on nothing but
+ * Built here rather than read from /usr/share/demos, so the test depends on
+ * nothing but
  * itself - and so it can cover the shapes the demo files do not have: a rate
  * that needs resampling, mono, and eight-bit samples with their offset
  * encoding.
@@ -1448,7 +1450,7 @@ static void test_sound(void)
 
     /* And the refusals, which have to say which problem it was. */
     check("a file that is not a sound file is refused",
-          snd_open("/docs/readme.md") == 0);
+          snd_open("/usr/share/doc/readme.md") == 0);
     check("a missing file is refused", snd_open("/no/such/sound.wav") == 0);
 
     /* An MP3 is recognised by its frame sync and turned down by name rather
@@ -1467,6 +1469,132 @@ static void test_sound(void)
     check("an Ogg is refused as an Ogg",
           snd_open("/fake.ogg") == 0 && mentions(snd_error(), "Ogg"));
     unlink("/fake.ogg");
+}
+
+/* --- the filesystem layout and its devices ---------------------------------- */
+
+static int is_directory(const char* path)
+{
+    struct stat info;
+    return stat(path, &info) == 0 && info.st_type == S_IFDIR;
+}
+
+static void test_layout(void)
+{
+    printf("filesystem layout:\n");
+
+    /* Every directory the FHS calls for, including the ones nothing puts
+     * anything in yet: an empty /srv is somewhere for the next person to put
+     * something, and a missing one is a decision they have to make again. */
+    static const char* const kDirs[] = {
+        "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/media", "/mnt",
+        "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp",
+        "/usr", "/usr/bin", "/usr/include", "/usr/lib", "/usr/local",
+        "/usr/local/bin", "/usr/sbin", "/usr/share", "/usr/share/doc",
+        "/usr/share/icons", "/usr/src", "/var", "/var/cache", "/var/lib",
+        "/var/log", "/var/spool", "/var/tmp"
+    };
+    int missing = 0;
+    for (unsigned i = 0; i < sizeof(kDirs) / sizeof(kDirs[0]); ++i)
+        if (!is_directory(kDirs[i])) {
+            if (missing == 0)
+                printf("       first missing: %s\n", kDirs[i]);
+            ++missing;
+        }
+    check("every directory the FHS calls for is there", missing == 0);
+
+    /* /tmp is the one this system did without for a long time, and the one
+     * everything assumes. Writable by whoever is logged in. */
+    const int fd = open("/tmp/probe", O_WRONLY | O_CREAT | O_TRUNC);
+    check("/tmp can be written to", fd >= 0);
+    if (fd >= 0) {
+        close(fd);
+        unlink("/tmp/probe");
+    }
+
+    /* Programs, by name, wherever they actually live. */
+    char found[256];
+    check("a command in /bin is found by name",
+          path_find_program("ls", found, sizeof(found)) == 0 &&
+          strcmp(found, "/bin/ls") == 0);
+    check("a system program in /sbin is found by name",
+          path_find_program("init", found, sizeof(found)) == 0 &&
+          strcmp(found, "/sbin/init") == 0);
+    check("one in /usr/bin is found too",
+          path_find_program("hello", found, sizeof(found)) == 0 &&
+          strcmp(found, "/usr/bin/hello") == 0);
+    check("a name that is not a program is not found",
+          path_find_program("no-such-command", found, sizeof(found)) != 0);
+    check("a path with a slash is used as given, not searched",
+          path_find_program("/bin/ls", found, sizeof(found)) == 0 &&
+          strcmp(found, "/bin/ls") == 0);
+
+    /* And that programs are marked as such, which is what replaced looking for
+     * ".ELF" on the end of a name. */
+    struct stat info;
+    check("a program is executable and a document is not",
+          stat("/bin/ls", &info) == 0 && S_ISEXEC(info.st_mode) &&
+          stat("/usr/share/doc/readme.md", &info) == 0 &&
+          !S_ISEXEC(info.st_mode));
+
+    /* A listing carries the mode, so a browser can tell them apart without
+     * stat-ing every name it was just told about. */
+    static struct dirent entries[64];
+    const int n = getdents("/bin", entries, 64);
+    int any_executable = 0;
+    for (int i = 0; i < n; ++i)
+        if (entries[i].d_type == S_IFREG && S_ISEXEC(entries[i].d_mode))
+            any_executable = 1;
+    check("a directory listing reports the permission bits", any_executable);
+}
+
+static void test_devices(void)
+{
+    printf("device files:\n");
+
+    char buffer[64];
+
+    int fd = open("/dev/null", O_RDONLY);
+    check("/dev/null opens", fd >= 0);
+    if (fd >= 0) {
+        check("reading /dev/null is immediately the end",
+              read(fd, buffer, sizeof(buffer)) == 0);
+        close(fd);
+    }
+    fd = open("/dev/null", O_WRONLY);
+    check("writing to /dev/null takes everything",
+          fd >= 0 && write(fd, "discarded", 9) == 9);
+    if (fd >= 0) close(fd);
+
+    fd = open("/dev/zero", O_RDONLY);
+    check("/dev/zero opens", fd >= 0);
+    if (fd >= 0) {
+        memset(buffer, 0xAA, sizeof(buffer));
+        const long got = read(fd, buffer, sizeof(buffer));
+        int zeroed = (got == (long)sizeof(buffer));
+        for (unsigned i = 0; i < sizeof(buffer) && zeroed; ++i)
+            if (buffer[i] != 0)
+                zeroed = 0;
+        check("/dev/zero reads zeros", zeroed);
+        close(fd);
+    }
+
+    fd = open("/dev/full", O_WRONLY);
+    check("/dev/full refuses a write, which is the point of it",
+          fd >= 0 && write(fd, "x", 1) < 0);
+    if (fd >= 0) close(fd);
+
+    check("a device that does not exist is not invented",
+          open("/dev/nonesuch", O_RDONLY) < 0);
+
+    /* /dev/tty is the controlling terminal, which a process started from one
+     * has and a process started any other way does not. Either answer is
+     * correct; what matters is that it agrees with tty_fd(). */
+    fd = open("/dev/tty", O_RDONLY);
+    check("/dev/tty opens exactly when there is a terminal",
+          (fd >= 0) == (tty_fd() >= 0));
+    if (fd >= 0)
+        close(fd);
 }
 
 int main(void)
@@ -1488,6 +1616,8 @@ int main(void)
     test_float();
     test_math();
     test_sound();
+    test_layout();
+    test_devices();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

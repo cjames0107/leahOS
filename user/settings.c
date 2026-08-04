@@ -10,6 +10,7 @@
  * the note on persistence under Appearance.
  */
 
+#include <paths.h>
 #include <dialog.h>
 #include <display.h>
 #include <audio.h>
@@ -617,7 +618,7 @@ static void draw_about(void)
     kv(98,  "built", "from scratch: no third-party bootloader,");
     kv(118, "", "no libc, no runtime");
     kv(142, "kernel", "NASM and C++23, higher half at -2 GiB");
-    kv(162, "storage", "ext2/3/4 read and write, FAT, AHCI, USB");
+    kv(162, "storage", "ext2/3/4 read and write, AHCI, USB");
     kv(182, "network", "e1000, IPv4, ARP, ICMP, UDP, DNS, TCP");
     kv(202, "desktop", "a window server in userland on shared memory");
 
@@ -782,7 +783,7 @@ int main(int argc, char** argv)
                     }
                     if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 220 &&
                         e.y >= 276 && e.y < 300)
-                        dlg_save("/share/wallpapers", "");  /* a picker, reused */
+                        dlg_save(PATH_WALLPAPERS, "");  /* a picker, reused */
                     else if (e.x >= SIDEBAR + 228 && e.x < SIDEBAR + 324 &&
                              e.y >= 276 && e.y < 300)
                         set_wallpaper("");

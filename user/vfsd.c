@@ -913,6 +913,12 @@ int main(void)
                  * alternative is every caller stat-ing every name it was just
                  * told about, which doubles the round trips for a directory. */
                 r.word[1] = read_inode(child, &ci) == 0 ? (long)ci.size : 0;
+                /* And the permission bits, from the inode that was just read.
+                 * Whether a file is a program is a property of the file, and
+                 * the execute bits are where UNIX keeps it - the alternative
+                 * is guessing from the name, which is what a .ELF suffix was
+                 * doing. */
+                r.word[2] = (long)(ci.mode & 0777u);
             }
         } else if (m.tag == VFS_READ) {
             struct inode in;

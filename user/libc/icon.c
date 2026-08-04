@@ -5,12 +5,14 @@
  * "what does a .PNG look like" is one answer too many.
  */
 
+#include <paths.h>
 #include <icon.h>
 #include <image.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
-#define ICON_DIR   "/share/icons"
+#define ICON_DIR   PATH_ICONS
 #define CACHE_MAX  24
 
 /* A miss is cached as well as a hit - `pixels` of 0 with the path filled in.
@@ -74,7 +76,7 @@ static int ends_with(const char* s, const char* suffix)
 }
 
 const uint32_t* icon_for_entry(const char* dir_path, const char* name,
-                               int is_dir, int is_app)
+                               int is_dir, int is_app, unsigned mode)
 {
     if (is_app) {
         /* A bundle's icon is the bundle's own business, which is the point of
@@ -94,11 +96,20 @@ const uint32_t* icon_for_entry(const char* dir_path, const char* name,
     if (is_dir)
         return icon_by_name("folder-empty");
 
+    /* A program is one because it may be run, which is what the execute bits
+     * say. Asked before the extensions, because a program is a program
+     * whatever it is called - and because the alternative was looking for
+     * ".ELF" on the end, which is a fact about a filesystem this system
+     * stopped being able to read a long time ago. */
+    if (S_ISEXEC(mode))
+        return icon_by_name("binary");
+
     if (ends_with(name, ".png") || ends_with(name, ".gif") ||
         ends_with(name, ".jpg") || ends_with(name, ".jpeg"))
         return icon_by_name("images");
-    if (ends_with(name, ".elf"))
-        return icon_by_name("binary");
+    if (ends_with(name, ".wav") || ends_with(name, ".mp3") ||
+        ends_with(name, ".ogg"))
+        return icon_by_name("file");
     if (ends_with(name, ".txt") || ends_with(name, ".md") ||
         ends_with(name, ".c") || ends_with(name, ".h") ||
         ends_with(name, ".leahrc") || ends_with(name, ".alias"))

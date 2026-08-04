@@ -37,7 +37,7 @@ int main(void)
     if (!win_server_running()) {
         if (fork() == 0) {
             char* args[] = { "wserver", 0 };
-            execve("/BIN/WSERVER.ELF", args, 0);
+            execve("/sbin/wserver", args, 0);
             exit(127);
         }
         for (int i = 0; i < 600 && !win_server_running(); ++i)

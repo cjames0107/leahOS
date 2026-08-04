@@ -17,10 +17,15 @@ struct stat {
 
 struct dirent {
     uint32_t d_type;        /* S_IFREG or S_IFDIR */
-    uint32_t d_reserved;
+    uint32_t d_mode;        /* permission bits, 0777 - the execute bits are
+                               how a program is told from a document */
     uint64_t d_size;
     char     d_name[128];
 };
+
+/* Whether a mode says "this can be run". Any of the three bits: a file the
+ * owner may execute is a program even if nobody else may. */
+#define S_ISEXEC(mode) (((mode) & 0111u) != 0)
 
 int stat(const char* path, struct stat* out);
 

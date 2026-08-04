@@ -52,7 +52,7 @@ int main(void)
     /* Something the build put there, found by walking two levels. */
     memset(&q, 0, sizeof(q));
     q.tag = VFS_STAT;
-    const char* path = "/docs/readme.md";
+    const char* path = "/usr/share/doc/readme.md";
     unsigned n = 0;
     while (path[n] != '\0') { q.data[n] = path[n]; ++n; }
     q.bytes = n;

@@ -68,17 +68,17 @@ int main(int argc, char** argv)
     printf("mvtest: %d round trips\n", rounds);
     for (r = 0; r < rounds; ++r) {
         /* Across directories, and back. */
-        if (rename("/root/mv-a.txt", "/docs/mv-a.txt") != 0) {
+        if (rename("/root/mv-a.txt", "/usr/share/doc/mv-a.txt") != 0) {
             printf("mvtest: round %d: move out failed\n", r);
             ++bad_move;
             break;
         }
-        if (!intact("/docs/mv-a.txt")) {
+        if (!intact("/usr/share/doc/mv-a.txt")) {
             printf("mvtest: round %d: contents wrong after moving out\n", r);
             ++bad_content;
             break;
         }
-        if (rename("/docs/mv-a.txt", "/root/mv-a.txt") != 0) {
+        if (rename("/usr/share/doc/mv-a.txt", "/root/mv-a.txt") != 0) {
             printf("mvtest: round %d: move back failed\n", r);
             ++bad_move;
             break;

@@ -333,10 +333,53 @@ volume clean after the kernel's writes. Building and checking images needs
 | 0 | stage 1 / MBR, with the partition table at offset 446 |
 | 1–32 | stage 2 |
 | 64–16447 | kernel (8 MiB reserved) |
-| 20480+ | FAT32 partition (54 MiB) |
 
-The partition table is written by `mkfs_fat32.py` rather than declared in
-`stage1.asm`, so the image geometry has exactly one definition.
+Disk 0 is the bootloader and the kernel and nothing else. It used to carry a
+FAT32 partition with a second copy of every program, which nothing had been
+able to read since the FAT driver was removed — and which was the reason every
+name in the system was upper case with `.ELF` on the end. Both are gone; the
+root filesystem on disk 1 is the only filesystem.
+
+## Filesystem layout
+
+The Filesystem Hierarchy Standard, as much of it as means anything here.
+
+| Path | Contents |
+|---|---|
+| `/bin` | essential commands — `sh`, `ls`, `grep`, `less` |
+| `/sbin` | the system's own — `init`, `login`, `wserver`, every driver |
+| `/usr/bin` | everything else — networking, diagnostics, the self-tests |
+| `/opt` | application bundles, one `.app` directory each |
+| `/usr/share` | icons, wallpapers, documentation, the demo media |
+| `/etc` | `passwd` and `shadow` |
+| `/dev` | `null`, `zero`, `full`, `tty`, `console` |
+| `/tmp`, `/var`, `/run`, `/srv`, `/mnt`, `/media` | as the standard says |
+| `/proc`, `/sys` | mount points; there is no procfs yet |
+
+Programs are lower case with no extension. They were `/BIN/NAME.ELF` because
+the first filesystem this system could read was FAT, whose names are eight
+characters and three, upper case. That driver has been gone for a long time and
+the shouting outlived it — along with a hardcoded path in every program that
+wanted to start another. A command is now found by name along `/bin`, `/sbin`,
+`/usr/bin` and `/usr/local/bin`, which is what a `PATH` would do if there were
+environment variables to keep one in.
+
+Whether a file is a program is the execute bits, not the name. `getdents`
+reports the mode, so a file browser can tell a program from a document without
+stat-ing every name it was just told about.
+
+### /dev
+
+The entries exist on disk as empty files, so `ls /dev` lists them and a path
+naming one is not a fiction. What they *do* lives in libc, which is already
+where path resolution and the descriptor table are — and which is the only
+thing that can know which terminal a process belongs to.
+
+`/dev/tty` is that terminal. Not standard input: the shell redirects that for
+every pipeline, and `something | less` is exactly the case where a program
+needs the keyboard while its standard input is a pipe. The terminal marks one
+when it starts the shell; it is inherited from there through every fork and
+exec.
 
 ## ELF loading
 
@@ -409,7 +452,8 @@ crt0 reads them back and calls main(argc, argv).
 
 That is enough for a shell and real commands. `sh` reads a line (the console
 echoes as you type), splits it, runs cd/exit/help itself, and forks+execs
-/BIN/<NAME>.ELF for anything else. `ls`, `cat`, `echo` and `pwd` are ordinary C
+the program that name finds along the command path for anything else. `ls`,
+`cat`, `echo` and `pwd` are ordinary C
 programs against the libc. The init process scripts a few of them as a demo -
 so a headless boot verifies the whole path without a keyboard - then execs the
 shell.
@@ -747,13 +791,14 @@ hiding it.
 
 A `.app` is an ordinary directory whose name carries the extension:
 
-    /Apps/Paint.app/
+    /opt/Paint.app/
         Info            name, exec, opens, menu
-        PAINT.ELF
+        paint.elf
 
 The point is not the packaging. It is that an application had been "a binary in
-`/BIN` plus rules scattered through whoever launched it": the browser carried a
-hardcoded rule that a `.ELF` runs and everything else goes to the editor, and
+a binary on the command path plus rules scattered through whoever launched it":
+the browser carried a
+hardcoded rule that a program runs and everything else goes to the editor, and
 each client wrote its own context menu. Both of those facts belong to the
 application, and a bundle is where they now live. Nothing outside reads one
 except through `bundle.h`.
@@ -769,15 +814,17 @@ difference between an application and the directory it is made of. Its contents
 are not hidden - nothing pretends the directory is a file - they are simply not
 what opening it means.
 
-Every application ships **only** as a bundle. There is no copy in `/BIN`,
+Every application ships **only** as a bundle. There is no copy on the command
+path,
 deliberately: two copies of a binary are two things to keep in step, and the
-second one is exactly what lets a caller carry on hardcoding `/BIN/EDIT.ELF`
-instead of asking which application does the job. `/BIN` keeps the command-line
+second one is exactly what lets a caller carry on hardcoding a path to another
+program instead of asking which application does the job. `/bin` keeps the
+command-line
 tools and the pieces the system starts before any of this exists - `init`,
 `login`, the shell, the window server, the desktop.
 
 Nothing outside a bundle names an application's path any more. `app_path("Edit")`
-walks `/Apps`, and an application that is not installed returns an empty string,
+walks `/opt`, and an application that is not installed returns an empty string,
 which every caller treats as "then do not launch it" - a missing application
 should be a launch that does nothing rather than a launch of the wrong thing.
 The open-with dialogue lists what it finds rather than the three names that used
@@ -800,7 +847,7 @@ questions: icons for what is in here, a list for how big it is, a tree for
 where it sits. They share a selection and a current directory, so switching
 never loses your place. Opening is one gesture everywhere - click to select,
 click the selection again, or press Return - and what happens depends on what
-was opened: a directory is entered, a `.ELF` is run, and anything else is
+was opened: a directory is entered, an executable is run, and anything else is
 handed to `edit`. That last rule is a rule about the **name**, not the contents,
 because nothing in the filesystem records a type; a real one is on the list
 above.
@@ -1423,7 +1470,7 @@ process still mapped them.
 - [ ] drag and drop between windows, which needs the server to carry a drag
 - [ ] a per-session clipboard, so two logged-in users cannot read each other's
 - [x] application bundles: a `.app` directory that carries its own description
-- [x] every application ships only as a bundle, with no copy left in `/BIN`
+- [x] every application ships only as a bundle, with no copy on the command path
 - [x] bundle `menu` entries in the browser's right-click menu
 - [x] shortcuts on the desktop, as `.alias` files
 - [ ] a bundle's `Icon.png` drawn in place of the generic application glyph

@@ -217,12 +217,21 @@ static int start_shell(void)
         dup2(to_shell[0], 0);
         dup2(from_shell[1], 1);
         dup2(from_shell[1], 2);
+
+        /* A second descriptor onto the same input, marked as the controlling
+         * terminal. Standard input is not enough: the shell redirects it for
+         * every pipeline, and `something | less` is exactly the case where a
+         * program needs the keyboard while its standard input is a pipe from
+         * another program. This one is not redirected, is inherited by
+         * everything the shell starts, and is what /dev/tty opens. */
+        tty_set(dup(0));
+
         close(to_shell[0]);
         close(to_shell[1]);
         close(from_shell[0]);
         close(from_shell[1]);
         char* argv[] = { "sh", 0 };
-        execve("/BIN/SH.ELF", argv, 0);
+        execve("/bin/sh", argv, 0);
         exit(127);
     }
 

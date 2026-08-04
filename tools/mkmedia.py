@@ -182,7 +182,7 @@ def stage(out_dir):
             if not name.lower().endswith((".jpg", ".jpeg", ".png")):
                 continue
             src = os.path.join(src_dir, name)
-            dst = os.path.join(papers, upper_stem(name) + ".PNG")
+            dst = os.path.join(papers, clean_stem(name) + ".png")
             if newer(src, dst):
                 to_png(src, dst, WALLPAPER_LONG_EDGE)
                 made.append(dst)
@@ -195,7 +195,7 @@ def stage(out_dir):
             if not name.lower().endswith((".jpg", ".jpeg", ".png")):
                 continue
             src = os.path.join(src_dir, name)
-            dst = os.path.join(images, upper_stem(name) + ".PNG")
+            dst = os.path.join(images, clean_stem(name) + ".png")
             if newer(src, dst):
                 to_png(src, dst, DEMO_LONG_EDGE)
                 made.append(dst)
@@ -208,7 +208,7 @@ def stage(out_dir):
             if not name.lower().endswith(".mp3"):
                 continue
             src = os.path.join(src_dir, name)
-            dst = os.path.join(audio, upper_stem(name) + ".WAV")
+            dst = os.path.join(audio, clean_stem(name) + ".wav")
             if newer(src, dst):
                 to_wav(src, dst)
                 made.append(dst)
@@ -216,15 +216,15 @@ def stage(out_dir):
     return made
 
 
-def upper_stem(name):
-    """Upper case, and spaces to underscores.
+def clean_stem(name):
+    """Lower case, and spaces to underscores.
 
-    Not cosmetic: the shell resolves commands by upper-casing, /BIN is upper
-    case throughout, and a space in a path is a second word to anything that
-    splits on them. These names came from a Mac and have both problems.
+    The upper-casing was for a FAT filesystem this system stopped being able to
+    read a long time ago; the underscores are still worth it, because a space in
+    a path is a second word to anything that splits on them.
     """
     stem = name.rsplit(".", 1)[0]
-    return "".join(c if c.isalnum() else "_" for c in stem).upper()
+    return "".join(c if c.isalnum() else "_" for c in stem).lower()
 
 
 if __name__ == "__main__":

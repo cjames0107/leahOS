@@ -34,7 +34,6 @@ STAGE2_SECTORS  := 32
 KERNEL_LBA      := 64
 KERNEL_MAX_SECTORS := 16384              # 8 MiB of image reserved for the kernel
 IMAGE_MIB       := 64
-FAT32_LBA       := 20480          # 10 MiB in, clear of the kernel's slot
 EXT_MIB         := 1024           # the ext4 root filesystem on disk 1
 
 # --- knobs ------------------------------------------------------------------
@@ -102,23 +101,34 @@ KERNEL_OBJS := $(KERNEL_ASM_SRCS:%.asm=$(BUILD)/%.asm.o) \
 KERNEL_ELF := $(BUILD)/kernel.elf
 KERNEL_BIN := $(BUILD)/kernel.bin
 # Userland programs. Each user/<name>.c links into $(BUILD)/<name>.elf and is
-# placed on the image at /BIN/<NAME>.ELF (upper-cased for FAT's 8.3 names).
-# Two kinds of program, and the difference is where they end up.
+# placed on the image by the lists below.
 #
-# BIN_PROGRAMS are the command-line tools and the pieces the system starts
-# itself - init, login, the shell, the window server, the desktop. They live in
-# /BIN because something has to launch them by path before any of this is up.
+# APP_PROGRAMS are the applications. They ship only as bundles under /opt, and
+# deliberately not on the command path as well: two copies of a binary is two
+# things to keep in step, and the second one is exactly what lets a caller keep
+# hardcoding a path instead of asking which application does the job.
 #
-# APP_PROGRAMS are the applications. They ship only as bundles under /Apps, and
-# deliberately not in /BIN as well: two copies of a binary is two things to keep
-# in step, and the second one is exactly what lets a caller keep hardcoding a
-# path instead of asking which application does the job.
-BIN_PROGRAMS := init hello sh echo cat ls pwd mkdir rm touch cp mv clear \
-                 ifconfig ping arp nslookup tests id chmod chown su fetch whoami \
-                 login useradd passwd stat gui wserver desktop tone ipctest e1000d nictest netd nettest ping6 fetch6 blockd blktest audiod authd usbd ps2d lspci churn mvtest v6test vfsd vfstest \
-                 wc head tail sort grep find diff less gunzip tar screenshot
+# Where each program is placed, following the FHS.
+#
+# /bin is what the standard calls essential: the commands needed to work with
+# the system at all, including when little else is running. /sbin is the
+# system's own - init, login, the window server and every driver, none of which
+# a person types the name of. /usr/bin is everything else, which here is mostly
+# networking and the diagnostics.
+#
+# Names are lower case with no extension. They were upper case with .ELF
+# because the first filesystem this could read was FAT; that driver has been
+# gone for a long time and the shouting outlived it.
+SBIN_PROGRAMS := init login wserver desktop blockd vfsd netd e1000d audiod \
+                 authd usbd ps2d useradd passwd ifconfig
+BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami \
+                 chmod chown stat less grep find wc head tail sort diff tar \
+                 gunzip
+USRBIN_PROGRAMS := hello gui tone lspci ping ping6 arp nslookup fetch fetch6 \
+                 screenshot tests ipctest nictest nettest blktest vfstest \
+                 mvtest v6test churn
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player
-USER_PROGRAMS := $(BIN_PROGRAMS) $(APP_PROGRAMS)
+USER_PROGRAMS := $(SBIN_PROGRAMS) $(BIN_PROGRAMS) $(USRBIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
 STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
@@ -232,15 +242,16 @@ $(BUILD)/%.elf: $(CRT0_OBJ) $(BUILD)/user/%.o $(LIBC_OBJS) user/user.ld
 	$(LD) -nostdlib -T user/user.ld -o $@ $(CRT0_OBJ) $(BUILD)/user/$*.o $(LIBC_OBJS)
 
 # --- disk image -------------------------------------------------------------
-# --add BIN/NAME.ELF=build/name.elf for every program, upper-cased.
-FS_ADDS := $(foreach p,$(USER_PROGRAMS),--add BIN/$(shell echo $(p) | tr a-z A-Z).ELF=$(BUILD)/$(p).elf)
-
-$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_ELFS) | $(DIST)
+# Disk 0 carries the two bootloader stages and the kernel, at fixed sectors,
+# and nothing else. It used to hold a FAT32 partition with a second copy of
+# every program, which nothing had been able to read since the FAT driver was
+# removed - and which was the reason every name in the system was upper case
+# with a .ELF on the end. Both are gone.
+$(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=$(IMAGE_MIB) status=none
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 seek=0               conv=notrunc status=none
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=$(STAGE2_LBA)   conv=notrunc status=none
 	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_LBA)   conv=notrunc status=none
-	@python3 tools/mkfs_fat32.py $@ $(FAT32_LBA) $(FS_ADDS)
 	@cp $(KERNEL_ELF) $(DIST_ELF)
 	@echo "image:  $@"
 	@echo "symbols: $(DIST_ELF)"
@@ -248,7 +259,9 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) $(USER_ELFS) | $
 # The ext4 root filesystem (disk 1). BIN/NAME.ELF=build/name.elf for every
 # program, upper-cased to match the paths the kernel loads today.
 # Only the tools go to /BIN; the applications are placed as bundles by mkext.sh.
-EXT_ADDS := $(foreach p,$(BIN_PROGRAMS),BIN/$(shell echo $(p) | tr a-z A-Z).ELF=$(BUILD)/$(p).elf)
+EXT_ADDS := $(foreach p,$(SBIN_PROGRAMS),sbin/$(p)=$(BUILD)/$(p).elf) \
+            $(foreach p,$(BIN_PROGRAMS),bin/$(p)=$(BUILD)/$(p).elf) \
+            $(foreach p,$(USRBIN_PROGRAMS),usr/bin/$(p)=$(BUILD)/$(p).elf)
 EXT_APPS := $(foreach p,$(APP_PROGRAMS),$(p)=$(BUILD)/$(p).elf)
 
 # The media is converted into a cache under build/, keyed on source mtime, and
@@ -347,7 +360,7 @@ help:
 	@echo '  make clean'
 	@echo
 	@echo 'Final artifacts land in $(DIST)/:'
-	@echo '  leahos.img   bootable disk 0 (MBR + kernel + FAT32 partition)'
+	@echo '  leahos.img   bootable disk 0 (MBR + stage2 + kernel)'
 	@echo '  ext.img      disk 1, the ext4 root filesystem (needs e2fsprogs)'
 	@echo '  leahos.elf   kernel with symbols, for make gdb'
 	@echo '  serial.log   COM1 capture from the last run'

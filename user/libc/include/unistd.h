@@ -26,6 +26,17 @@ void  msleep(unsigned long ms);
 
 int    close(int fd);
 long   lseek(int fd, long offset, int whence);
+
+/* The lowest free descriptor onto the same thing. */
+int    dup(int oldfd);
+
+/* The controlling terminal: which descriptor is the terminal this process is
+ * attached to, or -1. Not the same as standard input, which redirection moves
+ * - `something | less` is the case where the difference matters, and it is
+ * what makes /dev/tty work. Set by whoever creates a terminal; inherited from
+ * there through fork and execve. */
+int    tty_fd(void);
+void   tty_set(int fd);
 int    chdir(const char* path);
 int    getcwd(char* buffer, size_t size);
 int    unlink(const char* path);

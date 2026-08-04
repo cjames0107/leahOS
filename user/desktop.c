@@ -11,6 +11,7 @@
  * drawing over each other.
  */
 
+#include <paths.h>
 #include <bundle.h>
 #include <icon.h>
 #include <clipboard.h>
@@ -260,14 +261,19 @@ static void item_icon(int x, int y, int i)
         }
     }
 
-    wg_icon(x, y, icon_for_entry(dir, name, is_dir, bundle_is_app(name)),
+    wg_icon(x, y,
+            icon_for_entry(dir, name, is_dir, bundle_is_app(name),
+                           g_items[i].d_mode),
             ICON_SIZE, ICON_SIZE);
 }
 
-static int ends_elf(const char* s)
+/* Whether a path names something that can be run. The execute bits, not the
+ * name: there is no suffix on a program here any more. */
+static int is_program(const char* path)
 {
-    const int n = (int)strlen(s);
-    return n > 4 && s[n-4] == '.' && (s[n-3] == 'E' || s[n-3] == 'e');
+    struct stat info;
+    return stat(path, &info) == 0 && info.st_type == S_IFREG &&
+           S_ISEXEC(info.st_mode);
 }
 
 static void draw(void)
@@ -396,9 +402,9 @@ static void open_selected(void)
         }
     } else if (g_items[g_sel].d_type == S_IFDIR) {
         launch(app_path("Files"), full);
-    } else if (ends_elf(full)) {
+    } else if (is_program(full)) {
         launch(full, 0);
-    } else if (bundle_for_document("/Apps", full, &b) == 0) {
+    } else if (bundle_for_document(PATH_APPS, full, &b) == 0) {
         /* Whichever application claims this kind, rather than a name written
          * into the desktop. */
         char exec[256];

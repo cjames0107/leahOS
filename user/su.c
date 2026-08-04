@@ -65,7 +65,7 @@ int main(int argc, char** argv)
         printf("su: no home directory %s\n", home);
 
     char* sh[] = { "sh", 0 };
-    execve("/BIN/SH.ELF", sh, 0);
+    execve("/bin/sh", sh, 0);
     printf("su: could not start a shell\n");
     return 1;
 }

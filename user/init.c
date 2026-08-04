@@ -106,22 +106,22 @@ int main(void)
 {
     splash_open();
 
-    start("/BIN/E1000D.ELF", "e1000d", IPC_PORT_NIC);
-    start("/BIN/NETD.ELF", "netd", IPC_PORT_NET);
-    start("/BIN/AUDIOD.ELF", "audiod", IPC_PORT_AUDIO);
-    start("/BIN/AUTHD.ELF", "authd", IPC_PORT_AUTH);
+    start("/sbin/e1000d", "e1000d", IPC_PORT_NIC);
+    start("/sbin/netd", "netd", IPC_PORT_NET);
+    start("/sbin/audiod", "audiod", IPC_PORT_AUDIO);
+    start("/sbin/authd", "authd", IPC_PORT_AUTH);
     /* Input before login, or there is nothing to type the password with. Both
      * of these are keyboards; whichever the machine has is the one that
      * answers. */
-    start("/BIN/PS2D.ELF", "ps2d", IPC_PORT_PS2);
-    start("/BIN/USBD.ELF", "usbd", IPC_PORT_USB);
+    start("/sbin/ps2d", "ps2d", IPC_PORT_PS2);
+    start("/sbin/usbd", "usbd", IPC_PORT_USB);
 
     splash_progress("starting login");
 
     // login owns the screen from here: it authenticates, starts a shell as
     // whoever logged in, and comes back to its prompt when that shell exits.
     char* login_args[] = { "login", 0 };
-    execve("/BIN/LOGIN.ELF", login_args, 0);
+    execve("/sbin/login", login_args, 0);
 
     printf("init: could not launch login\n");
     return 1;

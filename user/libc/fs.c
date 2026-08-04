@@ -44,6 +44,22 @@
 #define K_NONE   0
 #define K_KERNEL 1
 #define K_FILE   2
+/*   K_DEVICE - one of the entries in /dev. They are answered here rather than
+ *   by vfsd because that is the server for a disk, and none of these is on a
+ *   disk: /dev/null is a rule, and /dev/tty is a fact about *this process* -
+ *   which terminal it belongs to - that a filesystem server has no way to
+ *   know. Path resolution and the descriptor table already live in libc, and
+ *   this is the same job.
+ *
+ *   The entries exist on disk too, as empty files, so that ls /dev shows them
+ *   and a path that names one is not a lie. Opening one never reaches them. */
+#define K_DEVICE 3
+
+#define DEV_NULL    1
+#define DEV_ZERO    2
+#define DEV_FULL    3
+#define DEV_TTY     4
+#define DEV_CONSOLE 5
 
 struct entry {
     unsigned char kind;
@@ -189,9 +205,17 @@ void __fd_resolve(const char* path, char* out)
 
 struct saved {
     unsigned     magic;
+    int          tty;                   /* the controlling terminal, or -1 */
     char         cwd[PATH_MAX];
     struct entry fds[FD_MAX];
 };
+
+/* Which descriptor is the terminal this process is attached to. Not stdin:
+ * stdin is redirected all the time, and `something | less` is exactly the case
+ * where the two differ and where the difference matters. Set once by whoever
+ * creates the terminal and inherited from there down, through fork and through
+ * execve, on the same shared page as everything else here. */
+static int g_tty = -1;
 
 static void start(void)
 {
@@ -208,6 +232,7 @@ static void start(void)
     if (s != 0 && s->magic == SAVED_MAGIC) {
         memcpy(g_fds, s->fds, sizeof(g_fds));
         memcpy(g_cwd, s->cwd, sizeof(g_cwd));
+        g_tty = s->tty;
         s->magic = 0;           /* once: a later process must not inherit it */
         shm_destroy(id);
         return;
@@ -236,6 +261,7 @@ void __fd_save_for_exec(void)
         return;
     memcpy(s->fds, g_fds, sizeof(g_fds));
     memcpy(s->cwd, g_cwd, sizeof(g_cwd));
+    s->tty = g_tty;
     s->magic = SAVED_MAGIC;
 }
 
@@ -282,15 +308,54 @@ static int permitted_stat(unsigned mode, unsigned uid, unsigned gid, int want_wr
 
 /* --- the calls ---------------------------------------------------------------- */
 
+/* Which device a resolved path names, or 0 for none. */
+static int device_of(const char* resolved)
+{
+    if (strcmp(resolved, "/dev/null") == 0)    return DEV_NULL;
+    if (strcmp(resolved, "/dev/zero") == 0)    return DEV_ZERO;
+    if (strcmp(resolved, "/dev/full") == 0)    return DEV_FULL;
+    if (strcmp(resolved, "/dev/tty") == 0)     return DEV_TTY;
+    if (strcmp(resolved, "/dev/console") == 0) return DEV_CONSOLE;
+    return 0;
+}
+
+int tty_fd(void)
+{
+    start();
+    return g_tty;
+}
+
+void tty_set(int fd)
+{
+    start();
+    g_tty = fd;
+}
+
 int open(const char* path, int flags)
 {
     char resolved[PATH_MAX];
     struct ipc_message a;
-    int fd, exists, is_dir = 0;
+    int fd, exists, is_dir = 0, device;
     long size = 0;
 
     start();
     __fd_resolve(path, resolved);
+
+    device = device_of(resolved);
+    if (device != 0) {
+        /* /dev/tty is the one that can fail: a process with no terminal has
+         * none to open, and saying so lets the caller do something else. */
+        if (device == DEV_TTY && g_tty < 0)
+            return -1;
+        fd = alloc_fd();
+        if (fd < 0)
+            return -1;
+        g_fds[fd].kind  = K_DEVICE;
+        g_fds[fd].kfd   = device;
+        g_fds[fd].flags = (unsigned)flags;
+        g_fds[fd].offset = 0;
+        return fd;
+    }
 
     exists = vfs_call(VFS_STAT, resolved, 0, 0, &a) == 0 && a.word[0] >= 0;
     if (exists) {
@@ -356,6 +421,22 @@ long read(int fd, void* buffer, unsigned long count)
     e = &g_fds[fd];
     if (e->kind == K_KERNEL)
         return __syscall(SYS_read, e->kfd, (long)buffer, (long)count, 0, 0);
+    if (e->kind == K_DEVICE) {
+        switch (e->kfd) {
+        case DEV_NULL:
+        case DEV_FULL:
+            return 0;                   /* immediately at the end */
+        case DEV_ZERO:
+            memset(buffer, 0, count);
+            return (long)count;
+        case DEV_TTY:
+            /* Forwarded rather than duplicated: the terminal is a descriptor
+             * this process already holds, and reading it here is reading it. */
+            return (g_tty >= 0) ? read(g_tty, buffer, count) : -1;
+        default:
+            return __syscall(SYS_read, 0, (long)buffer, (long)count, 0, 0);
+        }
+    }
 
     while ((unsigned long)done < count) {
         unsigned long want = count - (unsigned long)done;
@@ -388,6 +469,19 @@ long write(int fd, const void* buffer, unsigned long count)
     e = &g_fds[fd];
     if (e->kind == K_KERNEL)
         return __syscall(SYS_write, e->kfd, (long)buffer, (long)count, 0, 0);
+    if (e->kind == K_DEVICE) {
+        switch (e->kfd) {
+        case DEV_NULL:
+        case DEV_ZERO:
+            return (long)count;         /* accepted and discarded */
+        case DEV_FULL:
+            return -1;                  /* the point of it: always full */
+        case DEV_TTY:
+            return (g_tty >= 0) ? write(g_tty, buffer, count) : -1;
+        default:
+            return __syscall(SYS_write, 1, (long)buffer, (long)count, 0, 0);
+        }
+    }
 
     /* The buffer has to exist before anything is copied into it. read() gets
      * away without this because it copies out *after* the call that maps it;
@@ -478,7 +572,7 @@ int getdents(const char* path, struct dirent* buffer, int max)
             break;
         buffer[n].d_type = a.word[0] == VFS_KIND_DIR ? S_IFDIR : S_IFREG;
         buffer[n].d_size = (uint64_t)a.word[1];
-        buffer[n].d_reserved = 0;
+        buffer[n].d_mode = (unsigned)a.word[2];
         ++n;
     }
     return n;
@@ -624,4 +718,19 @@ int dup2(int oldfd, int newfd)
 void* sbrk(long increment)
 {
     return (void*)__syscall(SYS_sbrk, increment, 0, 0, 0, 0);
+}
+
+/* The lowest free descriptor pointing at the same thing, which is what dup has
+ * always meant. Used to give a terminal a second number that redirection will
+ * not move. */
+int dup(int oldfd)
+{
+    start();
+    if (!valid(oldfd))
+        return -1;
+    const int fd = alloc_fd();
+    if (fd < 0)
+        return -1;
+    g_fds[fd] = g_fds[oldfd];
+    return fd;
 }

@@ -6,7 +6,7 @@
 #   mkext.sh <out.img> <size-mib> [DEST=SRC ...]
 #
 # Each DEST=SRC places host file SRC at path DEST inside the image (DEST may name
-# a subdirectory, e.g. BIN/INIT.ELF). The feature set is deliberately tamed - no
+# a subdirectory, e.g. sbin/init). The feature set is deliberately tamed - no
 # metadata_csum, 64bit or dir_index - so the kernel's writer can keep the volume
 # e2fsck-clean without computing checksums, 64-bit group descriptors or an HTree
 # index. Extents and the journal stay on, so it is a genuine ext4 volume.
@@ -31,17 +31,37 @@ fi
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 
-# Fixed files the kernel self-test reads. readme.md is deliberately larger than
-# one 4 KiB block so reading it exercises multi-block mapping (an extent that
-# spans several blocks), mirroring the FAT32 image's cluster-chain file.
+# The Filesystem Hierarchy Standard, as much of it as means anything here.
 #
-# They live under /docs rather than in the root: the root is for what a person
-# put there, and two test fixtures sitting in it were the first thing anyone saw
-# when they opened the file browser. Moving them meant moving the paths the
-# kernel checks, which is the whole reason they had been left where they were.
-mkdir -p "$STAGING/BIN" "$STAGING/docs"
+# Every directory the standard calls for is created even when this system has
+# nothing to put in it yet, because an empty /srv is a place for the next
+# person to put something and a missing one is a decision they have to make
+# again. The exceptions are noted where they are made.
+mkdir -p "$STAGING/bin" "$STAGING/sbin" "$STAGING/etc" "$STAGING/dev" \
+         "$STAGING/boot" "$STAGING/lib" "$STAGING/media" "$STAGING/mnt" \
+         "$STAGING/opt" "$STAGING/srv" "$STAGING/run" "$STAGING/tmp" \
+         "$STAGING/proc" "$STAGING/sys" \
+         "$STAGING/usr/bin" "$STAGING/usr/sbin" "$STAGING/usr/lib" \
+         "$STAGING/usr/include" "$STAGING/usr/src" "$STAGING/usr/local/bin" \
+         "$STAGING/usr/local/lib" "$STAGING/usr/local/share" \
+         "$STAGING/usr/share/doc" "$STAGING/usr/share/icons" \
+         "$STAGING/usr/share/wallpapers" "$STAGING/usr/share/demos" \
+         "$STAGING/var/log" "$STAGING/var/tmp" "$STAGING/var/cache" \
+         "$STAGING/var/lib" "$STAGING/var/spool"
 
-# Application bundles. A .app is a directory that carries its own description,
+# /proc and /sys hold what the kernel says about itself, and this kernel says
+# nothing yet - there is no procfs. They are made so the mount points exist and
+# so that nobody has to invent a different name later.
+
+# /dev. The entries are empty files: what they do lives in libc, which is
+# already where path resolution and the descriptor table are, and which is the
+# only thing that can know which terminal a process belongs to. They are on
+# disk so that ls /dev lists them and a path naming one is not a fiction.
+for node in null zero full tty console; do
+    : > "$STAGING/dev/$node"
+    chmod 666 "$STAGING/dev/$node"
+done
+
 # Application bundles. A .app is a directory that carries its own description,
 # so nothing else needs a built-in table of which program opens what - see
 # user/libc/include/bundle.h. They are staged here rather than assembled at
@@ -55,7 +75,7 @@ mkdir -p "$STAGING/BIN" "$STAGING/docs"
 #   stage_bundle <Name> <src.elf> <icon> <opens> <menu...>
 stage_bundle() {
     local app="$1"; local src="$2"; local icon="$3"; local opens="$4"; shift 4
-    local dir="$STAGING/Apps/$app.app"
+    local dir="$STAGING/opt/$app.app"
     local exe
     exe="$(basename "$src")"
     mkdir -p "$dir"
@@ -78,15 +98,15 @@ stage_bundle() {
     fi
 }
 
-printf 'Hello from ext4.\n' > "$STAGING/docs/hello.txt"
-printf 'Notes live in a subdirectory.\n' > "$STAGING/docs/notes.txt"
+printf 'Hello from ext4.\n' > "$STAGING/usr/share/doc/hello.txt"
+printf 'Notes live in a subdirectory.\n' > "$STAGING/usr/share/doc/notes.txt"
 {
     printf '# leahOS\n\n'
     for _ in $(seq 1 120); do
         printf 'leahOS reads this file back through the ext driver, block by block. '
     done
     printf '\n'
-} > "$STAGING/docs/readme.md"
+} > "$STAGING/usr/share/doc/readme.md"
 
 # Accounts, home directories and the shadow file.
 python3 "$(dirname "$0")/mkaccounts.py" "$STAGING"
@@ -97,11 +117,14 @@ for pair in "$@"; do
     src="${pair#*=}"
     mkdir -p "$STAGING/$(dirname "$dest")"
     cp "$src" "$STAGING/$dest"
+    # The execute bits are how the system tells a program from a document now
+    # that there is no .ELF on the end to look at.
+    chmod 755 "$STAGING/$dest"
 done
 
 # Every application, as a complete bundle. The binaries come straight from the
-# build rather than from the staged /BIN, because these deliberately do not go
-# into /BIN at all - see APP_PROGRAMS in the Makefile.
+# build rather than from the staged command directories, because these
+# deliberately do not go on the command path at all - see the Makefile.
 #
 # The table is here rather than in the Makefile because everything on a line is
 # a fact about the application: what it is called, what it opens, and what it
@@ -128,8 +151,7 @@ stage_app Music     player   ""         ".WAV .MP3 .OGG" "Open sound..."
 # converts them at build time, because img_read_png inflates a real deflate
 # stream now and can simply read them.
 if [ -d media/icons ]; then
-    mkdir -p "$STAGING/share/icons"
-    cp media/icons/*.png "$STAGING/share/icons/"
+    cp media/icons/*.png "$STAGING/usr/share/icons/"
 fi
 
 # The photographs and the music, which do need converting - JPEG and MP3 are
@@ -141,19 +163,17 @@ fi
 # somebody opening the file browser will actually find them.
 MEDIA_DIR="${MEDIA_DIR:-build/media}"
 if [ -d "$MEDIA_DIR/wallpapers" ]; then
-    mkdir -p "$STAGING/share/wallpapers"
-    cp "$MEDIA_DIR"/wallpapers/*.PNG "$STAGING/share/wallpapers/" 2>/dev/null || true
+    cp "$MEDIA_DIR"/wallpapers/*.png "$STAGING/usr/share/wallpapers/" 2>/dev/null || true
 fi
 # A gzip file and a tar, so gunzip and tar have something real to be pointed
 # at from inside the system rather than only in a test harness.
 if [ -d "$MEDIA_DIR/testkit" ]; then
-    mkdir -p "$STAGING/docs"
-    cp "$MEDIA_DIR"/testkit/* "$STAGING/docs/" 2>/dev/null || true
+    cp "$MEDIA_DIR"/testkit/* "$STAGING/usr/share/doc/" 2>/dev/null || true
 fi
 if [ -d "$MEDIA_DIR/demos" ]; then
-    mkdir -p "$STAGING/Demos/Images" "$STAGING/Demos/Audio"
-    cp "$MEDIA_DIR"/demos/images/*.PNG "$STAGING/Demos/Images/" 2>/dev/null || true
-    cp "$MEDIA_DIR"/demos/audio/*.WAV "$STAGING/Demos/Audio/" 2>/dev/null || true
+    mkdir -p "$STAGING/usr/share/demos/images" "$STAGING/usr/share/demos/audio"
+    cp "$MEDIA_DIR"/demos/images/*.png "$STAGING/usr/share/demos/images/" 2>/dev/null || true
+    cp "$MEDIA_DIR"/demos/audio/*.wav "$STAGING/usr/share/demos/audio/" 2>/dev/null || true
 fi
 
 # A desktop with three things on it, for every account that has one. An empty
@@ -170,9 +190,9 @@ stage_desktop() {                   # <home>
     # needs explaining: it is the one other people may look in.
     mkdir -p "$STAGING/$home/Desktop" "$STAGING/$home/Documents" \
              "$STAGING/$home/Apps" "$STAGING/$home/Public"
-    printf '/Apps/Files.app\n' > "$STAGING/$home/Desktop/Files.alias"
-    printf '/Apps/Edit.app\n'  > "$STAGING/$home/Desktop/Notepad.alias"
-    printf '/docs/readme.md\n' > "$STAGING/$home/Desktop/Readme.alias"
+    printf '/opt/Files.app\n' > "$STAGING/$home/Desktop/Files.alias"
+    printf '/opt/Edit.app\n'  > "$STAGING/$home/Desktop/Notepad.alias"
+    printf '/usr/share/doc/readme.md\n' > "$STAGING/$home/Desktop/Readme.alias"
 }
 stage_desktop root
 stage_desktop home/leah

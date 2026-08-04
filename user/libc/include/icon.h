@@ -34,8 +34,10 @@ const uint32_t* icon_by_path(const char* path);
  * caller already knows; the name decides the rest, by extension. An
  * application's own icon comes from its bundle, so `dir_path` is the directory
  * the entry lives in - pass 0 if it is not to hand, and a generic application
- * icon comes back instead. */
+ * icon comes back instead. `mode` is the permission bits: a file that may be
+ * executed is a program, which is how that is decided now rather than by
+ * looking for a suffix on the name. */
 const uint32_t* icon_for_entry(const char* dir_path, const char* name,
-                               int is_dir, int is_app);
+                               int is_dir, int is_app, unsigned mode);
 
 #endif /* _ICON_H */

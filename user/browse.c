@@ -7,12 +7,13 @@
  *
  * Opening something is the same gesture in all three: click to select, click
  * the selected thing again - or press Return - to open it. A directory is
- * entered; a .ELF is run; anything else is handed to the text editor. That last
+ * entered; a program is run; anything else is handed to the text editor. That last
  * rule is the whole of the "document" story, and it is deliberately a rule
  * about the name rather than about the contents, because there is nothing in
  * the filesystem that records a type.
  */
 
+#include <paths.h>
 #include <bundle.h>
 #include <icon.h>
 #include <clipboard.h>
@@ -156,22 +157,6 @@ static void parent_of(const char* path, char* out, int max)
     out[n] = '\0';
 }
 
-/* Case-insensitive suffix test, because the FAT names are upper case and the
- * ext ones are not. */
-static int ends_with(const char* s, const char* suffix)
-{
-    const int ls = (int)strlen(s), lx = (int)strlen(suffix);
-    if (lx > ls)
-        return 0;
-    for (int i = 0; i < lx; ++i) {
-        char a = s[ls - lx + i], b = suffix[i];
-        if (a >= 'a' && a <= 'z') a = (char)(a - 32);
-        if (b >= 'a' && b <= 'z') b = (char)(b - 32);
-        if (a != b)
-            return 0;
-    }
-    return 1;
-}
 
 /* --- reading the filesystem ---------------------------------------------- */
 
@@ -301,7 +286,8 @@ static void entry_icon(int x, int y, int i, int size)
 {
     const int app = bundle_is_app(g_entries[i].d_name);
     const uint32_t* px = icon_for_entry(g_path, g_entries[i].d_name,
-                                        g_entries[i].d_type == S_IFDIR, app);
+                                        g_entries[i].d_type == S_IFDIR, app,
+                                        g_entries[i].d_mode);
     wg_icon_scaled(x, y, px, ICON_SIZE, ICON_SIZE, size, size);
 }
 
@@ -479,8 +465,7 @@ static void draw_list(void)
         wg_text(400, y + 1,
                 bundle_is_app(g_entries[i].d_name) ? "application"
                     : dir ? "folder"
-                    : (ends_with(g_entries[i].d_name, ".ELF") ? "program"
-                                                              : "document"),
+                    : (S_ISEXEC(g_entries[i].d_mode) ? "program" : "document"),
                 WG_INK);
     }
 }
@@ -680,7 +665,7 @@ static void open_path(const char* path, int is_dir)
     const char* known = remembered(g_opening);
     if (known == 0) {
         struct bundle b;
-        if (bundle_for_document("/Apps", g_opening, &b) == 0) {
+        if (bundle_for_document(PATH_APPS, g_opening, &b) == 0) {
             char exec[256];
             bundle_exec(&b, exec, sizeof(exec));
             launch(exec, g_opening);

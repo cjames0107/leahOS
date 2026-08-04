@@ -1,10 +1,18 @@
-/* less - read a file a screenful at a time.
+/* less - read text a screenful at a time.
  *
- * A pager needs two things at once: the text on its output, and keystrokes
- * from the person reading it. There is no /dev/tty here to open separately, so
- * this reads keys from standard input - which means it pages a *file*, named
- * on the command line, and cannot page a pipe. `foo | less` would have the
- * pipe where the keyboard should be.
+ * A pager needs two things at once: the text on its input, and keystrokes from
+ * the person reading it. Those are different streams, and in `something |
+ * less` they have to be - standard input is the pipe, so the keyboard has to
+ * come from somewhere else.
+ *
+ * That somewhere is /dev/tty: the terminal this process belongs to, whatever
+ * its standard input has been redirected to. The terminal marks one when it
+ * starts the shell, and it is inherited from there down through every fork and
+ * exec, which is what makes a pipeline work.
+ *
+ * With no terminal at all - piped into a file, say - there is nobody to press
+ * a key, so the text is simply written out. That is what a pager should do
+ * when it is not talking to a person.
  *
  * The screen size is not something a program can ask for on this system, so it
  * is the terminal's 80x24 unless -N says otherwise.
@@ -77,32 +85,45 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; ++i) {
         if (argv[i][0] == '-' && argv[i][1] == 'N' && i + 1 < argc)
             g_rows = atoi_simple(argv[++i]) - 1;
-        else
+        else if (argv[i][0] != '-')
             path = argv[i];
-    }
-    if (path == 0) {
-        printf("usage: less [-N rows] <file>\n");
-        printf("  a file, not a pipe: the keyboard is on standard input\n");
-        return 2;
     }
     if (g_rows < 2)
         g_rows = 23;
 
-    const int fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        printf("less: %s: cannot open\n", path);
-        return 1;
+    /* A named file, or whatever is on standard input. */
+    const char* name = path ? path : "(standard input)";
+    if (path != 0) {
+        const int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            printf("less: %s: cannot open\n", path);
+            return 1;
+        }
+        load(fd);
+        close(fd);
+    } else {
+        load(0);
     }
-    load(fd);
-    close(fd);
     if (g_truncated)
         printf("less: showing the first %d lines only\n", g_count);
 
+    /* Keys come from the terminal, not from standard input, which may well be
+     * the pipe the text arrived on. */
+    int keys = open("/dev/tty", O_RDONLY);
+    if (keys < 0 && path != 0)
+        keys = 0;               /* no terminal, but stdin is free: use it */
+    if (keys < 0) {
+        /* Nothing to read keys from and nothing to page for. Write it out. */
+        for (int i = 0; i < g_count; ++i)
+            printf("%s\n", g_line[i]);
+        return 0;
+    }
+
     int top = 0;
-    show(top, path);
+    show(top, name);
     for (;;) {
         char key;
-        if (read(0, &key, 1) != 1)
+        if (read(keys, &key, 1) != 1)
             break;
         if (key == 'q' || key == 'Q')
             break;
@@ -117,7 +138,7 @@ int main(int argc, char** argv)
         if (top > g_count - g_rows) top = g_count - g_rows;
         if (top < 0) top = 0;
         printf("\n");
-        show(top, path);
+        show(top, name);
     }
     printf("\n");
     return 0;

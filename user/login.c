@@ -60,7 +60,7 @@ static void session(void)
         char* browse[] = { "browse", "40", "40", 0 };
         char* term[]   = { "term", "60", "300", 0 };
         char* setts[]  = { "settings", "380", "60", 0 };
-        const char* which[] = { "/BIN/DESKTOP.ELF", app_path("Files"),
+        const char* which[] = { "/sbin/desktop", app_path("Files"),
                                 app_path("Terminal"), app_path("Settings") };
         char** argv[] = { desk, browse, term, setts };
         int started = 0;
@@ -79,7 +79,7 @@ static void session(void)
 
     /* The desktop is gone and the console is back. */
     char* sh[] = { "sh", 0 };
-    execve("/BIN/SH.ELF", sh, 0);
+    execve("/bin/sh", sh, 0);
     printf("login: cannot start a shell\n");
 }
 
@@ -321,7 +321,7 @@ int main(void)
         const int server = fork();
         if (server == 0) {
             char* args[] = { "wserver", 0 };
-            execve("/BIN/WSERVER.ELF", args, 0);
+            execve("/sbin/wserver", args, 0);
             exit(127);
         }
         if (server > 0) {

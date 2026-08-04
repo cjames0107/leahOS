@@ -1,13 +1,15 @@
 /* leahOS shell.
  *
  * A read-eval loop: read a line, tokenise it, handle a couple of builtins, and
- * otherwise fork and exec /BIN/<COMMAND>.ELF. It also does the two things that
+ * otherwise fork and exec whatever the name finds along the command path. It
+ * also does the two things that
  * make a shell feel like a shell - redirection (<, >, >>) and a pipe (|) - by
  * wiring up file descriptors with dup2 before the exec. Operators must be
  * surrounded by spaces (ls / | cat, echo hi > f), which keeps the tokeniser
  * trivial.
  */
 
+#include <paths.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,26 +49,11 @@ static int read_line(char* buffer, int max)
     return n;
 }
 
-/* /BIN/<COMMAND>.ELF, upper-cased for FAT's 8.3 names. */
-static void command_path(const char* name, char* out)
-{
-    const char* prefix = "/BIN/";
-    int i = 0;
-    while (prefix[i] != '\0') {
-        out[i] = prefix[i];
-        ++i;
-    }
-    for (const char* c = name; *c != '\0' && i < 120; ++c) {
-        char ch = *c;
-        if (ch >= 'a' && ch <= 'z')
-            ch = (char)(ch - 32);
-        out[i++] = ch;
-    }
-    const char* suffix = ".ELF";
-    for (int j = 0; suffix[j] != '\0'; ++j)
-        out[i++] = suffix[j];
-    out[i] = '\0';
-}
+/* Where a command's program is. Searched along the standard directories by
+ * libc rather than built here: this used to be "/BIN/" plus the name in
+ * capitals plus ".ELF", which was the shape of a FAT filesystem that has not
+ * been readable by this system for a long time, and it meant a program could
+ * only ever live in one place. */
 
 /* Pull the redirection operators out of a token range, leaving a clean argv. */
 static void parse(char** tokens, int start, int end, char** argv,
@@ -113,10 +100,13 @@ static _Noreturn void child(char** argv, char* infile, char* outfile, int append
         dup2(fd, 1);
         close(fd);
     }
-    char path[128];
-    command_path(argv[0], path);
+    char path[256];
+    if (path_find_program(argv[0], path, sizeof(path)) != 0) {
+        printf("%s: command not found\n", argv[0]);
+        exit(127);
+    }
     execve(path, argv, 0);
-    printf("%s: command not found\n", argv[0]);
+    printf("%s: cannot run\n", argv[0]);
     exit(127);
 }
 
@@ -145,7 +135,8 @@ int main(void)
         if (strcmp(tokens[0], "exit") == 0 || strcmp(tokens[0], "logout") == 0)
             break;
         if (strcmp(tokens[0], "help") == 0) {
-            printf("builtins: cd exit logout help. commands run from /BIN.\n");
+            printf("builtins: cd exit logout help. commands come from /bin, "
+                   "/sbin and /usr/bin.\n");
             printf("redirection: < > >>, pipe: |  (spaces around operators)\n");
             continue;
         }

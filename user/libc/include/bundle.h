@@ -11,7 +11,7 @@
  *         paint.elf       the program
  *         Icon.png        optional, 32x32
  *
- * The point is that an application stops being "a binary in /BIN plus rules
+ * The point is that an application stops being "a binary on the path plus rules
  * scattered through whoever launches it". A file browser needed a hardcoded
  * list of which programs open which documents, and a context menu had to be
  * written into every client; both of those belong to the application, and now
@@ -32,6 +32,8 @@
  * in a right-click menu, which is how a bundle extends the shell rather than
  * the shell enumerating bundles.
  */
+
+#include <paths.h>
 
 #define BUNDLE_MAX_MENU 6
 #define BUNDLE_MAX_EXT  8
@@ -61,11 +63,14 @@ void bundle_exec(const struct bundle* b, char* out, int max);
 
 /* Where the system's applications live. A single place, so that "which
  * application is called Edit" has one answer rather than one per caller. */
-#define BUNDLE_DIR "/Apps"
+/* Where application bundles live. PATH_APPS is /opt, which is what the FHS
+ * reserves for add-on software packages each in its own directory - which is
+ * exactly what a .app is. */
+#define BUNDLE_DIR PATH_APPS
 
 /* The bundle named `name` (its Info `name`, or its directory), or -1. This is
  * how one application launches another without knowing a path: nothing outside
- * a bundle should contain the string "/BIN/EDIT.ELF" again. */
+ * a bundle should contain a path to another program again. */
 int bundle_find(const char* name, struct bundle* out);
 
 /* Load a bundle and hand back the command to run, in one step. Returns 0. */
@@ -79,7 +84,7 @@ int bundle_command(const char* name, char* out, int max);
 const char* app_path(const char* name);
 
 /* The bundle in `dir` that claims `document`'s extension, or -1. `dir` is
- * searched for .app directories - normally /Apps. */
+ * searched for .app directories - normally /opt. */
 int bundle_for_document(const char* dir, const char* document,
                         struct bundle* out);
 
