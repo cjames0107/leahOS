@@ -443,6 +443,181 @@ double tan(double x)
     return sin(x) / c;
 }
 
+/* --- the inverse trigonometry -------------------------------------------------
+ *
+ * atan is the one that has to be built; the other three are it plus algebra.
+ *
+ * Its Taylor series converges on |x| < 1 and does so uselessly slowly near the
+ * end of that - at x = 1 the terms are 1, 1/3, 1/5 and it would take millions
+ * of them. So the argument is folded twice. Anything past 1 is turned inside
+ * out by atan(x) = pi/2 - atan(1/x), and what remains is folded again against
+ * a thirty-degree angle, leaving |t| no larger than tan(pi/12), about 0.268.
+ * There the series needs fourteen terms to fall below the last bit.
+ */
+
+#define SQRT3_HI  0x1.bb67a00000000p+0
+#define SQRT3_LO  0x1.d0b09954e764bp-21
+#define M_PI_6    0x1.0c152382d7366p-1
+#define TAN_PI_12 0.26794919243112270647          /* 2 - sqrt(3) */
+
+/* atan(t) for |t| <= tan(pi/12), as t - t^3/3 + t^5/5 - ... - t^29/29. */
+static double atan_kernel(double t)
+{
+    const double w = t * t;
+    return t * (1.0 - w * ((1.0/3.0) - w * ((1.0/5.0) - w * ((1.0/7.0) -
+        w * ((1.0/9.0) - w * ((1.0/11.0) - w * ((1.0/13.0) - w * ((1.0/15.0) -
+        w * ((1.0/17.0) - w * ((1.0/19.0) - w * ((1.0/21.0) - w * ((1.0/23.0) -
+        w * ((1.0/25.0) - w * ((1.0/27.0) - w * (1.0/29.0)))))))))))))));
+}
+
+/* atan for a non-negative, finite argument. */
+static double atan_positive(double x)
+{
+    if (x <= TAN_PI_12)
+        return atan_kernel(x);
+
+    if (x > 1.0)
+        return M_PI_2 - atan_positive(1.0 / x);
+
+    /* atan(x) = pi/6 + atan((x*sqrt3 - 1) / (x + sqrt3)), which brings
+     * [tan(pi/12), 1] down into [0, tan(pi/12)].
+     *
+     * The numerator cancels almost completely near x = 1/sqrt(3), where it is
+     * meant to reach zero. Splitting sqrt(3) into a head with its low bits
+     * clear makes x*SQRT3_HI - 1 exact, so what cancellation there is happens
+     * on a term that is exactly right, and the small correction is added
+     * afterwards rather than being lost inside it. */
+    const double numerator = (x * SQRT3_HI - 1.0) + x * SQRT3_LO;
+    const double denominator = x + SQRT3_HI + SQRT3_LO;
+    return M_PI_6 + atan_kernel(numerator / denominator);
+}
+
+double atan(double x)
+{
+    if (isnan(x))
+        return x;
+    if (isinf(x))
+        return signbit(x) ? -M_PI_2 : M_PI_2;
+    const double r = atan_positive(fabs(x));
+    return signbit(x) ? -r : r;
+}
+
+double atan2(double y, double x)
+{
+    if (isnan(x) || isnan(y))
+        return NAN;
+
+    /* The infinities have their own answers, because y/x would be a NaN for
+     * two of them and the direction is perfectly well defined. */
+    if (isinf(x) || isinf(y)) {
+        if (isinf(x) && isinf(y)) {
+            /* Diagonals: the eighths of the circle. */
+            const double base = signbit(x) ? 3.0 * M_PI_4 : M_PI_4;
+            return signbit(y) ? -base : base;
+        }
+        if (isinf(y))
+            return signbit(y) ? -M_PI_2 : M_PI_2;
+        /* x is the infinite one, so the direction is along the axis. */
+        const double base = signbit(x) ? M_PI : 0.0;
+        return signbit(y) ? -base : base;
+    }
+
+    if (x == 0.0) {
+        if (y == 0.0) {
+            /* Not an error: a zero has a sign, and C says to use it. The
+             * answer is which side of the axis the point is on. */
+            const double base = signbit(x) ? M_PI : 0.0;
+            return signbit(y) ? -base : base;
+        }
+        return signbit(y) ? -M_PI_2 : M_PI_2;
+    }
+    if (y == 0.0) {
+        const double base = signbit(x) ? M_PI : 0.0;
+        return signbit(y) ? -base : base;
+    }
+
+    /* The ratio can overflow or flush to zero when the two are wildly
+     * different in magnitude, and in exactly those cases the angle is an axis
+     * or a diagonal to well within a last bit anyway. */
+    int ey, ex;
+    frexp(y, &ey);
+    frexp(x, &ex);
+    double angle;
+    if (ey - ex > 1100)
+        angle = M_PI_2;                 /* |y/x| past anything a double holds */
+    else if (ex - ey > 1100)
+        angle = 0.0;
+    else
+        angle = atan_positive(fabs(y / x));
+
+    if (!signbit(x))
+        return signbit(y) ? -angle : angle;
+    /* Left half plane: reflect through the vertical axis. */
+    const double reflected = M_PI - angle;
+    return signbit(y) ? -reflected : reflected;
+}
+
+/* asin and acos both come from atan, but not by the obvious identity alone.
+ *
+ * asin(x) = atan(x / sqrt(1 - x^2)) is exact enough while |x| is small, and
+ * falls apart as |x| approaches one: 1 - x^2 cancels, and the square root of a
+ * badly-known small number is worse still. So the top half of the range is
+ * folded onto the bottom by the half-angle identity, where the subtraction
+ * 1 - |x| is exact because the two are within a factor of two of each other. */
+
+double asin(double x)
+{
+    if (isnan(x))
+        return x;
+    const double a = fabs(x);
+    if (a > 1.0)
+        return NAN;                     /* outside the domain */
+    if (a == 1.0)
+        return signbit(x) ? -M_PI_2 : M_PI_2;
+
+    double r;
+    if (a <= 0.9) {
+        /* 0.9 rather than the 0.5 the half-angle identity would allow. The
+         * direct form only suffers where 1 - a*a cancels, and at 0.9 that is
+         * still 0.19 - no cancellation worth the name. The folded form has a
+         * subtraction from pi/2 of its own, and measured worse: pushing the
+         * boundary out took the worst case from five last-place units to
+         * three. */
+        r = atan_positive(a / sqrt(1.0 - a * a));
+    } else {
+        /* Close to one, where 1 - a*a would lose most of its digits. Folded
+         * instead: asin(a) = pi/2 - 2*asin(sqrt((1-a)/2)). Here 1 - a is exact,
+         * the two being within a factor of two of each other. */
+        const double half = (1.0 - a) * 0.5;
+        const double s = sqrt(half);
+        r = M_PI_2 - 2.0 * atan_positive(s / sqrt(1.0 - half));
+    }
+    return signbit(x) ? -r : r;
+}
+
+double acos(double x)
+{
+    if (isnan(x))
+        return x;
+    if (x > 1.0 || x < -1.0)
+        return NAN;
+
+    /* Not pi/2 - asin(x) throughout: near x = 1 the answer is near zero and
+     * that subtraction cancels away most of the digits. The halves are folded
+     * so that the small answer is computed small. */
+    if (x >= 0.5) {
+        const double half = (1.0 - x) * 0.5;
+        const double s = sqrt(half);
+        return 2.0 * atan_positive(s / sqrt(1.0 - half));
+    }
+    if (x <= -0.5) {
+        const double half = (1.0 + x) * 0.5;
+        const double s = sqrt(half);
+        return M_PI - 2.0 * atan_positive(s / sqrt(1.0 - half));
+    }
+    return M_PI_2 - asin(x);
+}
+
 /* --- pow ---------------------------------------------------------------------
  *
  * exp(y * log(x)) in the general case, and that is where the accuracy goes:

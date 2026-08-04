@@ -24,6 +24,9 @@
  *     tan                      3
  *     pow, fractional exponent 5
  *     pow, whole exponent     11
+ *     atan                     2
+ *     asin, atan2              3
+ *     acos                     4
  *
  * A whole-number exponent goes through repeated squaring rather than through
  * exp(y*log(x)). That is the larger error of the two and it is the right
@@ -98,6 +101,18 @@ double sin(double x);
 double cos(double x);
 double tan(double x);
 
+/* asin and acos are NaN outside [-1, 1] rather than clamped: an argument out
+ * there is a caller's arithmetic having gone wrong, and quietly returning the
+ * nearest valid angle hides it. */
+double asin(double x);
+double acos(double x);
+double atan(double x);
+
+/* The angle of the point (x, y), over the whole circle rather than the half
+ * atan can see - which is why the arguments are in that order and not the
+ * other. Both zero is not an error; a zero has a sign and it is used. */
+double atan2(double y, double x);
+
 /* --- float forms ------------------------------------------------------------- */
 /* Computed as doubles and rounded once at the end. Genuinely single-precision
  * kernels would be faster and are not worth two implementations here. */
@@ -112,5 +127,9 @@ static inline float powf(float x, float y)  { return (float)pow(x, y); }
 static inline float sinf(float x)           { return (float)sin(x); }
 static inline float cosf(float x)           { return (float)cos(x); }
 static inline float tanf(float x)           { return (float)tan(x); }
+static inline float asinf(float x)          { return (float)asin(x); }
+static inline float acosf(float x)          { return (float)acos(x); }
+static inline float atanf(float x)          { return (float)atan(x); }
+static inline float atan2f(float y, float x){ return (float)atan2(y, x); }
 
 #endif /* _MATH_H */

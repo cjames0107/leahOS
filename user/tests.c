@@ -1160,6 +1160,78 @@ static void test_math(void)
             split_ok = 0;
     }
     check("frexp splits and ldexp puts back, exactly", split_ok);
+
+    /* --- the inverse trigonometry --- */
+
+    /* Round trip: taking the angle of a sine has to give the angle back.
+     *
+     * Judged on absolute error, not relative, and that is not a fudge. Where a
+     * round trip passes through a turning point - cos near 0 or pi, sin near
+     * +-pi/2 - the derivative is zero and the angle simply is not recoverable
+     * to full relative precision from the value. cos(0.01) differs from 1 in
+     * the fifth decimal place, so a double leaves about eleven digits of the
+     * angle behind. A known-good libm loses them in exactly the same place;
+     * measured against it, this asked something arithmetic cannot give. */
+    int round_trip = 1;
+    for (int i = -157; i <= 157; ++i) {
+        const double a = (double)i / 100.0;         /* inside +-pi/2 */
+        if (fabs(asin(sin(a)) - a) > 1e-13)
+            round_trip = 0;
+        if (fabs(atan(tan(a)) - a) > 1e-13)
+            round_trip = 0;
+    }
+    check("asin and atan undo sin and tan", round_trip);
+
+    int acos_ok = 1;
+    for (int i = 0; i <= 314; ++i) {
+        const double a = (double)i / 100.0;         /* 0 to pi */
+        if (fabs(acos(cos(a)) - a) > 1e-13)
+            acos_ok = 0;
+    }
+    check("acos undoes cos across half a turn", acos_ok);
+
+    check("the inverse functions hit their end points",
+          asin(1.0) == M_PI_2 && asin(-1.0) == -M_PI_2 &&
+          acos(1.0) == 0.0 && close_to(acos(-1.0), M_PI, 1e-15) &&
+          asin(0.0) == 0.0 && atan(0.0) == 0.0);
+    check("asin and acos refuse arguments outside their domain",
+          isnan(asin(1.5)) && isnan(acos(-2.0)));
+    check("atan of an infinity is a right angle",
+          atan(HUGE_VAL) == M_PI_2 && atan(-HUGE_VAL) == -M_PI_2);
+    check("atan holds up over the whole range",
+          close_to(atan(1.0), M_PI_4, 1e-15) &&
+          close_to(atan(1e300), M_PI_2, 1e-15) &&
+          close_to(atan(1e-300), 1e-300, 1e-15));
+
+    /* atan2 exists to tell apart the quadrants that atan cannot see. */
+    check("atan2 puts each quadrant where it belongs",
+          close_to(atan2(1.0, 1.0), M_PI_4, 1e-15) &&
+          close_to(atan2(1.0, -1.0), 3.0 * M_PI_4, 1e-15) &&
+          close_to(atan2(-1.0, -1.0), -3.0 * M_PI_4, 1e-15) &&
+          close_to(atan2(-1.0, 1.0), -M_PI_4, 1e-15));
+    check("atan2 handles the axes",
+          atan2(0.0, 1.0) == 0.0 && close_to(atan2(0.0, -1.0), M_PI, 1e-15) &&
+          atan2(1.0, 0.0) == M_PI_2 && atan2(-1.0, 0.0) == -M_PI_2);
+    /* A zero has a sign, and atan2 is required to use it. */
+    check("atan2 reads the sign of a zero",
+          atan2(0.0, 0.0) == 0.0 &&
+          close_to(atan2(0.0, -0.0), M_PI, 1e-15) &&
+          signbit(atan2(-0.0, 1.0)));
+    check("atan2 survives arguments of wildly different size",
+          close_to(atan2(1e300, 1.0), M_PI_2, 1e-12) &&
+          fabs(atan2(1.0, 1e300)) < 1e-290);
+
+    /* The identity every one of them has to satisfy at once. */
+    int consistent = 1;
+    for (int i = -99; i <= 99; ++i) {
+        const double v = (double)i / 100.0;
+        if (!close_to(asin(v) + acos(v), M_PI_2, 1e-14))
+            consistent = 0;
+        if (!close_to(atan2(v, 1.0), atan(v), 1e-15))
+            consistent = 0;
+    }
+    check("asin plus acos is a right angle, and atan2 agrees with atan",
+          consistent);
 }
 
 int main(void)
