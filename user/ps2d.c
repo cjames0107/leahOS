@@ -227,6 +227,11 @@ static void handle_scancode(unsigned char scancode)
     }
     if (g_ctrl && c >= 'a' && c <= 'z')      c = (char)(c - 'a' + 1);
     else if (g_ctrl && c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 1);
+    /* The three that are not letters and still mean something. Ctrl-\ is the
+     * quit key, and a terminal wanting to offer it has to be given it. */
+    else if (g_ctrl && c == '[')  c = 0x1B;
+    else if (g_ctrl && c == '\\') c = 0x1C;
+    else if (g_ctrl && c == ']')  c = 0x1D;
 
     post_char(c);
 }

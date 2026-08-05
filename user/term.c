@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <thread.h>
+#include <signal.h>
 #include <unistd.h>
 #include <widget.h>
 #include <window.h>
@@ -73,6 +74,25 @@ static volatile int g_shell_done;
 
 static int g_from_shell;        /* read end of the shell's output */
 static int g_to_shell;          /* write end of the shell's input */
+static int g_shell_pid;
+
+/* --- the keys that are not text -------------------------------------------
+ *
+ * Ctrl-C and its two neighbours do not go down the pipe. They are signals, and
+ * they go to whichever process group the shell has told us is in front - not to
+ * the shell, which is usually sitting in wait() and is not the thing the person
+ * wants to interrupt.
+ *
+ * A real UNIX does this in the tty driver, on the keyboard interrupt. There is
+ * no tty driver here: this program *is* the terminal, so this is where it goes.
+ */
+struct control_key { char ch; int signo; const char* echo; };
+
+static const struct control_key kControlKeys[] = {
+    { 0x03, SIGINT,  "^C" },
+    { 0x1A, SIGTSTP, "^Z" },
+    { 0x1C, SIGQUIT, "^\\" },
+};
 
 /* --- the grid ------------------------------------------------------------ */
 
@@ -270,6 +290,34 @@ static void reader_thread(void* arg)
     g_dirty = 1;
 }
 
+/* Send one to the foreground job, and say so on the screen. True if the key
+ * was one of these and has been dealt with. */
+static int control_key(char ch)
+{
+    for (unsigned i = 0; i < sizeof(kControlKeys) / sizeof(kControlKeys[0]); ++i) {
+        if (kControlKeys[i].ch != ch)
+            continue;
+
+        /* Echoed whether or not anything is listening, because a person who
+         * pressed Ctrl-C wants to see that they did - and if the job has
+         * already finished, seeing nothing at all reads as a stuck terminal. */
+        mutex_lock(&g_lock);
+        follow_bottom();
+        for (const char* e = kControlKeys[i].echo; *e != '\0'; ++e)
+            term_putc(*e);
+        term_putc('\n');
+        mutex_unlock(&g_lock);
+        g_dirty = 1;
+
+        const int fg = (int)tcgetpgrp(0);
+        /* Nothing in front means the shell itself is what is running, and it
+         * is the shell's own group that should hear about it. */
+        kill(-(fg > 0 ? fg : g_shell_pid), kControlKeys[i].signo);
+        return 1;
+    }
+    return 0;
+}
+
 static int start_shell(void)
 {
     int to_shell[2], from_shell[2];
@@ -280,6 +328,11 @@ static int start_shell(void)
         close(to_shell[1]);
         return -1;
     }
+
+    /* Made before the fork, so the shell inherits the key rather than having
+     * to be told it afterwards - by which time it may already have started
+     * something. */
+    tty_control_create();
 
     const int pid = fork();
     if (pid < 0)
@@ -299,6 +352,11 @@ static int start_shell(void)
          * another program. This one is not redirected, is inherited by
          * everything the shell starts, and is what /dev/tty opens. */
         tty_set(dup(0));
+
+        /* Its own session, with this terminal. The shell is the session
+         * leader; every job it starts is a group within that session, and
+         * tcsetpgrp names which of them is in front. */
+        setsid();
 
         /* What this terminal can do, for anything that asks. Modest and
          * honest: no colour, no cursor addressing, 80 by 24. A program that
@@ -324,6 +382,7 @@ static int start_shell(void)
     close(from_shell[1]);
     g_to_shell = to_shell[1];
     g_from_shell = from_shell[0];
+    g_shell_pid = pid;
     return pid;
 }
 
@@ -443,6 +502,16 @@ int main(int argc, char** argv)
             mutex_unlock(&g_lock);
 
             const char ch = (char)event.key;
+
+            /* Before the line editor, because these are not text and must not
+             * be assembled into a line: Ctrl-C during a half-typed command
+             * interrupts the job and throws the half away, which is what
+             * every terminal does and what a person expects. */
+            if (control_key(ch)) {
+                len = 0;
+                continue;
+            }
+
             if (ch == '\n' || ch == '\r') {
                 mutex_lock(&g_lock);
                 term_putc('\n');

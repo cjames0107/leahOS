@@ -52,8 +52,14 @@ i64 pipe_read(Pipe* p, void* buffer, usize count)
         scheduler::block_on(read_channel(p));
         // Woken with a signal waiting - being killed, most likely. Going back
         // to sleep here is how a process ends up impossible to kill.
+        //
+        // Interrupted, though, and said so: this used to be a plain -1, which
+        // libc turned into "read failed" and a shell reading its own terminal
+        // took for end of input. Pressing Ctrl-C at a prompt closed the
+        // terminal, because the shell's read came back looking exactly like
+        // the pipe having been closed.
         if (scheduler::signal_pending())
-            return -1;
+            return kInterrupted;
     }
 }
 
@@ -66,8 +72,10 @@ i64 pipe_write(Pipe* p, const void* buffer, usize count)
             return written > 0 ? static_cast<i64>(written) : -1;   // broken pipe
         if (p->count == Pipe::kSize) {
             scheduler::block_on(write_channel(p));
+            // What did get through still counts; only a write that managed
+            // nothing at all reports the interruption.
             if (scheduler::signal_pending())
-                return written > 0 ? static_cast<i64>(written) : -1;
+                return written > 0 ? static_cast<i64>(written) : kInterrupted;
             continue;
         }
         while (written < count && p->count < Pipe::kSize) {

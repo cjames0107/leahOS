@@ -254,6 +254,39 @@ u64 signal_fpu_slot(u64 context_sp)
 // Called on the way out of every syscall. Takes at most one pending signal per
 // return, which is enough: if more are pending the next return picks up the
 // next one.
+// What a signal means before any context has been saved for it.
+//
+// Both delivery paths below - one for a task caught in a syscall, one for a
+// task caught by an interrupt - have to answer the same question first, and
+// only the answer "run this handler" needs the register-saving that makes the
+// two of them different. Returns the handler to enter, or 0 when the signal has
+// already been dealt with and the caller has nothing left to do.
+u64 disposition_of(int signo)
+{
+    // These two are settled before any disposition is read, because a
+    // disposition is precisely what they are not allowed to have. Whatever a
+    // program has decided about signals, it can still be killed and it can
+    // still be stopped.
+    if (signals::uncatchable(signo)) {
+        if (signo == signals::kSigKill)
+            scheduler::exit_current(signals::kSignalled | signo);
+        scheduler::stop_current(signo);
+        return 0;               // ...and here is where SIGCONT resumes it
+    }
+
+    const u64 handler = scheduler::signal_handler(signo);
+    if (handler == signals::kSigIgnore)
+        return 0;
+    if (handler == signals::kSigDefault) {
+        if (signals::default_kills(signo))
+            scheduler::exit_current(signals::kSignalled | signo);
+        else if (signals::default_stops(signo))
+            scheduler::stop_current(signo);
+        return 0;
+    }
+    return handler;
+}
+
 void handle_pending_signals(Frame* frame)
 {
     if (!scheduler::signal_pending())
@@ -263,16 +296,9 @@ void handle_pending_signals(Frame* frame)
     if (signo == 0)
         return;
 
-    const u64 handler = scheduler::signal_handler(signo);
-    if (handler == signals::kSigIgnore)
+    const u64 handler = disposition_of(signo);
+    if (handler == 0)
         return;
-    if (handler == signals::kSigDefault) {
-        if (signals::default_kills(signo))
-            scheduler::exit_current(128 + signo);
-        return;
-    }
-    if (signo == signals::kSigKill)
-        scheduler::exit_current(128 + signo);
 
     // RCX and R11 are call-clobbered across a syscall by the ABI, so the
     // interrupted code cannot depend on them; everything else is exact.
@@ -293,7 +319,7 @@ void handle_pending_signals(Frame* frame)
     if (!push_signal_frame(saved, new_rsp)) {
         // No way back from the handler: fatal rather than jumping into a
         // handler that can never return.
-        scheduler::exit_current(128 + signo);
+        scheduler::exit_current(signals::kSignalled | signo);
         return;
     }
 
@@ -400,16 +426,9 @@ void deliver_on_interrupt(interrupts::Frame& frame)
     if (signo == 0)
         return;
 
-    const u64 handler = scheduler::signal_handler(signo);
-    if (handler == signals::kSigIgnore)
+    const u64 handler = disposition_of(signo);
+    if (handler == 0)
         return;
-    if (handler == signals::kSigDefault) {
-        if (signals::default_kills(signo))
-            scheduler::exit_current(128 + signo);
-        return;
-    }
-    if (signo == signals::kSigKill)
-        scheduler::exit_current(128 + signo);
 
     SavedContext saved{};
     saved.r15 = frame.r15; saved.r14 = frame.r14; saved.r13 = frame.r13;
@@ -425,7 +444,7 @@ void deliver_on_interrupt(interrupts::Frame& frame)
 
     u64 new_rsp = 0;
     if (!push_signal_frame(saved, new_rsp)) {
-        scheduler::exit_current(128 + signo);
+        scheduler::exit_current(signals::kSignalled | signo);
         return;
     }
 
@@ -1001,11 +1020,22 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             scheduler::set_current_gid(static_cast<u32>(frame->rdi)) ? 0 : -1);
         break;
 
-    case Kill:
-        frame->rax = static_cast<u64>(
-            scheduler::signal_send(static_cast<u32>(frame->rdi),
-                                   static_cast<int>(frame->rsi)) ? 0 : -1);
+    case Kill: {
+        // A negative pid names a process group, as it does everywhere: -1 is
+        // "that whole job", and between a terminal and a shell it is the form
+        // used far more often than the single-process one.
+        const i64 who   = static_cast<i64>(frame->rdi);
+        const int signo = static_cast<int>(frame->rsi);
+        bool ok;
+        if (who < 0)
+            ok = scheduler::signal_send_group(static_cast<u32>(-who), signo) > 0;
+        else if (who == 0)
+            ok = scheduler::signal_send_group(scheduler::pgid_of(0), signo) > 0;
+        else
+            ok = scheduler::signal_send(static_cast<u32>(who), signo);
+        frame->rax = static_cast<u64>(ok ? 0 : -1);
         break;
+    }
 
     case Signal: {
         // signal(signo, handler, restorer): the restorer is libc's trampoline,
@@ -1066,11 +1096,47 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
 
     case Wait: {
+        // wait() is waitpid(-1, &status, 0), and always was.
         i32 status = 0;
-        const i64 pid = scheduler::wait_child(&status);
-        if (pid >= 0 && frame->rsi != 0 && user_range_ok(frame->rsi, sizeof(i32)))
+        const i64 pid = scheduler::wait_child(-1, &status, 0);
+        if (pid > 0 && frame->rsi != 0 && user_range_ok(frame->rsi, sizeof(i32)))
             *reinterpret_cast<i32*>(frame->rsi) = status;
         frame->rax = static_cast<u64>(pid);
+        break;
+    }
+
+    case WaitPid: {
+        i32 status = 0;
+        const i64 pid = scheduler::wait_child(static_cast<i64>(frame->rdi),
+                                              &status,
+                                              static_cast<u32>(frame->rdx));
+        if (pid > 0 && frame->rsi != 0 && user_range_ok(frame->rsi, sizeof(i32)))
+            *reinterpret_cast<i32*>(frame->rsi) = status;
+        frame->rax = static_cast<u64>(pid);
+        break;
+    }
+
+    case SetPgid:
+        frame->rax = scheduler::set_pgid(static_cast<u32>(frame->rdi),
+                                         static_cast<u32>(frame->rsi))
+                         ? 0 : static_cast<u64>(-1);
+        break;
+
+    case GetPgid: {
+        const u32 pgid = scheduler::pgid_of(static_cast<u32>(frame->rdi));
+        frame->rax = pgid != 0 ? pgid : static_cast<u64>(-1);
+        break;
+    }
+
+    case SetSid: {
+        const u32 sid = scheduler::set_sid();
+        frame->rax = sid != 0 ? sid : static_cast<u64>(-1);
+        break;
+    }
+
+    case GetSid: {
+        const u32 sid = scheduler::sid_of(static_cast<u32>(frame->rdi));
+        frame->rax = sid != 0 ? sid : static_cast<u64>(-1);
         break;
     }
 

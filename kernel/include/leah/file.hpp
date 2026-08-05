@@ -11,6 +11,16 @@ namespace files {
 constexpr int   kMaxFds   = 16;
 constexpr usize kPathMax  = 128;
 
+// A read or a write that a signal cut short, as a negated errno - the same
+// convention libc already uses for what comes back from vfsd, and for the same
+// reason: one register has to carry both an answer and a reason.
+//
+// It matters that this is not a plain -1. A shell blocked reading its terminal
+// cannot tell "failed" from "the far end closed", so it treats both as the end
+// of its input - and closes. That is what pressing Ctrl-C at a prompt used to
+// do. The number is Linux's EINTR, as everything else here is.
+constexpr i64 kInterrupted = -4;
+
 enum class Kind : u8 {
     None,
     ConsoleIn,      // fd 0: the keyboard

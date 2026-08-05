@@ -70,6 +70,13 @@
 #define SYS_inputpost   80
 #define SYS_clocktime   81
 
+/* Job control. */
+#define SYS_waitpid     82
+#define SYS_setpgid     83
+#define SYS_getpgid     84
+#define SYS_setsid      85
+#define SYS_getsid      86
+
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 
 /* The raw entry point. Arguments go in the SysV syscall registers

@@ -11,7 +11,7 @@
  *                  || runs it if the first did not
  *   redirection    < > >>
  *   pipes          |, any number of stages
- *   background     a trailing &
+ *   background     a trailing &, and jobs / fg / bg to go with it
  *   scripts        sh FILE, sh -c, and #! which libc's execve honours
  *
  * Operators no longer need spaces around them. They did, because the tokeniser
@@ -25,20 +25,47 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <paths.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define MAX_WORDS  128
 #define MAX_LINE   1024
 #define MAX_VARS   64
 #define MAX_MATCH  256
+#define MAX_JOBS   32
 
 static int    g_status;         /* $? - what the last command returned */
 static char** g_args;           /* $1.. inside a script */
 static int    g_argc;
+
+/* --- jobs -----------------------------------------------------------------
+ *
+ * A job is a process group, and a pipeline is one job however many processes
+ * it turns out to be: `a | b | c` is three programs that start together, are
+ * interrupted together, and are finished when the last of them is. Putting
+ * them in one group is what makes all three of those true at once, and is the
+ * only reason the concept exists.
+ *
+ * Interactive only. A shell running a script has nobody to press Ctrl-Z at it
+ * and no terminal to hand back and forth, and trying anyway would mean
+ * tcsetpgrp failing on every command - see g_interactive.
+ */
+struct job {
+    int  pgid;
+    int  used;
+    int  stopped;
+    int  reported;              /* has the person been told it finished? */
+    char text[128];             /* the line as typed, for `jobs` to show */
+};
+
+static struct job g_jobs[MAX_JOBS];
+static int g_interactive;       /* a terminal to hand over, and a person */
+static int g_shell_pgid;
 
 /* --- shell variables ----------------------------------------------------------
  *
@@ -350,6 +377,156 @@ static int tokenize(const char* line, char words[][256], int max)
     return count;
 }
 
+/* --- jobs ------------------------------------------------------------------ */
+
+static int job_slot(int pgid)
+{
+    for (int i = 0; i < MAX_JOBS; ++i)
+        if (g_jobs[i].used && g_jobs[i].pgid == pgid)
+            return i;
+    return -1;
+}
+
+/* Remember a job, or find the one already remembered. The number a person sees
+ * is the slot plus one, which is why nothing is ever compacted: %1 has to go on
+ * meaning the same job for as long as it exists. */
+static int job_add(int pgid, const char* text, int stopped)
+{
+    int at = job_slot(pgid);
+    if (at < 0)
+        for (at = 0; at < MAX_JOBS && g_jobs[at].used; ++at)
+            ;
+    if (at >= MAX_JOBS)
+        return 0;
+    g_jobs[at].used     = 1;
+    g_jobs[at].pgid     = pgid;
+    g_jobs[at].stopped  = stopped;
+    g_jobs[at].reported = 0;
+    snprintf(g_jobs[at].text, sizeof(g_jobs[at].text), "%s", text);
+    return at + 1;
+}
+
+static void job_forget(int pgid)
+{
+    const int at = job_slot(pgid);
+    if (at >= 0)
+        g_jobs[at].used = 0;
+}
+
+/* Which job `%n`, `%%` or a bare number means. Zero for none. */
+static int job_named(const char* word)
+{
+    if (word == 0) {
+        /* No name: the most recent stopped job, then the most recent of any.
+         * `fg` on its own is the common case and should not need one. */
+        for (int i = MAX_JOBS - 1; i >= 0; --i)
+            if (g_jobs[i].used && g_jobs[i].stopped)
+                return g_jobs[i].pgid;
+        for (int i = MAX_JOBS - 1; i >= 0; --i)
+            if (g_jobs[i].used)
+                return g_jobs[i].pgid;
+        return 0;
+    }
+    if (word[0] == '%')
+        ++word;
+    if (word[0] == '%' || word[0] == '+' || word[0] == '\0')
+        return job_named(0);
+    {
+        const int n = atoi_simple(word);
+        if (n >= 1 && n <= MAX_JOBS && g_jobs[n - 1].used)
+            return g_jobs[n - 1].pgid;
+    }
+    return 0;
+}
+
+/* Anything that finished while we were not looking. Called before each prompt,
+ * which is where every shell reports this: interrupting a person mid-command
+ * to say a background job ended is worse than telling them a moment later. */
+static void job_reap_finished(void)
+{
+    for (;;) {
+        int status = 0;
+        const int pid = waitpid(-1, &status, WNOHANG | WUNTRACED | WCONTINUED);
+        if (pid <= 0)
+            break;
+        const int pgid = (int)getpgid(pid);
+        const int at = job_slot(pgid > 0 ? pgid : pid);
+        if (at < 0)
+            continue;
+        if (WIFSTOPPED(status)) {
+            g_jobs[at].stopped = 1;
+            printf("[%d] stopped   %s\n", at + 1, g_jobs[at].text);
+        } else if (WIFCONTINUED(status)) {
+            g_jobs[at].stopped = 0;
+        } else {
+            /* One process of a pipeline finishing is not the job finishing.
+             * Ask the kernel whether any of the group is left. */
+            if (kill(-g_jobs[at].pgid, 0) == 0)
+                continue;
+            printf("[%d] done      %s\n", at + 1, g_jobs[at].text);
+            g_jobs[at].used = 0;
+        }
+    }
+}
+
+/* Wait for a job that has the terminal.
+ *
+ * The terminal is handed over before and taken back after, and taken back
+ * whichever way the job ends - finished, killed, or stopped and still sitting
+ * there. Forgetting the last of those is how a shell ends up typing into a
+ * program that is no longer running.
+ */
+static int foreground(int pgid, int last_pid, int count, const char* text)
+{
+    int status = 0, left = count;
+
+    /* A shell running a script has no job control to do: nobody to press
+     * Ctrl-Z at it, no terminal to hand over, and no prompt to come back to.
+     * It waits for its children the way it always did, and `pgid` is 0 to say
+     * that no group was made for them. */
+    const int which = pgid > 0 ? -pgid : -1;
+
+    if (g_interactive)
+        tcsetpgrp(0, pgid);
+
+    while (left > 0) {
+        int one = 0;
+        const int got = waitpid(which, &one, g_interactive ? WUNTRACED : 0);
+        if (got < 0) {
+            if (errno == EINTR)
+                continue;       /* our own Ctrl-C; the job is still there */
+            break;
+        }
+        if (WIFSTOPPED(one)) {
+            /* A stop stops the whole job, so there is nothing more to wait
+             * for - the rest of the pipeline is suspended too. */
+            const int n = job_add(pgid, text, 1);
+            if (g_interactive)
+                tcsetpgrp(0, g_shell_pgid);
+            printf("[%d] stopped   %s\n", n, text);
+            return 128 + WSTOPSIG(one);
+        }
+        --left;
+        /* A pipeline's status is its last stage's, which is why the others are
+         * reaped and thrown away. */
+        if (got == last_pid)
+            status = one;
+    }
+
+    if (g_interactive)
+        tcsetpgrp(0, g_shell_pgid);
+    if (pgid > 0)
+        job_forget(pgid);
+
+    /* Said out loud, because a program that vanishes without a word looks like
+     * a bug in the shell. Not for SIGINT: the person pressed the key and does
+     * not need telling what it did. */
+    if (WIFSIGNALED(status) && WTERMSIG(status) != SIGINT)
+        printf("%s: %s\n", text, signal_name(WTERMSIG(status)));
+
+    return WSHELL_STATUS(status);
+}
+
 /* --- running ------------------------------------------------------------------- */
 
 /* Pull the redirections out of a word range, leaving a clean argv. */
@@ -433,7 +610,8 @@ static _Noreturn void child(char** argv, const struct redirect* r)
 static int run_script(const char* path, int argc, char** argv);
 
 /* One command with no operators left in it. Returns its exit status. */
-static int run_simple(char words[][256], int start, int end, int background)
+static int run_simple(char words[][256], int start, int end, int background,
+                      const char* text)
 {
     char* argv[MAX_WORDS];
     struct redirect redir;
@@ -489,16 +667,51 @@ static int run_simple(char words[][256], int start, int end, int background)
         }
         return 0;
     }
+    if (strcmp(argv[0], "jobs") == 0) {
+        for (int i = 0; i < MAX_JOBS; ++i)
+            if (g_jobs[i].used)
+                printf("[%d] %-9s %s\n", i + 1,
+                       g_jobs[i].stopped ? "stopped" : "running",
+                       g_jobs[i].text);
+        return 0;
+    }
+    if (strcmp(argv[0], "fg") == 0 || strcmp(argv[0], "bg") == 0) {
+        const int to_front = argv[0][0] == 'f';
+        const int pgid = job_named(argv[1]);
+        if (pgid == 0) {
+            fprintf(stderr, "%s: no such job\n", argv[0]);
+            return 1;
+        }
+        const int at = job_slot(pgid);
+        char what[128];
+        snprintf(what, sizeof(what), "%s", at >= 0 ? g_jobs[at].text : "job");
+
+        /* Told to carry on either way; the difference between fg and bg is
+         * only which of us then has the terminal and who waits. */
+        if (at >= 0)
+            g_jobs[at].stopped = 0;
+        printf("%s\n", what);
+        if (to_front) {
+            kill(-pgid, SIGCONT);
+            /* One process is waited for, not the whole pipeline: how many
+             * stages it had is not recorded, and the group going away is what
+             * actually ends the wait. */
+            return foreground(pgid, pgid, 1, what);
+        }
+        kill(-pgid, SIGCONT);
+        return 0;
+    }
     if (strcmp(argv[0], ":") == 0 || strcmp(argv[0], "true") == 0)
         return 0;
     if (strcmp(argv[0], "false") == 0)
         return 1;
     if (strcmp(argv[0], "help") == 0) {
-        printf("builtins: cd exit export unset source : true false help\n");
+        printf("builtins: cd exit export unset source : true false jobs fg bg help\n");
         printf("quoting:  'literal' \"expanded\" \\c\n");
         printf("variables: $NAME ${NAME} $? $$   assignment: NAME=value\n");
         printf("patterns: * ?    lists: ; && ||\n");
         printf("redirection: < > >>   pipe: |   background: trailing &\n");
+        printf("jobs: jobs, fg %%1, bg %%1;  Ctrl-C interrupts, Ctrl-Z suspends\n");
         printf("commands are found along $PATH; #! scripts work\n");
         return 0;
     }
@@ -526,23 +739,32 @@ static int run_simple(char words[][256], int start, int end, int background)
         fprintf(stderr, "sh: cannot fork: %s\n", strerror(errno));
         return 1;
     }
-    if (pid == 0)
+    if (pid == 0) {
+        /* Its own group, before it is anything else. Done here as well as in
+         * the parent because there is no saying which of the two runs first,
+         * and the child must be in the group before the terminal is handed
+         * over to it - a race whose standard answer is to do it on both sides
+         * and let them agree. */
+        if (g_interactive || background)
+            setpgid(0, 0);
         child(argv, &redir);
+    }
+    const int pgid = (g_interactive || background) ? pid : 0;
+    if (pgid > 0)
+        setpgid(pid, pgid);
 
     if (background) {
-        /* Not reaped here. init is everyone's second parent and will collect
-         * it; waiting is the one thing this must not do. */
-        printf("[%d]\n", pid);
+        const int n = job_add(pgid, text, 0);
+        printf("[%d] %d\n", n, pid);
         return 0;
     }
-    int status = 0;
-    wait(&status);
-    return status;
+    return foreground(pgid, pid, 1, text);
 }
 
 /* A pipeline: commands joined by |, of any length. Its status is the last
  * stage's, which is what every shell reports. */
-static int run_pipeline(char words[][256], int start, int end, int background)
+static int run_pipeline(char words[][256], int start, int end, int background,
+                        const char* text)
 {
     int bars[MAX_WORDS], count = 0;
     for (int i = start; i < end; ++i)
@@ -550,9 +772,9 @@ static int run_pipeline(char words[][256], int start, int end, int background)
             bars[count++] = i;
 
     if (count == 0)
-        return run_simple(words, start, end, background);
+        return run_simple(words, start, end, background, text);
 
-    int from = start, in_fd = -1;
+    int from = start, in_fd = -1, pgid = 0, last_pid = 0;
     for (int stage = 0; stage <= count; ++stage) {
         const int to = (stage < count) ? bars[stage] : end;
         int pfd[2] = { -1, -1 };
@@ -563,6 +785,11 @@ static int run_pipeline(char words[][256], int start, int end, int background)
 
         const int pid = fork();
         if (pid == 0) {
+            /* Every stage joins the first stage's group, so the pipeline is
+             * one job: one Ctrl-C reaches all of it, and one wait covers all
+             * of it. The first stage starts the group by naming itself. */
+            if (g_interactive || background)
+                setpgid(0, pgid);
             if (in_fd >= 0)  { dup2(in_fd, 0);  close(in_fd); }
             if (pfd[1] >= 0) { dup2(pfd[1], 1); close(pfd[1]); }
             if (pfd[0] >= 0) close(pfd[0]);
@@ -574,6 +801,13 @@ static int run_pipeline(char words[][256], int start, int end, int background)
                 exit(0);
             child(argv, &redir);
         }
+        if (g_interactive || background) {
+            if (pgid == 0)
+                pgid = pid;
+            setpgid(pid, pgid);
+        }
+        last_pid = pid;
+
         if (in_fd >= 0)
             close(in_fd);
         if (pfd[1] >= 0)
@@ -584,16 +818,14 @@ static int run_pipeline(char words[][256], int start, int end, int background)
     if (in_fd >= 0)
         close(in_fd);
 
+    if (background) {
+        const int n = job_add(pgid, text, 0);
+        printf("[%d] %d\n", n, last_pid);
+        return 0;
+    }
     /* Every stage is waited for. Leaving them to init means the prompt comes
      * back before the output has finished arriving. */
-    int status = 0;
-    for (int i = 0; i <= count; ++i) {
-        int one = 0;
-        if (wait(&one) < 0)
-            break;
-        status = one;
-    }
-    return status;
+    return foreground(pgid, last_pid, count + 1, text);
 }
 
 /* Where the next top-level ; && || starts, or -1. Quote-aware, because a
@@ -648,7 +880,7 @@ static int run_line(char* line)
                     --end;
                 }
                 if (end > 0) {
-                    status = run_pipeline(words, 0, end, background);
+                    status = run_pipeline(words, 0, end, background, segment);
                     g_status = status;
                 }
             }
@@ -710,20 +942,60 @@ int main(int argc, char** argv)
     if (argc > 1)
         return run_script(argv[1], argc - 1, &argv[1]);
 
+    /* Interactive from here: there is a terminal to hand back and forth and a
+     * person to press keys at it. Everything above returns before this, which
+     * is deliberate - a shell running a script has no job control to do, and
+     * tcsetpgrp would fail on every command it ran. */
+    g_interactive = tty_fd() >= 0;
+    if (g_interactive) {
+        /* The keys the terminal turns into signals go to the foreground job.
+         * When there is no job they come here instead, and a shell that took
+         * the default action on them would exit on its own Ctrl-C. Children
+         * are unaffected: execve puts every disposition back to default. */
+        signal(SIGINT,  SIG_IGN);
+        signal(SIGQUIT, SIG_IGN);
+        signal(SIGTSTP, SIG_IGN);
+        signal(SIGTTIN, SIG_IGN);
+        signal(SIGTTOU, SIG_IGN);
+
+        /* term calls setsid before exec, so this shell already leads its own
+         * session and group; this is just finding out what it is called. */
+        g_shell_pgid = (int)getpgrp();
+        tcsetpgrp(0, g_shell_pgid);
+    }
+
     printf("leahOS shell - try: ls /, cat /usr/share/doc/readme.md, ls | wc\n");
     printf("builtins: cd exit export unset source help. `help` lists the rest.\n");
 
     char line[MAX_LINE];
     for (;;) {
         char cwd[128];
+
+        /* Before the prompt, not during a command: a background job finishing
+         * is worth saying, and saying it in the middle of somebody's typing is
+         * worse than saying it a moment later. */
+        job_reap_finished();
+
         getcwd(cwd, sizeof(cwd));
         printf("%s $ ", cwd);
         fflush(stdout);
 
         /* One read for the whole line: the console driver cooks it - echoing
          * keys and applying backspace - and returns at the newline, so line
-         * editing lives in one place rather than being re-implemented here. */
-        const int n = (int)read(0, line, sizeof(line) - 1);
+         * editing lives in one place rather than being re-implemented here.
+         *
+         * A signal cutting the read short is not the end of the input. Ctrl-C
+         * at a prompt arrives here as an interruption, and a shell that took
+         * it for end-of-file would close its own terminal - which is exactly
+         * what it did until read learned to say which had happened. */
+        errno = 0;
+        int n = (int)read(0, line, sizeof(line) - 1);
+        while (n < 0 && errno == EINTR) {
+            printf("\n%s $ ", cwd);
+            fflush(stdout);
+            errno = 0;
+            n = (int)read(0, line, sizeof(line) - 1);
+        }
         if (n <= 0)
             break;
         line[(n > 0 && line[n - 1] == '\n') ? n - 1 : n] = '\0';

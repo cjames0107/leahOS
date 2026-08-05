@@ -227,6 +227,7 @@ void __fd_resolve(const char* path, char* out)
 struct saved {
     unsigned     magic;
     int          tty;                   /* the controlling terminal, or -1 */
+    unsigned     tty_key;               /* its control block, or 0 */
     char         cwd[PATH_MAX];
     struct entry fds[FD_MAX];
 };
@@ -237,6 +238,53 @@ struct saved {
  * creates the terminal and inherited from there down, through fork and through
  * execve, on the same shared page as everything else here. */
 static int g_tty = -1;
+
+/* --- the terminal's control block ---------------------------------------------
+ *
+ * Which process group the terminal is currently listening to. A real UNIX keeps
+ * this in the tty driver, where the keyboard interrupt can read it; there is no
+ * tty driver here, because a terminal in this system is an ordinary program at
+ * the far end of a pipe and the keyboard belongs to a window server.
+ *
+ * So it is a page of shared memory. The terminal creates it, everything the
+ * terminal starts inherits the key through the same handover as the descriptor
+ * table, tcsetpgrp writes it, and the terminal reads it when somebody presses
+ * Ctrl-C. Lifetime is the terminal's, which by construction outlives every job
+ * it is being asked about.
+ */
+struct tty_control {
+    unsigned magic;
+    int      foreground;        /* the process group, or 0 for none */
+};
+
+#define TTY_MAGIC 0x4C544359u   /* "LTCY" */
+
+static unsigned            g_tty_key;
+static struct tty_control* g_tty_ctl;
+
+/* The block itself, mapped on the first call that needs it - the key travels
+ * across execve but a mapping cannot. Null when this process has no terminal,
+ * which is the ordinary case for everything that is not a shell. */
+static struct tty_control* tty_control(void)
+{
+    int id;
+
+    if (g_tty_ctl != 0)
+        return g_tty_ctl;
+    if (g_tty_key == 0)
+        return 0;
+    id = shm_open(g_tty_key, sizeof(struct tty_control), SHM_PUBLIC);
+    if (id < 0)
+        return 0;
+    g_tty_ctl = (struct tty_control*)shm_map(id);
+    if (g_tty_ctl != 0 && g_tty_ctl->magic != TTY_MAGIC) {
+        /* Whoever gets here first initialises it. A fresh segment reads as
+         * zero, so this is the creating terminal and nobody else. */
+        g_tty_ctl->magic = TTY_MAGIC;
+        g_tty_ctl->foreground = 0;
+    }
+    return g_tty_ctl;
+}
 
 static void start(void)
 {
@@ -254,6 +302,8 @@ static void start(void)
         memcpy(g_fds, s->fds, sizeof(g_fds));
         memcpy(g_cwd, s->cwd, sizeof(g_cwd));
         g_tty = s->tty;
+        g_tty_key = s->tty_key;
+        g_tty_ctl = 0;          /* the key survives an exec; a mapping cannot */
         /* The positions are still where they were - in shared memory the last
          * image mapped. This one has a new address space and has mapped none
          * of them yet, so the pointers it just copied mean nothing here. */
@@ -317,6 +367,7 @@ void __fd_save_for_exec(void)
     memcpy(s->fds, g_fds, sizeof(g_fds));
     memcpy(s->cwd, g_cwd, sizeof(g_cwd));
     s->tty = g_tty;
+    s->tty_key = g_tty_key;
     s->magic = SAVED_MAGIC;
 }
 
@@ -325,6 +376,18 @@ void __fd_save_for_exec(void)
  * decide what -13 meant. Anything outside the range of real codes is a
  * failure whose reason was never recorded, and EIO is the honest answer for
  * that rather than a guess. */
+/* The same translation for what the kernel returns from a pipe or the console.
+ * It uses the negated-errno convention too, so that an interrupted read can be
+ * told apart from a closed one - and it has to be, because a shell treats the
+ * second as the end of its input and exits on it. */
+static long from_kernel(long answer)
+{
+    if (answer >= 0)
+        return answer;
+    errno = (answer > -ERRNO_MAX) ? (int)-answer : EIO;
+    return -1;
+}
+
 static long from_vfs(long answer)
 {
     if (answer >= 0)
@@ -476,6 +539,58 @@ void tty_set(int fd)
     g_tty = fd;
 }
 
+unsigned tty_control_key(void)
+{
+    start();
+    return g_tty_key;
+}
+
+void tty_set_control(unsigned key)
+{
+    start();
+    g_tty_key = key;
+    g_tty_ctl = 0;              /* a new key means the old mapping is not it */
+}
+
+/* Make one, for a terminal that is about to start a shell. Keyed by the
+ * terminal's pid so two terminals never share a foreground group, and owned by
+ * it so the block goes away when the window does. */
+unsigned tty_control_create(void)
+{
+    start();
+    g_tty_key = 0x54430000u | ((unsigned)getpid() & 0xFFFFu);
+    g_tty_ctl = 0;
+    tty_control();
+    return g_tty_key;
+}
+
+pid_t tcgetpgrp(int fd)
+{
+    struct tty_control* c;
+    (void)fd;       /* there is only ever the one terminal per process here */
+    start();
+    c = tty_control();
+    if (c == 0) {
+        errno = ENOTTY;
+        return -1;
+    }
+    return (pid_t)c->foreground;
+}
+
+int tcsetpgrp(int fd, pid_t pgid)
+{
+    struct tty_control* c;
+    (void)fd;
+    start();
+    c = tty_control();
+    if (c == 0) {
+        errno = ENOTTY;
+        return -1;
+    }
+    c->foreground = (int)pgid;
+    return 0;
+}
+
 int open(const char* path, int flags)
 {
     char resolved[PATH_MAX];
@@ -581,7 +696,8 @@ long read(int fd, void* buffer, unsigned long count)
         return -1;
     e = &g_fds[fd];
     if (e->kind == K_KERNEL)
-        return __syscall(SYS_read, e->kfd, (long)buffer, (long)count, 0, 0);
+        return from_kernel(__syscall(SYS_read, e->kfd, (long)buffer,
+                                     (long)count, 0, 0));
     if (e->kind == K_DEVICE) {
         switch (e->kfd) {
         case DEV_NULL:
@@ -638,7 +754,8 @@ long write(int fd, const void* buffer, unsigned long count)
         return -1;
     e = &g_fds[fd];
     if (e->kind == K_KERNEL)
-        return __syscall(SYS_write, e->kfd, (long)buffer, (long)count, 0, 0);
+        return from_kernel(__syscall(SYS_write, e->kfd, (long)buffer,
+                                     (long)count, 0, 0));
     if (e->kind == K_DEVICE) {
         switch (e->kfd) {
         case DEV_NULL:

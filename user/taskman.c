@@ -58,6 +58,7 @@ static const char* state_name(uint32_t s)
     case PROC_READY:   return "ready";
     case PROC_RUNNING: return "running";
     case PROC_BLOCKED: return "blocked";
+    case PROC_STOPPED: return "stopped";
     case PROC_ZOMBIE:  return "zombie";
     case PROC_DEAD:    return "dead";
     default:           return "?";

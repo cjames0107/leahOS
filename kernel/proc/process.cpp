@@ -350,6 +350,9 @@ void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
         return;
     }
 
+    /* It is this program now, and every report from here on should say so. */
+    scheduler::set_current_name(name);
+
     scheduler::current_task_set_space(space);
     scheduler::set_current_brk(memory::kUserBrkBase);   // fresh heap for the new image
     vmm::switch_address_space(space);

@@ -97,6 +97,16 @@ enum Number : u64 {
     CredsOf     = 79,  // a process's uid and gid, so a server can trust who asked
     InputPost   = 80,  // a ring 3 input driver putting keys into the queue
     ClockTime   = 81,  // seconds and nanoseconds since 1970
+
+    // Job control. A shell needs all of these to be a shell: somewhere to put
+    // a job (SetPgid), a way to wait for one particular job rather than
+    // whichever child finishes first (WaitPid), and a way to ask where a
+    // process is (GetPgid, GetSid).
+    WaitPid     = 82,
+    SetPgid     = 83,
+    GetPgid     = 84,
+    SetSid      = 85,
+    GetSid      = 86,
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

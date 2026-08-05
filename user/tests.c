@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <shm.h>
 #include <stdio.h>
 #include <string.h>
@@ -340,8 +341,9 @@ static void test_signals(void)
     check("signal() returns the previous handler",
           signal(SIGUSR1, SIG_DFL) == catcher);
 
-    /* A signal that kills: the child takes the default action and dies with
-     * 128 + signo, the convention for death by signal. */
+    /* A signal that kills: the child takes the default action, and the status
+     * says so - which is a different thing from an exit code, and the reason
+     * the status word has room to say which of the two happened. */
     int pid = fork();
     if (pid == 0) {
         for (;;)
@@ -350,7 +352,8 @@ static void test_signals(void)
     kill(pid, SIGTERM);
     int status = 0;
     wait(&status);
-    check("SIGTERM kills a child by default", status == 128 + SIGTERM);
+    check("SIGTERM kills a child by default",
+          WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
 
     /* SIGKILL cannot be caught, however hard a process tries. */
     pid = fork();
@@ -362,7 +365,8 @@ static void test_signals(void)
     kill(pid, SIGKILL);
     status = 0;
     wait(&status);
-    check("SIGKILL cannot be caught", status == 128 + SIGKILL);
+    check("SIGKILL cannot be caught",
+          WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
 
     /* Delivery must not depend on the target entering the kernel. This child
      * spins on a pure computation with no syscall in the loop at all, so the
@@ -377,7 +381,7 @@ static void test_signals(void)
     status = 0;
     wait(&status);
     check("a signal reaches a process making no syscalls",
-          status == 128 + SIGTERM);
+          WIFSIGNALED(status) && WTERMSIG(status) == SIGTERM);
 
     /* And a caught signal must resume that loop intact: the handler runs, the
      * IRETQ path restores every register, and the child carries on to exit
@@ -1958,6 +1962,116 @@ static void test_open_descriptions(void)
 }
 
 
+/* --- process groups, and stopping things -------------------------------------
+ *
+ * The two halves of job control. A group is what a signal from a keyboard goes
+ * to, because the thing a person means by "what I am running" is often several
+ * processes; stopping is what makes a job something you can come back to
+ * rather than only something you can end.
+ */
+
+static void test_jobs(void)
+{
+    printf("job control:\n");
+
+    const int mine = (int)getpgrp();
+    check("a process is in some process group", mine > 0);
+    check("getpgid(0) is the same answer", (int)getpgid(0) == mine);
+
+    /* A child starts where its parent was, and can be moved out. Both are
+     * needed: the first is what makes `sh -c` behave, and the second is what a
+     * shell does to every job it starts. */
+    int pid = fork();
+    if (pid == 0) {
+        for (;;)
+            msleep(10);
+    }
+    check("a forked child inherits the process group",
+          (int)getpgid(pid) == mine);
+    check("and can be put in one of its own", setpgid(pid, pid) == 0);
+    check("which is then where it is", (int)getpgid(pid) == pid);
+
+    /* Stopping. The child is suspended, stays suspended, is reported as
+     * stopped to a parent that asked to hear about it, and is still there
+     * afterwards - that last part being the whole difference from killing it. */
+    int status = 0;
+    kill(pid, SIGSTOP);
+    int got = waitpid(pid, &status, WUNTRACED);
+    check("a stopped child is reported to waitpid", got == pid);
+    check("and the status says stopped, not exited",
+          WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP);
+
+    /* Still alive: signal 0 delivers nothing and answers only that. */
+    check("a stopped process is still there", kill(pid, 0) == 0);
+
+    /* And nothing else is reported while it sits there, which is what WNOHANG
+     * is for - a shell asks this before every prompt and must not block. */
+    status = 0;
+    check("nothing more is reported while it is stopped",
+          waitpid(pid, &status, WNOHANG | WUNTRACED) == 0);
+
+    kill(pid, SIGCONT);
+    status = 0;
+    got = waitpid(pid, &status, WUNTRACED | WCONTINUED);
+    check("SIGCONT is reported too", got == pid && WIFCONTINUED(status));
+
+    kill(pid, SIGKILL);
+    status = 0;
+    waitpid(pid, &status, 0);
+    check("and it can still be killed afterwards",
+          WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+
+    /* A signal to a group reaches every process in it. Three children in one
+     * group, one kill, three deaths - which is exactly what Ctrl-C on a
+     * pipeline has to do. */
+    int group = 0, kids[3];
+    for (int i = 0; i < 3; ++i) {
+        kids[i] = fork();
+        if (kids[i] == 0) {
+            for (;;)
+                msleep(10);
+        }
+        if (group == 0)
+            group = kids[i];
+        setpgid(kids[i], group);
+    }
+    check("several children can share one group",
+          (int)getpgid(kids[2]) == group);
+
+    kill(-group, SIGTERM);
+    int died = 0;
+    for (int i = 0; i < 3; ++i) {
+        status = 0;
+        if (waitpid(-group, &status, 0) > 0 && WIFSIGNALED(status) &&
+            WTERMSIG(status) == SIGTERM)
+            ++died;
+    }
+    check("one signal to the group reaches all of them", died == 3);
+
+    /* Waiting for a group that has none left is not the same as waiting for a
+     * group that never existed, but both are over. */
+    check("and then there is nothing left to wait for",
+          waitpid(-group, &status, 0) < 0 && errno == ECHILD);
+
+    /* A stopped process must not be reported to a caller that did not ask.
+     * Without this an ordinary wait() would return early every time a child
+     * was suspended, and every program that forks would have to learn about
+     * job control whether it wanted to or not. */
+    pid = fork();
+    if (pid == 0) {
+        msleep(60);
+        exit(4);
+    }
+    kill(pid, SIGSTOP);
+    msleep(20);
+    check("a plain wait ignores a stop", waitpid(pid, &status, WNOHANG) == 0);
+    kill(pid, SIGCONT);
+    waitpid(pid, &status, 0);
+    check("and sees the exit when it comes",
+          WIFEXITED(status) && WEXITSTATUS(status) == 4);
+}
+
+
 /* --- the environment ----------------------------------------------------------- */
 
 static void test_environment(void)
@@ -2173,6 +2287,7 @@ int main(void)
     test_errno();
     test_streams();
     test_open_descriptions();
+    test_jobs();
     test_environment();
     test_shell();
     printf("\n%d failure(s)\n", g_failures);

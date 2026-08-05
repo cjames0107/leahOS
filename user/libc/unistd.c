@@ -222,6 +222,49 @@ pid_t wait(int* status)
     return (pid_t)__syscall(SYS_wait, 0, (long)status, 0, 0, 0);
 }
 
+pid_t waitpid(pid_t which, int* status, int options)
+{
+    const long r = __syscall(SYS_waitpid, which, (long)status, options, 0, 0);
+    /* The kernel answers with two different failures and they want opposite
+     * things from the caller: no such child means stop asking, and a signal
+     * arrived means ask again. One -1 could say neither. */
+    if (r == -1) { errno = ECHILD; return -1; }
+    if (r == -2) { errno = EINTR;  return -1; }
+    return (pid_t)r;
+}
+
+int setpgid(pid_t pid, pid_t pgid)
+{
+    if (__syscall(SYS_setpgid, pid, pgid, 0, 0, 0) < 0) {
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+}
+
+pid_t getpgid(pid_t pid)
+{
+    const long r = __syscall(SYS_getpgid, pid, 0, 0, 0, 0);
+    if (r < 0) { errno = ESRCH; return -1; }
+    return (pid_t)r;
+}
+
+pid_t getpgrp(void) { return getpgid(0); }
+
+pid_t setsid(void)
+{
+    const long r = __syscall(SYS_setsid, 0, 0, 0, 0, 0);
+    if (r < 0) { errno = EPERM; return -1; }
+    return (pid_t)r;
+}
+
+pid_t getsid(pid_t pid)
+{
+    const long r = __syscall(SYS_getsid, pid, 0, 0, 0, 0);
+    if (r < 0) { errno = ESRCH; return -1; }
+    return (pid_t)r;
+}
+
 void msleep(unsigned long ms) { __syscall(SYS_sleep, (long)ms, 0, 0, 0, 0); }
 
 void yield(void)

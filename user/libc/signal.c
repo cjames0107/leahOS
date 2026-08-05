@@ -34,3 +34,28 @@ int raise(int signo)
 {
     return kill(getpid(), signo);
 }
+
+/* Short, lowercase and without the SIG, because the one caller is a shell
+ * printing "terminated" or "stopped" beside a job and the prefix would be
+ * noise there. Unknown numbers come back as "signal", which is true. */
+const char* signal_name(int signo)
+{
+    switch (signo) {
+    case SIGHUP:  return "hangup";
+    case SIGINT:  return "interrupt";
+    case SIGQUIT: return "quit";
+    case SIGKILL: return "killed";
+    case SIGUSR1: return "user1";
+    case SIGSEGV: return "segfault";
+    case SIGUSR2: return "user2";
+    case SIGPIPE: return "broken pipe";
+    case SIGTERM: return "terminated";
+    case SIGCHLD: return "child";
+    case SIGCONT: return "continued";
+    case SIGSTOP: return "stopped";
+    case SIGTSTP: return "suspended";
+    case SIGTTIN: return "wants input";
+    case SIGTTOU: return "wants output";
+    default:      return "signal";
+    }
+}

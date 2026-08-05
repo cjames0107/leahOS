@@ -63,6 +63,12 @@ enum class State : u8 {
     Ready,
     Running,
     Blocked,        // in wait(), no zombie child yet
+    // Suspended by SIGSTOP or one of its relatives. Not Blocked: a blocked task
+    // is waiting for something that will happen on its own, and a stopped one
+    // is waiting for a decision somebody else has to make. Nothing wakes it but
+    // SIGCONT - not the thing it was blocked on, not a timer - and it has to
+    // survive being reported to its parent and asked about again.
+    Stopped,
     Zombie,         // exited, waiting to be reaped
     Dead,           // finished kernel thread
 };
@@ -77,6 +83,21 @@ struct Task {
     // of the group leader. A single-threaded process is its own leader. Threads
     // share the leader's address space and open-file table.
     u32   tgid;
+    // Process group and session. A process group is what a signal from the
+    // keyboard goes to and what a shell calls a job: `a | b | c` is three
+    // processes and one group, so Ctrl-C reaches all three and the shell waits
+    // for all three. A session is a login - a set of groups sharing a terminal,
+    // one of which is the foreground group at any moment.
+    //
+    // Both are inherited across fork and kept across execve, which is what lets
+    // a shell put a child in a group before the child has run any of its own
+    // code and be sure the child is in it either way.
+    u32   pgid;
+    u32   sid;
+    // Set while a stopped task has a stop its parent has not been told about,
+    // or a continue. Cleared by whoever reports it. Without this a parent that
+    // waits twice hears about one stop twice.
+    i32   report;
     State state;
     bool  is_user;
     vmm::AddressSpace space; // 0 for kernel threads (they use the kernel space)
@@ -107,7 +128,14 @@ struct Task {
     u32   sig_pending;
     u64   sig_handler[kMaxSignals];
     u64   sig_restorer;      // libc's trampoline, which calls sigreturn
-    const char* name;
+    /* Owned, not borrowed. This was a const char* pointing at whatever the
+     * caller had - which for execve is the argument storage of an image that
+     * is about to be replaced, and for fork is the parent's copy of that same
+     * pointer. Once the storage went, the name read as whatever now occupied
+     * it, and every crash report and every line of ps named the wrong
+     * program. Thirty-two bytes per task is a cheap price for a report that
+     * can be believed. */
+    char name[32];
     Entry entry;             // kernel threads only
     void* arg;
     files::Table files;      // open files + cwd; inherited across fork
@@ -243,6 +271,25 @@ bool group_still_alive(const Task* except)
     return false;
 }
 
+/* A task's name is its own copy. The last component of the path is what a
+ * person means by the program's name; anything longer is truncated rather than
+ * refused, because a name is for reading and a report with a shortened name is
+ * still a report. */
+void set_name(Task& task, const char* name)
+{
+    usize n = 0;
+    if (name == nullptr)
+        name = "?";
+    for (const char* p = name; *p != '\0'; ++p)
+        if (*p == '/')
+            name = p + 1;       // the last component, not the whole path
+    while (name[n] != '\0' && n + 1 < sizeof(task.name)) {
+        task.name[n] = name[n];
+        ++n;
+    }
+    task.name[n] = '\0';
+}
+
 void finish_switch();
 
 [[noreturn]] void kernel_thread_trampoline()
@@ -356,7 +403,7 @@ void switch_to(u32 next_index)
         console::printf("\n  scheduler: cpu %u switching to %s (slot %u, pid %u) "
                         "which is already on another cpu\n",
                         percpu::active(),
-                        next->name != nullptr ? next->name : "?",
+                        next->name,
                         next_index, next->pid);
         panic("scheduler: two processors on one task");
     }
@@ -406,14 +453,14 @@ void switch_to(u32 next_index)
     if (prev->kernel_stack != 0 && !canary_intact(prev->kernel_stack)) {
         console::printf("\n  scheduler: %s (slot %u, pid %u) ran off the bottom "
                         "of its kernel stack\n",
-                        prev->name != nullptr ? prev->name : "?",
+                        prev->name,
                         current_index(), prev->pid);
         panic("scheduler: kernel stack overflow");
     }
     if (next->kernel_stack != 0 && !canary_intact(next->kernel_stack)) {
         console::printf("\n  scheduler: %s (slot %u, pid %u) has a smashed "
                         "kernel stack\n",
-                        next->name != nullptr ? next->name : "?",
+                        next->name,
                         next_index, next->pid);
         panic("scheduler: kernel stack overflow");
     }
@@ -432,7 +479,7 @@ void switch_to(u32 next_index)
             console::printf("\n  scheduler: %s (slot %u, pid %u) would resume "
                             "from a frame stamped %llx, expected %llx, "
                             "rsp %p\n",
-                            next->name != nullptr ? next->name : "?",
+                            next->name,
                             next_index, next->pid,
                             static_cast<u64>(stamp),
                             static_cast<u64>(next->resume_stamp),
@@ -446,7 +493,7 @@ void switch_to(u32 next_index)
         if (resume < 0xFFFFFFFF80000000ull) {
             console::printf("\n  scheduler: %s (slot %u, pid %u) would resume "
                             "at %p from rsp %p\n",
-                            next->name != nullptr ? next->name : "?",
+                            next->name,
                             next_index, next->pid,
                             reinterpret_cast<void*>(resume),
                             reinterpret_cast<void*>(next->kernel_rsp));
@@ -507,7 +554,7 @@ void init()
     main_task.pid    = g_next_pid++;
     main_task.tgid   = main_task.pid;
     main_task.state  = State::Running;
-    main_task.name   = "main";
+    set_name(main_task, "main");
     main_task.space  = vmm::kernel_space();
     files::init_table(main_task.files);
     g_task_count = 1;
@@ -541,7 +588,7 @@ u32 spawn(const char* name, Entry entry, void* arg)
     task->state      = State::Ready;
     task->is_user    = false;
     task->space      = vmm::kernel_space();
-    task->name       = name;
+    set_name(*task, name);
     task->bkl_depth  = 0;
     task->entry      = entry;
     task->arg        = arg;
@@ -572,11 +619,17 @@ u32 spawn_user(const char* name, vmm::AddressSpace space,
     task->kernel_stack_top = task->kernel_stack + kStackSize;
     task->pid        = g_next_pid++;
     task->tgid       = task->pid;      // a new process leads its own group
+    // And its own process group and session, until a shell says otherwise.
+    // fork overwrites both from the parent immediately below; this is what the
+    // three programs the build hands the kernel start with.
+    task->pgid       = task->pid;
+    task->sid        = task->pid;
+    task->report     = -1;
     task->parent_pid = parent_pid;
     task->state      = State::Ready;
     task->is_user    = true;
     task->space      = space;
-    task->name       = name;
+    set_name(*task, name);
     task->brk        = memory::kUserBrkBase;
     task->mmap_next  = memory::kUserMmapBase;
     task->sig_pending  = 0;
@@ -623,11 +676,14 @@ u32 spawn_thread(const TrapFrame& frame)
     // Same group, same address space: this is a thread, not a process. The
     // creator is its parent so wait() can be used to join it.
     task->tgid       = self->tgid;
+    task->pgid       = self->pgid;
+    task->sid        = self->sid;
+    task->report     = -1;
     task->parent_pid = self->pid;
     task->state      = State::Ready;
     task->is_user    = true;
     task->space      = self->space;
-    task->name       = self->name;
+    set_name(*task, self->name);
     task->brk        = self->brk;
     task->mmap_next  = self->mmap_next;
     task->uid        = self->uid;
@@ -839,6 +895,13 @@ u32 fork_current(const TrapFrame& parent_user)
         child_task->mmap_next = parent->mmap_next;
         files::inherit(child_task->files);
 
+        // The group and the session are the parent's. A shell puts a child in
+        // its own group straight after forking, and does the same from the
+        // child before it execs, because whichever runs first has to win - but
+        // until one of them does, the child is where its parent was.
+        child_task->pgid = parent->pgid;
+        child_task->sid  = parent->sid;
+
         // Dispositions carry across fork (the image is the same, so its handler
         // addresses are still valid); pending signals do not.
         memcpy(child_task->sig_handler, parent->sig_handler,
@@ -914,6 +977,32 @@ u32 fork_current(const TrapFrame& parent_user)
     exit_current(code);
 }
 
+// Suspend this task where it stands, and tell its parent so.
+//
+// Beside exit_current because it is the same shape - the task stops running and
+// somebody waiting on it has to hear about it - and deliberately not the same
+// thing: nothing is released. The address space, the open files, the kernel
+// stack and the pending IPC all stay exactly as they are, because the whole
+// point is that SIGCONT can put it back to work with none of it noticing.
+void stop_current(int signo)
+{
+    sync::bkl::acquire();
+    cpu::cli();
+
+    Task* self = current();
+    self->report = signals::kStopped | signo;
+    self->state  = State::Stopped;
+
+    Task* parent = find(self->parent_pid);
+    if (parent != nullptr && parent->state == State::Blocked)
+        parent->state = State::Ready;
+
+    // The lock passes to whatever runs next, as it does for an exiting task:
+    // this one is not going to reach a release.
+    switch_to(pick_next());
+    // ...and this is where SIGCONT brings it back, with the lock its own again.
+}
+
 void exit_current(i32 code)
 {
     // Acquired and never released here: the task is going away, and the lock
@@ -973,7 +1062,18 @@ void exit_current(i32 code)
     __builtin_unreachable();
 }
 
-i64 wait_child(i32* status)
+// Which children this call is asking about. The four cases POSIX gives waitpid,
+// and they are all useful here: a shell waits for one process when it is
+// foregrounding a job, and for a whole group when the job is a pipeline.
+bool wanted(const Task& t, i64 which, u32 me)
+{
+    if (which > 0)  return t.pid == static_cast<u32>(which);
+    if (which == -1) return true;
+    if (which == 0)  return t.pgid == pgid_of(me);
+    return t.pgid == static_cast<u32>(-which);
+}
+
+i64 wait_child(i64 which, i32* status, u32 options)
 {
     KernelLock lock;
     for (;;) {
@@ -984,7 +1084,27 @@ i64 wait_child(i32* status)
             Task& t = g_tasks[i];
             if (t.parent_pid != current()->pid || t.state == State::Unused)
                 continue;
+            if (!wanted(t, which, current()->pid))
+                continue;
             any_child = true;
+
+            // A stop or a continue is news about a child that is still there,
+            // so it is reported without reaping anything - and only once,
+            // which is what clearing the note is for. A caller that did not ask
+            // to hear about these gets no mention of them at all, which is why
+            // an ordinary wait() still blocks straight through a suspension.
+            if (t.report != -1) {
+                const bool is_stop = (t.report & signals::kStatusKind) ==
+                                     signals::kStopped;
+                if ((is_stop  && (options & kWaitUntraced)  != 0) ||
+                    (!is_stop && (options & kWaitContinued) != 0)) {
+                    const i64 pid = t.pid;
+                    if (status != nullptr)
+                        *status = t.report;
+                    t.report = -1;
+                    return pid;
+                }
+            }
 
             // The group *leader's* slot has to outlive its threads: it holds
             // the open files they all share, and reusing it now would pull
@@ -1031,9 +1151,20 @@ i64 wait_child(i32* status)
         }
 
         if (!any_child)
-            return -1;
+            return kWaitNoChildren;
 
-        // A child is still running; block until one exits, then look again.
+        if ((options & kWaitNoHang) != 0)
+            return 0;           // nothing ready, and the caller will not wait
+
+        // A signal arriving is an answer too. Without this a shell waiting for
+        // a job would sit through its own Ctrl-C: the delivery check runs on
+        // the way out to user mode, and a wait that goes straight back to
+        // sleep never gets there.
+        if (signal_pending())
+            return kWaitInterrupted;
+
+        // A child is still running; block until one exits, stops or is
+        // continued, then look again.
         current()->state = State::Blocked;
         switch_to(pick_next());
     }
@@ -1058,7 +1189,37 @@ bool signal_send(u32 pid, int signo)
     if (signo == 0)
         return true;
 
+    // Stopping and continuing cancel each other, and the loser is whichever
+    // arrived first. Without this a program sent SIGSTOP and then SIGCONT would
+    // come back and immediately stop again on the signal still queued behind
+    // it, which reads from the outside as SIGCONT not working.
+    if (signo == signals::kSigCont)
+        target->sig_pending &= ~((1u << signals::kSigStop) |
+                                 (1u << signals::kSigTstp) |
+                                 (1u << signals::kSigTtin) |
+                                 (1u << signals::kSigTtou));
+    else if (signals::default_stops(signo))
+        target->sig_pending &= ~(1u << signals::kSigCont);
+
     target->sig_pending |= 1u << signo;
+
+    // SIGCONT acts before any disposition is consulted, and has to: a stopped
+    // task is not running, so it cannot reach the delivery check that would
+    // otherwise notice. Restarting it *is* the signal. A handler for it, if
+    // there is one, then runs on the way back out like any other.
+    if (signo == signals::kSigCont && target->state == State::Stopped) {
+        target->state  = State::Ready;
+        target->report = signals::kContinued;
+        Task* parent = find(target->parent_pid);
+        if (parent != nullptr && parent->state == State::Blocked)
+            parent->state = State::Ready;
+    }
+
+    // SIGKILL has to reach a stopped task too, which by definition is not going
+    // to run to collect it. Nothing may be unkillable by virtue of being
+    // suspended - that would be a way to make a process permanent.
+    if (signo == signals::kSigKill && target->state == State::Stopped)
+        target->state = State::Ready;
 
     // A signal is a reason to run: a target parked in wait() or on a channel
     // has to come back so the delivery check on its way out to user mode runs.
@@ -1067,6 +1228,111 @@ bool signal_send(u32 pid, int signo)
         target->wait_channel = 0;
     }
     return true;
+}
+
+// Every process in a group. This is what a terminal does with Ctrl-C and what
+// a shell does with `kill %1`: the unit a person means by "that job" is the
+// group, not whichever process of it happens to be listed first.
+//
+// Threads are skipped - a signal to a group is meant once per process, and the
+// leader is where a process's dispositions live anyway.
+int signal_send_group(u32 pgid, int signo)
+{
+    if (signo < 0 || signo >= static_cast<int>(kMaxSignals))
+        return -1;
+
+    int sent = 0;
+    // Collected first and delivered after, because signal_send can restart a
+    // stopped task and reorder nothing else - but walking the table while
+    // sending to it is the kind of thing that only breaks once the table moves.
+    u32 targets[kMaxTasks];
+    u32 count = 0;
+    {
+        cpu::InterruptGuard guard;
+        for (u32 i = 0; i < g_task_count && count < kMaxTasks; ++i) {
+            const Task& t = g_tasks[i];
+            if (t.state == State::Unused || t.state == State::Dead ||
+                t.state == State::Zombie || !t.is_user)
+                continue;
+            if (t.pgid != pgid || t.tgid != t.pid)
+                continue;
+            targets[count++] = t.pid;
+        }
+    }
+    for (u32 i = 0; i < count; ++i)
+        if (signal_send(targets[i], signo))
+            ++sent;
+    return sent > 0 ? sent : -1;
+}
+
+// --- process groups and sessions ---------------------------------------------
+
+u32 pgid_of(u32 pid)
+{
+    cpu::InterruptGuard guard;
+    const Task* t = find(pid == 0 ? current()->pid : pid);
+    return t != nullptr ? t->pgid : 0;
+}
+
+u32 sid_of(u32 pid)
+{
+    cpu::InterruptGuard guard;
+    const Task* t = find(pid == 0 ? current()->pid : pid);
+    return t != nullptr ? t->sid : 0;
+}
+
+// Move a process into a group. pid 0 means the caller, pgid 0 means "a group of
+// its own, named after it".
+//
+// A shell calls this twice for every child - once in the parent and once in the
+// child - because it cannot know which of the two runs first and the child must
+// be in its group before it is sent anything. Doing it twice is the standard
+// answer and is why this is idempotent.
+bool set_pgid(u32 pid, u32 pgid)
+{
+    cpu::InterruptGuard guard;
+    Task* self = current();
+    Task* t = find(pid == 0 ? self->pid : pid);
+    if (t == nullptr || !t->is_user)
+        return false;
+    // Only the process itself or its parent, and only within one session: a
+    // group is a subdivision of a session, and a process cannot be moved into
+    // some other login's idea of a job.
+    if (t->pid != self->pid && t->parent_pid != self->pid)
+        return false;
+    if (t->sid != self->sid)
+        return false;
+    if (pgid == 0)
+        pgid = t->pid;
+    // The group has to be in this session, which it is if it already exists
+    // here or if the process is starting it.
+    if (pgid != t->pid) {
+        bool found = false;
+        for (u32 i = 0; i < g_task_count && !found; ++i)
+            found = g_tasks[i].state != State::Unused &&
+                    g_tasks[i].pgid == pgid && g_tasks[i].sid == t->sid;
+        if (!found)
+            return false;
+    }
+    t->pgid = pgid;
+    return true;
+}
+
+// Start a new session: a new group in a new session, both named after the
+// caller, and no controlling terminal. A process that already leads a group
+// cannot, because the new session would have to take the group with it.
+u32 set_sid()
+{
+    cpu::InterruptGuard guard;
+    Task* self = current();
+    if (self->pgid == self->pid && self->sid == self->pid)
+        return self->sid;       // already exactly this
+    for (u32 i = 0; i < g_task_count; ++i)
+        if (g_tasks[i].state != State::Unused && g_tasks[i].pgid == self->pid)
+            return 0;           // leads a group already
+    self->sid  = self->pid;
+    self->pgid = self->pid;
+    return self->sid;
 }
 
 int signal_take_pending()
@@ -1096,8 +1362,9 @@ void signal_set_handler(int signo, u64 handler)
 {
     if (signo <= 0 || signo >= static_cast<int>(kMaxSignals))
         return;
-    // SIGKILL must stay fatal, or a process could make itself unkillable.
-    if (signo == signals::kSigKill)
+    // These two must stay what they are, or a process could make itself
+    // unkillable - or, just as bad, unstoppable.
+    if (signals::uncatchable(signo))
         return;
     group_leader(current())->sig_handler[signo] = handler;
 }
@@ -1109,6 +1376,16 @@ void signal_reset_all()
         leader->sig_handler[i] = signals::kSigDefault;
     leader->sig_restorer = 0;
     leader->sig_pending = 0;
+}
+
+// What execve calls once it knows which program it is about to become. Until
+// this existed a task kept whatever name it was forked with, so everything
+// descended from init was called init - including, misleadingly, in a crash
+// report.
+void set_current_name(const char* name)
+{
+    cpu::InterruptGuard guard;
+    set_name(*current(), name);
 }
 
 u64  signal_restorer()          { return group_leader(current())->sig_restorer; }
@@ -1254,6 +1531,8 @@ u32 snapshot(TaskInfo* out, u32 max)
         o.uid = t.uid;
         o.state = static_cast<u32>(t.state);
         o.is_user = t.is_user ? 1u : 0u;
+        o.pgid = t.pgid;
+        o.sid  = t.sid;
         o.ticks = t.ticks;
         // What the process has asked for beyond its image: the break and the
         // mmap arena are the two things it grows, and together they are the
@@ -1263,8 +1542,7 @@ u32 snapshot(TaskInfo* out, u32 max)
                        ? t.mmap_next - memory::kUserMmapBase : 0)
                 : 0;
         u32 k = 0;
-        if (t.name != nullptr)
-            while (t.name[k] != '\0' && k < 31) { o.name[k] = t.name[k]; ++k; }
+        while (t.name[k] != '\0' && k < 31) { o.name[k] = t.name[k]; ++k; }
         o.name[k] = '\0';
     }
     return n;
@@ -1363,7 +1641,7 @@ const char* stack_owner(u64 address, u32* pid_out)
             continue;
         if (address >= t.kernel_stack && address < t.kernel_stack_top) {
             if (pid_out != nullptr) *pid_out = t.pid;
-            return t.name != nullptr ? t.name : "?";
+            return t.name;
         }
     }
     return nullptr;
@@ -1372,7 +1650,7 @@ const char* stack_owner(u64 address, u32* pid_out)
 const char* current_name()
 {
     const Task* task = current();
-    return task != nullptr && task->name != nullptr ? task->name : "?";
+    return task != nullptr ? task->name : "?";
 }
 
 bool current_is_user()

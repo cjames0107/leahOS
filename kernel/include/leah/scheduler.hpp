@@ -126,6 +126,30 @@ bool set_credentials_of(u32 pid, u32 uid, u32 gid);
 // user task.
 bool signal_send(u32 pid, int signo);
 
+// The same, to every process of a process group. Returns how many it reached,
+// or -1 if that was none. This is what a terminal does with Ctrl-C: the unit a
+// person means by "the thing I am running" is the group, because a pipeline is
+// several processes and interrupting one of them is not interrupting it.
+int  signal_send_group(u32 pgid, int signo);
+
+// Suspend the calling task until somebody sends it SIGCONT, and tell its parent
+// it has. Nothing is released - the address space, the files and the kernel
+// stack all stay - because the task is expected to carry on afterwards.
+void stop_current(int signo);
+
+// --- process groups and sessions --------------------------------------------
+//
+// A process group is a job: everything in `a | b | c` is one group, so one
+// Ctrl-C reaches all three and one wait covers all three. A session is a login,
+// a set of groups sharing one terminal. Both are inherited across fork and kept
+// across execve - a shell needs a child to be in the right group before the
+// child has run a single instruction of its own.
+
+u32  pgid_of(u32 pid);          // pid 0 means the caller
+u32  sid_of(u32 pid);
+bool set_pgid(u32 pid, u32 pgid);   // both 0-defaulting, as setpgid does
+u32  set_sid();                     // 0 if the caller already leads a group
+
 // Remove and return the lowest pending signal, or 0 if none are pending.
 int  signal_take_pending();
 bool signal_pending();
@@ -176,10 +200,24 @@ struct NoPreemption {
 // could ever reap it.
 [[noreturn]] void exit_group(i32 code);
 
-// Reap a finished child. Returns the child's pid and writes its exit code
-// through `status` (if non-null), or -1 when the caller has no children.
-// Blocks until a child exits if one is still running.
-i64 wait_child(i32* status);
+// What wait_child may return instead of a pid. Distinct values rather than one
+// -1, because "you have no children" and "a signal arrived" want completely
+// different things from the caller and it used to be unable to tell.
+constexpr i64 kWaitNoChildren  = -1;
+constexpr i64 kWaitInterrupted = -2;
+
+// Options, matching waitpid's.
+constexpr u32 kWaitNoHang    = 1;   // return 0 rather than block
+constexpr u32 kWaitUntraced  = 2;   // report children that stopped
+constexpr u32 kWaitContinued = 4;   // report children that were continued
+
+// Reap a finished child, or hear about one that stopped or was continued.
+//
+// `which` selects: a pid, -1 for any child, 0 for any in the caller's process
+// group, or -pgid for any in that one. Writes the status word from
+// <leah/signal.hpp> through `status`, and returns the child's pid, 0 when
+// kWaitNoHang found nothing ready, or one of the two constants above.
+i64 wait_child(i64 which, i32* status, u32 options);
 
 // --- fork/exec support ------------------------------------------------------
 
@@ -193,6 +231,11 @@ u32 current_pid();
 
 // For a fault report: which program was running, and whether it was in ring 3.
 const char* current_name();
+
+// Set by execve, which is the only thing that knows what the task has become.
+// The task keeps its own copy - a borrowed pointer into the image's argument
+// storage stops meaning anything the moment the image is replaced.
+void set_current_name(const char* name);
 
 // The kernel stack the running task is supposed to be using. For a panic to be
 // able to say whether the stack pointer it faulted with is even its own.
@@ -214,6 +257,8 @@ struct TaskInfo {
     u32 uid;
     u32 state;          // matches State, with 0 meaning an unused slot
     u32 is_user;
+    u32 pgid;           // its job, and
+    u32 sid;            // its login - what ps prints beside the two above
     u64 ticks;          // scheduler slices this task has been given
     u64 bytes;          // resident user memory
     char name[32];

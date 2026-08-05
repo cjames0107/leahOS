@@ -14,8 +14,9 @@
 #define PROC_READY   1
 #define PROC_RUNNING 2
 #define PROC_BLOCKED 3
-#define PROC_ZOMBIE  4
-#define PROC_DEAD    5
+#define PROC_STOPPED 4      /* suspended, waiting for SIGCONT */
+#define PROC_ZOMBIE  5
+#define PROC_DEAD    6
 
 struct proc_info {
     uint32_t pid;
@@ -24,6 +25,8 @@ struct proc_info {
     uint32_t uid;
     uint32_t state;
     uint32_t is_user;
+    uint32_t pgid;          /* its job */
+    uint32_t sid;           /* its login */
     uint64_t ticks;         /* scheduler slices given to it */
     uint64_t bytes;         /* user memory it has asked for */
     char     name[32];

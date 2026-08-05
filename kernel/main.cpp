@@ -212,7 +212,7 @@ void run_userland()
         panic("could not create the init process");
 
     i32 status = 0;
-    const i64 reaped = scheduler::wait_child(&status);
+    const i64 reaped = scheduler::wait_child(-1, &status, 0);
 
     console::set_color(console::Color::DarkGray);
     console::printf("\n  kernel: init (pid %lld) exited, status 0x%x\n", reaped, status);

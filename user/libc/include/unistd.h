@@ -20,7 +20,46 @@ void    __fd_resolve(const char* path, char* out);
 
 pid_t fork(void);
 int   execve(const char* path, char* const argv[], char* const envp[]);
+
+/* Reap any child. waitpid(-1, status, 0), and always was - see <sys/wait.h>
+ * for what the status word means, and for waiting on one job in particular. */
 pid_t wait(int* status);
+
+/* --- process groups and sessions -------------------------------------------
+ *
+ * A process group is a job. Everything in `a | b | c` is put in one group, so
+ * one Ctrl-C reaches all three and one wait covers all three - which is the
+ * whole reason the concept exists, and why a shell is the main thing that ever
+ * calls these. A session is a login: a set of groups sharing one terminal.
+ *
+ * Both are inherited across fork and kept across execve, so a shell can put a
+ * child where it belongs before the child has run any of its own code.
+ */
+
+/* Move a process into a group. pid 0 means the caller; pgid 0 means a group of
+ * its own, named after it. A shell calls this from both sides of a fork -
+ * whichever runs first wins, and the child has to be in the group before
+ * anything is sent to it. It is idempotent for exactly that reason. */
+int   setpgid(pid_t pid, pid_t pgid);
+pid_t getpgid(pid_t pid);       /* pid 0 means the caller */
+pid_t getpgrp(void);            /* getpgid(0) */
+
+/* Start a new session, in a new group, with no controlling terminal. Fails if
+ * the caller already leads a process group, because the new session would have
+ * to take that group with it. */
+pid_t setsid(void);
+pid_t getsid(pid_t pid);
+
+/* Which process group the terminal on `fd` is currently listening to. Only the
+ * foreground group may be sent what the keyboard generates; everything else is
+ * a background job.
+ *
+ * There is no terminal driver to hold this - a terminal here is a program at
+ * the far end of a pipe - so it lives in a small piece of shared memory that
+ * the terminal creates and everything it starts inherits, the same way the
+ * controlling terminal's descriptor does. */
+pid_t tcgetpgrp(int fd);
+int   tcsetpgrp(int fd, pid_t pgid);
 void  yield(void);
 
 /* Block for at least `ms` milliseconds. Prefer this to spinning on yield() in a
@@ -41,6 +80,13 @@ int    dup(int oldfd);
  * there through fork and execve. */
 int    tty_fd(void);
 void   tty_set(int fd);
+
+/* The terminal's control block - where the foreground process group lives, for
+ * want of a tty driver to keep it in. A terminal calls tty_control_create
+ * before starting its shell; everything below inherits the key. */
+unsigned tty_control_key(void);
+void     tty_set_control(unsigned key);
+unsigned tty_control_create(void);
 int    chdir(const char* path);
 int    getcwd(char* buffer, size_t size);
 int    unlink(const char* path);
