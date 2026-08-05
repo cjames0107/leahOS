@@ -21,6 +21,7 @@
 #include <ipc.h>
 #include <math.h>
 #include <paths.h>
+#include <time.h>
 #include <sound.h>
 #include <unistd.h>
 
@@ -1597,6 +1598,139 @@ static void test_devices(void)
         close(fd);
 }
 
+
+/* --- the clock and the calendar --------------------------------------------- */
+
+static void test_time(void)
+{
+    printf("time:\n");
+
+    const time_t now = time(0);
+    /* Any date this system could plausibly be running on. 1.7e9 is 2023;
+     * 4e9 is 2096. A zero means the CMOS was not believable, which is a real
+     * possibility and a different failure from the arithmetic being wrong. */
+    check("the clock reads a plausible date", now > 1700000000 && now < 4000000000);
+
+    struct timespec ts;
+    check("clock_gettime works", clock_gettime(&ts) == 0 && ts.tv_sec == now);
+
+    /* It has to move, and only forwards. */
+    msleep(1200);
+    const time_t later = time(0);
+    check("time moves forwards", later > now && later - now < 10);
+
+    /* The conversions, against dates worked out independently. The epoch
+     * itself, a leap day, and the century rule that catches naive code: 2000
+     * was a leap year and 1900 was not. */
+    struct tm t;
+    time_t when = 0;
+    gmtime_r(&when, &t);
+    check("the epoch is 1 January 1970, a Thursday",
+          t.tm_year == 70 && t.tm_mon == 0 && t.tm_mday == 1 &&
+          t.tm_hour == 0 && t.tm_min == 0 && t.tm_sec == 0 && t.tm_wday == 4);
+
+    when = 951825600;                   /* 2000-02-29 12:00:00 UTC */
+    gmtime_r(&when, &t);
+    check("29 February 2000 exists, because 2000 was a leap year",
+          t.tm_year == 100 && t.tm_mon == 1 && t.tm_mday == 29 &&
+          t.tm_hour == 12);
+
+    when = 1709208000;                  /* 2024-02-29 12:00:00 UTC */
+    gmtime_r(&when, &t);
+    check("and so was 2024", t.tm_mon == 1 && t.tm_mday == 29);
+
+    when = 1735689599;                  /* 2024-12-31 23:59:59 UTC */
+    gmtime_r(&when, &t);
+    check("the last second of 2024 is the 366th day",
+          t.tm_year == 124 && t.tm_mon == 11 && t.tm_mday == 31 &&
+          t.tm_hour == 23 && t.tm_min == 59 && t.tm_sec == 59 &&
+          t.tm_yday == 365);
+
+    /* Before the epoch, which is where truncating division goes wrong. */
+    when = -1;
+    gmtime_r(&when, &t);
+    check("one second before the epoch is the last of 1969",
+          t.tm_year == 69 && t.tm_mon == 11 && t.tm_mday == 31 &&
+          t.tm_hour == 23 && t.tm_min == 59 && t.tm_sec == 59);
+
+    /* And back again, for every day across a leap year - which catches an
+     * off-by-one in either direction. */
+    int round_trip = 1;
+    for (time_t probe = 1704067200; probe < 1735689600; probe += 86400) {
+        struct tm b;
+        gmtime_r(&probe, &b);
+        if (timegm(&b) != probe)
+            round_trip = 0;
+    }
+    check("every day of 2024 survives the round trip", round_trip);
+
+    /* Normalisation: a month or a day out of range rolls over, which is what
+     * makes date arithmetic work by adding. */
+    struct tm rolled = { 0, 0, 0, 32, 0, 124, 0, 0, 0 };   /* 32 January 2024 */
+    time_t as_seconds = timegm(&rolled);
+    gmtime_r(&as_seconds, &t);
+    check("the 32nd of January is the 1st of February",
+          t.tm_mon == 1 && t.tm_mday == 1);
+
+    char text[64];
+    when = 1722801600;                  /* 2024-08-04 20:00:00 UTC, a Sunday */
+    gmtime_r(&when, &t);
+    strftime(text, sizeof(text), "%Y-%m-%d %H:%M:%S", &t);
+    check("strftime writes a date", strcmp(text, "2024-08-04 20:00:00") == 0);
+    strftime(text, sizeof(text), "%a %d %b %Y", &t);
+    check("and the names", strcmp(text, "Sun 04 Aug 2024") == 0);
+    strftime(text, sizeof(text), "%F %T", &t);
+    check("and the shorthands", strcmp(text, "2024-08-04 20:00:00") == 0);
+    strftime(text, sizeof(text), "%I %p", &t);
+    check("and a twelve-hour clock", strcmp(text, "08 PM") == 0);
+    check("a format that does not fit says so",
+          strftime(text, 4, "%Y-%m-%d", &t) == 0);
+}
+
+static void test_file_times(void)
+{
+    printf("file timestamps:\n");
+
+    const time_t before = time(0);
+    const int fd = open("/tmp/stamped", O_WRONLY | O_CREAT | O_TRUNC);
+    check("a file can be made", fd >= 0);
+    if (fd < 0)
+        return;
+    write(fd, "first", 5);
+    close(fd);
+
+    struct stat info;
+    check("a new file is stamped with now",
+          stat("/tmp/stamped", &info) == 0 &&
+          info.st_mtime >= before && info.st_mtime <= before + 10);
+
+    const time_t first = info.st_mtime;
+
+    /* A write moves mtime. The wait is because the timestamps are whole
+     * seconds - which is what ext4 stores in those fields - so two writes in
+     * the same second are genuinely indistinguishable. */
+    msleep(2100);
+    const int again = open("/tmp/stamped", O_WRONLY | O_APPEND);
+    if (again >= 0) {
+        write(again, "second", 6);
+        close(again);
+    }
+    check("writing to it moves the modification time",
+          stat("/tmp/stamped", &info) == 0 && info.st_mtime > first);
+
+    /* And a listing carries it, so ls does not have to stat every name. */
+    static struct dirent entries[64];
+    const int n = getdents("/tmp", entries, 64);
+    int found = 0;
+    for (int i = 0; i < n; ++i)
+        if (strcmp(entries[i].d_name, "stamped") == 0 &&
+            entries[i].d_mtime == info.st_mtime)
+            found = 1;
+    check("a directory listing reports the same time", found);
+
+    unlink("/tmp/stamped");
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -1618,6 +1752,8 @@ int main(void)
     test_sound();
     test_layout();
     test_devices();
+    test_time();
+    test_file_times();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

@@ -13,6 +13,7 @@
 #include <leah/keyboard.hpp>
 #include <leah/ipc.hpp>
 #include <leah/fpu.hpp>
+#include <leah/clock.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
 #include <leah/signal.hpp>
@@ -672,6 +673,22 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
                                           static_cast<u32>(frame->rdx))
                 ? 0 : -1);
         break;
+
+    case ClockTime: {
+        /* Seconds and nanoseconds into a caller-supplied pair of words. Two
+         * values rather than one return, because a return is one register and
+         * a nanosecond needs its own. */
+        if (!user_range_ok(frame->rdi, 16)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const clock::Time t = clock::now();
+        auto* out = reinterpret_cast<i64*>(frame->rdi);
+        out[0] = t.seconds;
+        out[1] = static_cast<i64>(t.nanoseconds);
+        frame->rax = 0;
+        break;
+    }
 
     case InputPost:
         // A keyboard driver in ring 3 handing over what it decoded. Root only,

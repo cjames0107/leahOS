@@ -13,6 +13,12 @@ struct stat {
     uint64_t st_size;
     uint32_t st_uid;
     uint32_t st_gid;
+    /* Seconds since 1970. mtime is when the contents last changed, ctime when
+     * the inode did - chmod moves the second and not the first, which is what
+     * lets a backup tell a real change from an adjusted permission. */
+    int64_t  st_mtime;
+    int64_t  st_ctime;
+    int64_t  st_atime;
 };
 
 struct dirent {
@@ -20,6 +26,7 @@ struct dirent {
     uint32_t d_mode;        /* permission bits, 0777 - the execute bits are
                                how a program is told from a document */
     uint64_t d_size;
+    int64_t  d_mtime;       /* seconds since 1970 */
     char     d_name[128];
 };
 

@@ -68,6 +68,7 @@
 #define SYS_setcreds    78
 #define SYS_credsof     79
 #define SYS_inputpost   80
+#define SYS_clocktime   81
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

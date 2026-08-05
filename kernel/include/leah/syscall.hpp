@@ -96,6 +96,7 @@ enum Number : u64 {
     SetCreds    = 78,  // set a process's identity outright; root, i.e. authd
     CredsOf     = 79,  // a process's uid and gid, so a server can trust who asked
     InputPost   = 80,  // a ring 3 input driver putting keys into the queue
+    ClockTime   = 81,  // seconds and nanoseconds since 1970
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

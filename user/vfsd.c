@@ -16,6 +16,7 @@
 #include <shm.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <vfsd.h>
@@ -72,6 +73,11 @@ struct inode {
     unsigned mode;
     unsigned uid, gid;
     unsigned long size;
+    /* Seconds since 1970, as ext4 stores them: three 32-bit fields for when
+     * the contents were last read, when the inode last changed, and when the
+     * contents were last written. Every file on this filesystem had all three
+     * at zero until there was a clock to fill them from. */
+    unsigned atime, ctime, mtime;
     unsigned char block[60];
 };
 
@@ -104,6 +110,9 @@ static int read_inode(unsigned number, struct inode* out)
     out->gid  = rd16(raw, 24);
     out->size = (unsigned long)rd32(raw, 4) |
                 ((unsigned long)rd32(raw, 108) << 32);
+    out->atime = rd32(raw, 8);
+    out->ctime = rd32(raw, 12);
+    out->mtime = rd32(raw, 16);
     memcpy(out->block, raw + 40, 60);
     return 0;
 }
@@ -374,8 +383,28 @@ static int write_inode(unsigned number, const struct inode* in, unsigned links)
     const unsigned used = (unsigned)((in->size + g_block_size - 1) / g_block_size);
     wr32w(raw, 28, used * (g_block_size / 512));
     wr32w(raw, 32, rd32(raw, 32) | 0x80000);            /* EXTENTS_FL */
+    /* The three timestamps, at 8, 12 and 16. i_dtime at 20 is when an inode
+     * was deleted and is left alone: writing a nonzero one into a live inode
+     * is what makes fsck report it as "deleted inode referenced". */
+    wr32w(raw, 8, in->atime);
+    wr32w(raw, 12, in->ctime);
+    wr32w(raw, 16, in->mtime);
     memcpy(raw + 40, in->block, 60);
     return write_block(block, g_block);
+}
+
+/* Mark an inode as written to, now. `contents` distinguishes a change to the
+ * file from a change to the inode alone: chmod moves ctime and leaves mtime
+ * where it was, which is what lets a backup tell "the file changed" from
+ * "somebody adjusted its permissions". */
+static void touch_inode(struct inode* in, int contents)
+{
+    const unsigned now = (unsigned)time(0);
+    in->ctime = now;
+    if (contents) {
+        in->mtime = now;
+        in->atime = now;
+    }
 }
 
 /* --- names --------------------------------------------------------------- */
@@ -662,6 +691,7 @@ static int create(const char* path, int is_dir)
     memset(&fresh, 0, sizeof(fresh));
     fresh.mode = is_dir ? (0040755) : (0100644);
     fresh.size = 0;
+    touch_inode(&fresh, 1);
     /* An empty extent root: the magic, no entries, and room for four. */
     wr16w(fresh.block, 0, 0xF30A);
     wr16w(fresh.block, 2, 0);
@@ -890,6 +920,13 @@ int main(void)
                 /* Both owners in one word: they are always wanted together
                  * and there are only four to spend. */
                 r.word[3] = (long)((in.uid << 16) | in.gid);
+                /* The timestamps go in the data, which stat has no other use
+                 * for - the four words are spent. */
+                {
+                    unsigned stamps[3] = { in.mtime, in.ctime, in.atime };
+                    memcpy(r.data, stamps, sizeof(stamps));
+                    r.bytes = sizeof(stamps);
+                }
             }
         } else if (m.tag == VFS_LIST) {
             struct inode in;
@@ -919,6 +956,7 @@ int main(void)
                  * is guessing from the name, which is what a .ELF suffix was
                  * doing. */
                 r.word[2] = (long)(ci.mode & 0777u);
+                r.word[3] = (long)ci.mtime;
             }
         } else if (m.tag == VFS_READ) {
             struct inode in;
@@ -1089,6 +1127,7 @@ int main(void)
                     if (offset + done > in.size)
                         in.size = offset + done;
                 }
+                touch_inode(&in, 1);
                 write_inode(ino, &in, inode_links(ino));
                 r.word[0] = (long)done;
             }
@@ -1136,6 +1175,7 @@ int main(void)
                 /* An empty extent tree: the header stays, the entries go, or
                  * the next write would follow pointers to freed blocks. */
                 memset(in.block, 0, 60);
+                touch_inode(&in, 1);
                 wr16w(in.block, 0, 0xF30A);     /* magic */
                 wr16w(in.block, 2, 0);          /* entries */
                 wr16w(in.block, 4, 4);          /* max */

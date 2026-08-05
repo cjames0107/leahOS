@@ -121,7 +121,7 @@ KERNEL_BIN := $(BUILD)/kernel.bin
 # gone for a long time and the shouting outlived it.
 SBIN_PROGRAMS := init login wserver desktop blockd vfsd netd e1000d audiod \
                  authd usbd ps2d useradd passwd ifconfig
-BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami \
+BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami date \
                  chmod chown stat less grep find wc head tail sort diff tar \
                  gunzip
 USRBIN_PROGRAMS := hello gui tone lspci ping ping6 arp nslookup fetch fetch6 \

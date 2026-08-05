@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -39,6 +40,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    const time_t now = time(0);
     for (int i = 0; i < n; ++i) {
         const int is_dir = entries[i].d_type == S_IFDIR;
         if (!long_format) {
@@ -50,8 +52,9 @@ int main(int argc, char** argv)
             continue;
         }
 
-        /* The directory entry carries a name, a type and a size but no owner
-         * or mode, so the long format has to stat each one. */
+        /* The directory entry carries a name, a type, a size, a mode and a
+         * modification time but no owner, so the long format still has to stat
+         * each one. */
         char full[256];
         join(path, entries[i].d_name, full, sizeof(full));
 
@@ -68,8 +71,23 @@ int main(int argc, char** argv)
         if (username(st.st_uid, owner) != 0)
             snprintf(owner, sizeof(owner), "%u", st.st_uid);
 
-        printf("%s %-8s %8lu %s%s\n", mode, owner,
-               (unsigned long)st.st_size, entries[i].d_name, is_dir ? "/" : "");
+        /* The date, in the form every ls uses: a recent file shows the time
+         * of day, an old one shows the year, because the column is the same
+         * width either way and which of the two you want depends on how long
+         * ago it was. Six months is the traditional dividing line. */
+        char when[24] = "            ";
+        if (st.st_mtime > 0) {
+            struct tm t;
+            if (localtime_r(&st.st_mtime, &t) != 0) {
+                const time_t age = now - st.st_mtime;
+                strftime(when, sizeof(when),
+                         (age > 15552000 || age < -3600) ? "%e %b  %Y"
+                                                         : "%e %b %H:%M", &t);
+            }
+        }
+        printf("%s %-8s %8lu %s %s%s\n", mode, owner,
+               (unsigned long)st.st_size, when, entries[i].d_name,
+               is_dir ? "/" : "");
     }
     return 0;
 }

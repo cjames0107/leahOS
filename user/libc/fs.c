@@ -548,6 +548,17 @@ int stat(const char* path, struct stat* out)
     out->st_mode = (uint32_t)a.word[2];
     out->st_uid  = (uint32_t)((a.word[3] >> 16) & 0xFFFF);
     out->st_gid  = (uint32_t)(a.word[3] & 0xFFFF);
+    /* The three timestamps ride in the data, which stat has no other use for.
+     * An older vfsd that sends none leaves them at zero, which reads as 1970 -
+     * wrong in a way that is obvious rather than plausible. */
+    out->st_mtime = out->st_ctime = out->st_atime = 0;
+    if (a.bytes >= 12) {
+        unsigned stamps[3];
+        memcpy(stamps, a.data, sizeof(stamps));
+        out->st_mtime = (int64_t)stamps[0];
+        out->st_ctime = (int64_t)stamps[1];
+        out->st_atime = (int64_t)stamps[2];
+    }
     return 0;
 }
 
@@ -573,6 +584,7 @@ int getdents(const char* path, struct dirent* buffer, int max)
         buffer[n].d_type = a.word[0] == VFS_KIND_DIR ? S_IFDIR : S_IFREG;
         buffer[n].d_size = (uint64_t)a.word[1];
         buffer[n].d_mode = (unsigned)a.word[2];
+        buffer[n].d_mtime = a.word[3];
         ++n;
     }
     return n;

@@ -1,6 +1,7 @@
 #include <leah/acpi.hpp>
 #include <leah/apic.hpp>
 #include <leah/bootinfo.hpp>
+#include <leah/clock.hpp>
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/syscall.hpp>
@@ -405,6 +406,18 @@ extern "C" void kernel_main(const boot::Info* boot_info)
 
     timer::init();
     step("PIT running at 100 Hz on IRQ 0");
+
+    /* The wall clock, read once from the CMOS and carried forward on the tick
+     * the line above just started. Everything with a timestamp on it - every
+     * file this system writes from here on - dates from this call. */
+    clock::init();
+    {
+        const i64 t = clock::now_seconds();
+        if (clock::from_hardware())
+            console::printf("  [ ok ] wall clock: %lld seconds past 1970\n", t);
+        else
+            console::printf("  [ .. ] no believable CMOS clock; time starts at 1970\n");
+    }
 
     // ACPI names the interrupt controllers and the HPET. With those in hand the
     // legacy pair can be retired: the I/O APIC routes device interrupts and the
