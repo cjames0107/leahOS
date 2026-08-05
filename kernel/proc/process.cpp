@@ -20,35 +20,56 @@ constexpr usize kArgStorage   = 2048;
 struct Args {
     int   argc;
     usize offset[kMaxArgs];     // where each string starts in `storage`
+    // The environment, in the same storage. It is copied here for the same
+    // reason argv is: both live in the caller's address space, and building
+    // the new one switches away from it.
+    int   envc;
+    usize env_offset[kMaxArgs];
     char  storage[kArgStorage];
+    usize used;
 };
 
 // Copy an argv vector out of the currently active (caller's) address space.
-void copy_argv(char** user_argv, Args& out)
+// Copy one NULL-terminated vector into `out`'s storage, appending to whatever
+// is already there. `count` and `offsets` are the caller's to keep.
+void copy_vector(char** user_vector, Args& out, int& count, usize* offsets)
 {
-    out.argc = 0;
-    usize used = 0;
-    if (user_argv == nullptr)
+    count = 0;
+    if (user_vector == nullptr)
         return;
 
     for (int i = 0; i < static_cast<int>(kMaxArgs); ++i) {
-        const char* arg = user_argv[i];
+        const char* arg = user_vector[i];
         if (arg == nullptr)
             break;
-        out.offset[out.argc] = used;
+        if (out.used >= kArgStorage - 1)
+            break;                  // the storage is full; the rest is dropped
+        offsets[count] = out.used;
         usize j = 0;
-        while (arg[j] != '\0' && used < kArgStorage - 1) {
-            out.storage[used++] = arg[j++];
-        }
-        out.storage[used++] = '\0';
-        ++out.argc;
+        while (arg[j] != '\0' && out.used < kArgStorage - 1)
+            out.storage[out.used++] = arg[j++];
+        out.storage[out.used++] = '\0';
+        ++count;
     }
+}
+
+void copy_argv(char** user_argv, Args& out)
+{
+    out.used = 0;
+    out.envc = 0;
+    copy_vector(user_argv, out, out.argc, out.offset);
+}
+
+void copy_envp(char** user_envp, Args& out)
+{
+    copy_vector(user_envp, out, out.envc, out.env_offset);
 }
 
 // A single-argument vector, for a process created without a caller's argv.
 void single_arg(const char* name, Args& out)
 {
     out.argc = 1;
+    out.envc = 0;
     out.offset[0] = 0;
     usize j = 0;
     while (name[j] != '\0' && j < kArgStorage - 1) {
@@ -56,6 +77,7 @@ void single_arg(const char* name, Args& out)
         ++j;
     }
     out.storage[j] = '\0';
+    out.used = j + 1;
 }
 
 bool map_user_stack()
@@ -71,24 +93,34 @@ bool map_user_stack()
     return true;
 }
 
-// Lay out the initial stack the way _start expects: argc, then the argv
-// pointers, a NULL terminator, then the strings. Runs with the new space active
-// so the writes land in it. Returns the user RSP _start begins on.
+// Lay out the initial stack the way _start expects:
+//
+//     argc, argv[0..argc-1], NULL, envp[0..envc-1], NULL, then the strings
+//
+// crt0 has always computed envp as argv + (argc + 1) * 8, which is where the
+// second vector goes - so until there was one, it was pointing at the strings.
+// Runs with the new space active so the writes land in it. Returns the user
+// RSP _start begins on.
 vaddr_t build_stack(const Args& args)
 {
     u64 sp = kUserStackTop;
 
-    // Copy the strings to the top of the stack and note their user addresses.
-    vaddr_t arg_addr[kMaxArgs];
-    for (int i = 0; i < args.argc; ++i) {
-        const char* s = args.storage + args.offset[i];
+    auto copy_string = [&](const char* s) {
         usize len = 0;
         while (s[len] != '\0')
             ++len;
         sp -= len + 1;
         memcpy(reinterpret_cast<void*>(sp), s, len + 1);
-        arg_addr[i] = sp;
-    }
+        return sp;
+    };
+
+    // The strings first, at the top, so the pointers below can name them.
+    vaddr_t arg_addr[kMaxArgs];
+    vaddr_t env_addr[kMaxArgs];
+    for (int i = 0; i < args.argc; ++i)
+        arg_addr[i] = copy_string(args.storage + args.offset[i]);
+    for (int i = 0; i < args.envc; ++i)
+        env_addr[i] = copy_string(args.storage + args.env_offset[i]);
 
     sp &= ~static_cast<u64>(15);         // keep the pointer array 16-aligned
 
@@ -97,6 +129,10 @@ vaddr_t build_stack(const Args& args)
         *reinterpret_cast<u64*>(sp) = value;
     };
 
+    // Pushed backwards, so that they read forwards from the low address.
+    push(0);                             // envp[envc] = NULL
+    for (int i = args.envc - 1; i >= 0; --i)
+        push(env_addr[i]);
     push(0);                             // argv[argc] = NULL
     for (int i = args.argc - 1; i >= 0; --i)
         push(arg_addr[i]);
@@ -273,7 +309,7 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
 }
 
 void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
-          u64 entry_point, const void* user_segments, u32 count)
+          char** envp, u64 entry_point, const void* user_segments, u32 count)
 {
     const vmm::AddressSpace old_space = scheduler::current_task_space();
 
@@ -300,6 +336,7 @@ void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
     copy_argv(argv, args);
     if (args.argc == 0)
         single_arg("program", args);     // at least argv[0]
+    copy_envp(envp, args);
 
     vaddr_t entry = 0;
     vaddr_t stack = 0;

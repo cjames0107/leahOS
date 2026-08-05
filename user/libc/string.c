@@ -68,3 +68,73 @@ char* strcpy(char* dest, const char* src)
         ;
     return dest;
 }
+
+/* --- the ones that were missing ---------------------------------------------
+ *
+ * Added when the environment needed them, which is the usual way a libc grows:
+ * something wants a standard function, finds it absent, and either writes a
+ * private copy or the function gets written properly once. A private copy in
+ * four files is how a system ends up with four subtly different searches.
+ */
+
+int strncmp(const char* a, const char* b, size_t n)
+{
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char x = (unsigned char)a[i], y = (unsigned char)b[i];
+        if (x != y)
+            return x < y ? -1 : 1;
+        if (x == '\0')
+            return 0;
+    }
+    return 0;
+}
+
+char* strchr(const char* s, int c)
+{
+    const char want = (char)c;
+    for (;; ++s) {
+        if (*s == want)
+            return (char*)s;
+        if (*s == '\0')
+            return 0;       /* the terminator counts, which is why this order */
+    }
+}
+
+char* strrchr(const char* s, int c)
+{
+    const char want = (char)c;
+    const char* found = 0;
+    for (;; ++s) {
+        if (*s == want)
+            found = s;
+        if (*s == '\0')
+            return (char*)found;
+    }
+}
+
+char* strstr(const char* haystack, const char* needle)
+{
+    if (needle[0] == '\0')
+        return (char*)haystack;
+    for (; *haystack != '\0'; ++haystack) {
+        size_t i = 0;
+        while (needle[i] != '\0' && haystack[i] == needle[i])
+            ++i;
+        if (needle[i] == '\0')
+            return (char*)haystack;
+    }
+    return 0;
+}
+
+char* strncpy(char* dst, const char* src, size_t n)
+{
+    size_t i = 0;
+    for (; i < n && src[i] != '\0'; ++i)
+        dst[i] = src[i];
+    /* Padded with zeros to the full length, which is what strncpy does and the
+     * reason it does not always terminate: if src fills n exactly there is no
+     * room left for a terminator. Callers wanting one must add it. */
+    for (; i < n; ++i)
+        dst[i] = '\0';
+    return dst;
+}

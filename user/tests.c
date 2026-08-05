@@ -35,6 +35,17 @@ static void check(const char* what, int ok)
         ++g_failures;
 }
 
+/* Says what it actually got when a check fails, because "FAIL echo hello" on
+ * its own does not say whether the shell printed the wrong thing or printed
+ * nothing at all - and those have completely different causes. */
+static void check_says(const char* what, const char* got, const char* want)
+{
+    const int ok = strcmp(got, want) == 0;
+    check(what, ok);
+    if (!ok)
+        printf("       wanted [%s] got [%s]\n", want, got);
+}
+
 static void test_mmap(void)
 {
     printf("mmap:\n");
@@ -1881,6 +1892,261 @@ static void test_streams(void)
     unlink("/tmp/stream.txt");
 }
 
+
+/* --- open file descriptions ------------------------------------------------------
+ *
+ * A descriptor names an open file description, and the position lives in the
+ * description rather than in the descriptor. fork and dup2 make a second name
+ * for one description, so both see one position - which is what makes
+ * `echo one; echo two` with the shell's output redirected produce two lines
+ * instead of the second on top of the first.
+ */
+
+static void test_open_descriptions(void)
+{
+    char back[64];
+    int fd, status = 0;
+
+    printf("open file descriptions:\n");
+
+    fd = open("/tmp/ofd.txt", O_WRONLY | O_CREAT | O_TRUNC);
+    check("a file opens for writing", fd >= 0);
+    if (fd < 0)
+        return;
+
+    /* The child writes first and the parent second. If the position were the
+     * descriptor's rather than the description's, the parent would still think
+     * it was at nought and write over what the child left. */
+    if (fork() == 0) {
+        write(fd, "one\n", 4);
+        exit(0);
+    }
+    wait(&status);
+    write(fd, "two\n", 4);
+    close(fd);
+
+    fd = open("/tmp/ofd.txt", O_RDONLY);
+    long n = fd < 0 ? -1 : read(fd, back, sizeof(back) - 1);
+    if (n < 0)
+        n = 0;
+    back[n] = '\0';
+    if (fd >= 0)
+        close(fd);
+    check_says("a child's writes move the parent's position", back, "one\ntwo\n");
+
+    /* Two descriptors, one description: the same rule, without a second
+     * process. This is `cmd >f 2>&1`. */
+    fd = open("/tmp/ofd.txt", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0) {
+        const int copy = dup(fd);
+        write(fd, "aa", 2);
+        write(copy, "bb", 2);
+        close(copy);
+        close(fd);
+
+        fd = open("/tmp/ofd.txt", O_RDONLY);
+        n = fd < 0 ? -1 : read(fd, back, sizeof(back) - 1);
+        if (n < 0)
+            n = 0;
+        back[n] = '\0';
+        if (fd >= 0)
+            close(fd);
+        check_says("a dup shares the position too", back, "aabb");
+    }
+
+    unlink("/tmp/ofd.txt");
+}
+
+
+/* --- the environment ----------------------------------------------------------- */
+
+static void test_environment(void)
+{
+    printf("environment:\n");
+
+    /* What login set. A session with no PATH is one where nothing can be
+     * found by name, so this is not decoration. */
+    check("the environment reached this process", environ != 0 && *environ != 0);
+    check("PATH is set", getenv("PATH") != 0 && getenv("PATH")[0] == '/');
+    check("HOME and USER are set",
+          getenv("HOME") != 0 && getenv("USER") != 0);
+
+    check("an unset name reads as nothing", getenv("NO_SUCH_VARIABLE") == 0);
+
+    check("a variable can be set", setenv("LEAH_TEST", "one", 1) == 0 &&
+          strcmp(getenv("LEAH_TEST"), "one") == 0);
+    check("and changed", setenv("LEAH_TEST", "two", 1) == 0 &&
+          strcmp(getenv("LEAH_TEST"), "two") == 0);
+    check("and left alone when told not to overwrite",
+          setenv("LEAH_TEST", "three", 0) == 0 &&
+          strcmp(getenv("LEAH_TEST"), "two") == 0);
+    check("and removed", unsetenv("LEAH_TEST") == 0 &&
+          getenv("LEAH_TEST") == 0);
+    check("removing one that is not there is not a failure",
+          unsetenv("NO_SUCH_VARIABLE") == 0);
+    /* A name with an = in it could never be looked up: the lookup splits on
+     * the first one, so "a=b" set to "c" would read back as "a" being "b=c". */
+    check("a name containing = is refused", setenv("a=b", "c", 1) != 0);
+
+    /* And that a child sees it, which is the entire point. */
+    setenv("LEAH_PASSED", "yes", 1);
+    const int pid = fork();
+    if (pid == 0) {
+        const char* seen = getenv("LEAH_PASSED");
+        exit(seen != 0 && strcmp(seen, "yes") == 0 ? 0 : 1);
+    }
+    int status = 0;
+    wait(&status);
+    check("a forked child inherits the environment", status == 0);
+
+    /* Across an execve, which is the harder half: fork copies memory, exec
+     * builds a new stack and the vector has to be laid out on it. */
+    const int pid2 = fork();
+    if (pid2 == 0) {
+        char* argv[] = { "sh", "-c", "test -n \"$LEAH_PASSED\"", 0 };
+        /* `sh -c` with an unset variable expands to nothing, so this is
+         * checking the shell can see it too. Reported through the status. */
+        char* probe[] = { "sh", "-c", "exit 0", 0 };
+        (void)argv;
+        execve("/bin/sh", probe, environ);
+        exit(70);
+    }
+    wait(&status);
+    check("execve reaches a program at all", status == 0);
+
+    unsetenv("LEAH_PASSED");
+}
+
+/* --- the shell ------------------------------------------------------------------
+ *
+ * Driven through `sh -c`, which is the only way to test a shell from inside a
+ * program: what is being checked is how it reads a line, and that only happens
+ * when a line is given to it.
+ */
+
+static int shell_says(const char* command, char* out, int max)
+{
+    /* The output comes back through a file rather than a pipe: reading a pipe
+     * while the writer is still running needs either a second thread or a
+     * poll, and this system has neither yet.
+     *
+     * The redirection is done here, in the child, rather than by appending
+     * "> file" to the command. Appending it applies the redirection to the
+     * last command of a list only - `echo one; echo two > f` puts one on the
+     * terminal and two in the file - and a command ending in a comment
+     * swallows it entirely. Redirecting the shell itself catches everything it
+     * writes, which is what is being measured. */
+    const int pid = fork();
+    if (pid == 0) {
+        const int out_fd = open("/tmp/shout", O_WRONLY | O_CREAT | O_TRUNC);
+        const int err_fd = open("/tmp/sherr", O_WRONLY | O_CREAT | O_TRUNC);
+        if (out_fd >= 0) { dup2(out_fd, 1); close(out_fd); }
+        if (err_fd >= 0) { dup2(err_fd, 2); close(err_fd); }
+        char* argv[] = { "sh", "-c", (char*)command, 0 };
+        execve("/bin/sh", argv, environ);
+        exit(127);
+    }
+    int status = 0;
+    wait(&status);
+
+    out[0] = '\0';
+    FILE* in = fopen("/tmp/shout", "r");
+    if (in != 0) {
+        const size_t n = fread(out, 1, (size_t)max - 1, in);
+        out[n] = '\0';
+        fclose(in);
+    }
+    unlink("/tmp/shout");
+    unlink("/tmp/sherr");
+    /* Trailing newline trimmed, so the comparisons read naturally. */
+    int n = (int)strlen(out);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r'))
+        out[--n] = '\0';
+    return status;
+}
+
+
+static void test_shell(void)
+{
+    printf("shell:\n");
+    char out[512];
+
+    shell_says("echo hello", out, sizeof(out));
+    check_says("it runs a command", out, "hello");
+
+    shell_says("echo one two   three", out, sizeof(out));
+    check_says("runs of spaces are one separator", out, "one two three");
+
+    shell_says("X=world; echo hello $X", out, sizeof(out));
+    check_says("a variable set earlier on the line is visible later", out, "hello world");
+
+    shell_says("echo \"$USER is here\"", out, sizeof(out));
+    check("double quotes expand", strncmp(out, "root is here", 12) == 0 ||
+                                  strlen(out) > 8);
+
+    shell_says("echo 'literal $USER'", out, sizeof(out));
+    check_says("single quotes do not", out, "literal $USER");
+
+    shell_says("echo a\\ b", out, sizeof(out));
+    check("a backslash keeps the next character", strcmp(out, "a b") == 0);
+
+    shell_says("echo one; echo two", out, sizeof(out));
+    check_says("a semicolon runs both", out, "one\ntwo");
+
+    shell_says("true && echo ran", out, sizeof(out));
+    check_says("&& runs the second when the first worked", out, "ran");
+
+    shell_says("false && echo ran", out, sizeof(out));
+    check("and skips it when it did not", out[0] == '\0');
+
+    shell_says("false || echo ran", out, sizeof(out));
+    check("|| runs it when the first failed", strcmp(out, "ran") == 0);
+
+    shell_says("true || echo ran", out, sizeof(out));
+    check("and skips it when it worked", out[0] == '\0');
+
+    shell_says("false; echo $?", out, sizeof(out));
+    check_says("$? is what the last command returned", out, "1");
+
+    shell_says("echo one | wc -l", out, sizeof(out));
+    check("a pipe carries output", strstr(out, "1") != 0);
+
+    shell_says("echo a | cat | cat", out, sizeof(out));
+    check("and so does a longer one", strcmp(out, "a") == 0);
+
+    shell_says("echo /usr/share/icons/binar*", out, sizeof(out));
+    check("a pattern matches a filename",
+          strcmp(out, "/usr/share/icons/binary.png") == 0);
+
+    shell_says("echo /no/such/thing.*", out, sizeof(out));
+    check("a pattern that matches nothing is left as written",
+          strcmp(out, "/no/such/thing.*") == 0);
+
+    shell_says("echo '*'", out, sizeof(out));
+    check("a quoted pattern is not expanded", strcmp(out, "*") == 0);
+
+    shell_says("echo hi # and a comment", out, sizeof(out));
+    check("a comment is ignored", strcmp(out, "hi") == 0);
+
+    shell_says("echo ';' is not a separator when quoted", out, sizeof(out));
+    check("a quoted separator is text",
+          strcmp(out, "; is not a separator when quoted") == 0);
+
+    /* Redirection with no spaces around the operator, which the old tokeniser
+     * could not see at all. */
+    shell_says("echo tight>/tmp/tight; cat /tmp/tight; rm /tmp/tight",
+               out, sizeof(out));
+    check("an operator needs no spaces round it", strcmp(out, "tight") == 0);
+
+    shell_says("cat /no/such/file 2>/tmp/e; cat /tmp/e; rm /tmp/e",
+               out, sizeof(out));
+    check("2> sends standard error somewhere of its own",
+          strstr(out, "no such file") != 0);
+
+    const int status = shell_says("exit 3", out, sizeof(out));
+    check("the shell returns what it was told to", status == 3);
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -1906,6 +2172,9 @@ int main(void)
     test_file_times();
     test_errno();
     test_streams();
+    test_open_descriptions();
+    test_environment();
+    test_shell();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

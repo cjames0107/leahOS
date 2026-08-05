@@ -250,8 +250,17 @@ static void format(Sink* sink, const char* fmt, va_list args)
         }
 
         unsigned width = 0;
-        while (fmt[i] >= '0' && fmt[i] <= '9')
-            width = width * 10 + (unsigned)(fmt[i++] - '0');
+        if (fmt[i] == '*') {
+            /* The width comes from the arguments. A negative one means left,
+             * which is what printf has always done with it. */
+            ++i;
+            const int given = va_arg(args, int);
+            if (given < 0) { left = 1; width = (unsigned)(-given); }
+            else           { width = (unsigned)given; }
+        } else {
+            while (fmt[i] >= '0' && fmt[i] <= '9')
+                width = width * 10 + (unsigned)(fmt[i++] - '0');
+        }
 
         /* Precision. Only the conversions below that read it do anything with
          * it, but it is parsed whatever the specifier turns out to be: an
@@ -262,8 +271,14 @@ static void format(Sink* sink, const char* fmt, va_list args)
         if (fmt[i] == '.') {
             ++i;
             have_prec = 1;
-            while (fmt[i] >= '0' && fmt[i] <= '9')
-                prec = prec * 10 + (unsigned)(fmt[i++] - '0');
+            if (fmt[i] == '*') {
+                ++i;
+                const int given = va_arg(args, int);
+                prec = given < 0 ? 0 : (unsigned)given;
+            } else {
+                while (fmt[i] >= '0' && fmt[i] <= '9')
+                    prec = prec * 10 + (unsigned)(fmt[i++] - '0');
+            }
         }
 
         int wide = 0;
@@ -334,11 +349,19 @@ static void format(Sink* sink, const char* fmt, va_list args)
             unsigned length = 0;
             while (s[length] != '\0')
                 ++length;
+            /* A precision on a string is a maximum, and the string need not be
+             * terminated within it - which is the whole reason %.*s is used to
+             * print a slice of something longer. */
+            if (have_prec && prec < length)
+                length = prec;
             if (!left) {
                 for (unsigned k = length; k < width; ++k)
                     sink_putc(sink, ' ');
             }
-            sink_puts(sink, s);
+            /* Exactly `length` characters, not the whole string: with a
+             * precision the two differ, and that is the point of one. */
+            for (unsigned k = 0; k < length; ++k)
+                sink_putc(sink, s[k]);
             if (left) {
                 for (unsigned k = length; k < width; ++k)
                     sink_putc(sink, ' ');

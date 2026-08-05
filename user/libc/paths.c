@@ -13,10 +13,14 @@
 #include <paths.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char* const kSearch[] = {
+/* Where to look when PATH says nothing. Not a default in the sense of a
+ * suggestion - a system whose PATH is unset still has to be able to find `sh`,
+ * or nothing can be repaired from inside it. */
+static const char* const kBuiltIn[] = {
     PATH_BIN, PATH_SBIN, PATH_USR_BIN, PATH_LOCAL_BIN
 };
 
@@ -36,8 +40,31 @@ int path_find_program(const char* name, char* out, int max)
         }
     }
 
-    for (unsigned i = 0; i < sizeof(kSearch) / sizeof(kSearch[0]); ++i) {
-        snprintf(out, (unsigned)max, "%s/%s", kSearch[i], name);
+    /* PATH, if there is one: colon-separated, tried in order, and an empty
+     * element means the working directory - which is what the colon syntax has
+     * always meant and why a stray trailing colon is a security note in every
+     * UNIX manual. */
+    const char* path = getenv("PATH");
+    if (path != 0 && path[0] != '\0') {
+        while (*path != '\0') {
+            const char* end = path;
+            while (*end != '\0' && *end != ':')
+                ++end;
+            const int len = (int)(end - path);
+            if (len == 0)
+                snprintf(out, (unsigned)max, "%s", name);
+            else
+                snprintf(out, (unsigned)max, "%.*s/%s", len, path, name);
+            if (stat(out, &info) == 0 && info.st_type == S_IFREG)
+                return 0;
+            path = (*end == ':') ? end + 1 : end;
+        }
+        out[0] = '\0';
+        return -1;
+    }
+
+    for (unsigned i = 0; i < sizeof(kBuiltIn) / sizeof(kBuiltIn[0]); ++i) {
+        snprintf(out, (unsigned)max, "%s/%s", kBuiltIn[i], name);
         if (stat(out, &info) == 0 && info.st_type == S_IFREG)
             return 0;
     }

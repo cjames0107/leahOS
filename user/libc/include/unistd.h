@@ -10,8 +10,12 @@ ssize_t write(int fd, const void* buffer, size_t count);
 ssize_t read(int fd, void* buffer, size_t count);
 pid_t   getpid(void);
 
-/* Internal: fs.c hands the descriptor table to the next image. */
+/* Internal: fs.c hands the descriptor table to the next image, and gets its
+ * own in order before a fork. Both have to happen on this side: the saved
+ * table is keyed by the pid that saved it, and a child asks with the wrong
+ * one. */
 void    __fd_save_for_exec(void);
+void    __fd_before_fork(void);
 void    __fd_resolve(const char* path, char* out);
 
 pid_t fork(void);

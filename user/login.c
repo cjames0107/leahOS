@@ -347,6 +347,24 @@ int main(void)
                 exit(AUTH_FAILED);
             if (home[0] != '\0')
                 chdir(home);
+
+            /* The environment a session starts with. Set here because this is
+             * the process that knows who logged in and where they live -
+             * everything below inherits it through fork and execve, which is
+             * the whole point of having one. */
+            setenv("USER", user, 1);
+            setenv("LOGNAME", user, 1);
+            setenv("HOME", home[0] != '\0' ? home : "/", 1);
+            setenv("SHELL", "/bin/sh", 1);
+            /* A real PATH, so a program can be found by name and the list is
+             * something a person can change rather than something compiled in.
+             * root gets the system directories first; everyone else does not
+             * get them at all, which is what /sbin being separate is for. */
+            setenv("PATH", getuid() == 0
+                   ? "/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin"
+                   : "/usr/local/bin:/bin:/usr/bin", 1);
+            setenv("PWD", home[0] != '\0' ? home : "/", 1);
+
             session();
             exit(0);
         }

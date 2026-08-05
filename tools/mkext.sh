@@ -169,6 +169,11 @@ fi
 # at from inside the system rather than only in a test harness.
 if [ -d "$MEDIA_DIR/testkit" ]; then
     cp "$MEDIA_DIR"/testkit/* "$STAGING/usr/share/doc/" 2>/dev/null || true
+    # A script, executable, so that #! can be tried by name.
+    if [ -f "$MEDIA_DIR/testkit/hello.sh" ]; then
+        cp "$MEDIA_DIR/testkit/hello.sh" "$STAGING/usr/local/bin/hello.sh"
+        chmod 755 "$STAGING/usr/local/bin/hello.sh"
+    fi
 fi
 if [ -d "$MEDIA_DIR/demos" ]; then
     mkdir -p "$STAGING/usr/share/demos/images" "$STAGING/usr/share/demos/audio"

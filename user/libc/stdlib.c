@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
@@ -5,6 +6,12 @@
 
 _Noreturn void exit(int status)
 {
+    /* Anything still sitting in a stream's buffer goes out first. Without
+     * this, a program that printed without a trailing newline produced
+     * nothing at all: stdout is line buffered, main returned, crt0 called
+     * here, and the buffer went with the address space. That was invisible
+     * until printf started going through the streams. */
+    fflush(0);
     __syscall(SYS_exit, status, 0, 0, 0, 0);
     __builtin_unreachable();
 }

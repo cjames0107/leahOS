@@ -1,4 +1,5 @@
 #include <sys/syscall.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,8 @@ pid_t getpid(void)
 
 pid_t fork(void)
 {
+    /* Before the second process exists, not after: see __fd_before_fork. */
+    __fd_before_fork();
     return (pid_t)__syscall(SYS_fork, 0, 0, 0, 0, 0);
 }
 
@@ -27,6 +30,14 @@ pid_t fork(void)
  * ring 3 for something it needed. Whoever wants to run a program is already a
  * process with a filesystem; it can do its own reading.
  */
+/* How deep a script may point at another script before this gives up. Every
+ * UNIX has a limit here and they are all small; a chain longer than a handful
+ * is a loop somebody wrote by accident. */
+#define MAX_SHEBANG 4
+#ifndef MAX_ARGS
+#define MAX_ARGS 32
+#endif
+
 int execve(const char* path, char* const argv[], char* const envp[])
 {
     char full[256];
@@ -36,11 +47,25 @@ int execve(const char* path, char* const argv[], char* const envp[])
     long got;
     int result;
 
-    (void)envp;
+    /* A null environment means "keep this one", not "have none". That is not
+     * what POSIX says - there, a null envp is undefined and execv is the call
+     * that inherits - but every caller in this system passed 0 meaning "I did
+     * not think about it", and an empty environment is never what they wanted.
+     * Pass an empty vector to really mean none. */
+    if (envp == 0)
+        envp = (char* const*)environ;
 
     __fd_resolve(path, full);
-    if (stat(full, &st) != 0 || st.st_type != S_IFREG || st.st_size == 0)
+    if (stat(full, &st) != 0)
+        return -1;                      /* stat set errno */
+    if (st.st_type != S_IFREG) {
+        errno = EACCES;
         return -1;
+    }
+    if (st.st_size == 0) {
+        errno = ENOEXEC;
+        return -1;
+    }
 
     fd = open(full, O_RDONLY);
     if (fd < 0)
@@ -55,6 +80,67 @@ int execve(const char* path, char* const argv[], char* const envp[])
     if (got != (long)st.st_size) {
         free(image);
         return -1;
+    }
+
+    /* A script names its interpreter on the first line. Handled here rather
+     * than in the kernel because this is where a program is turned into
+     * something runnable - the kernel is handed segments and does not know
+     * what a file format is. */
+    {
+        const char* text = (const char*)image;
+        if (got > 2 && text[0] == '#' && text[1] == '!') {
+            static int depth;
+            if (++depth > MAX_SHEBANG) {
+                depth = 0;
+                free(image);
+                errno = ELOOP;
+                return -1;
+            }
+            /* The rest of the line, split into the interpreter and at most one
+             * argument - which is what every UNIX does, and why "#!/bin/sh -e"
+             * works and "#!/bin/sh -e -u" does not. */
+            char line[256];
+            long n = 0;
+            while (n < got - 2 && n < (long)sizeof(line) - 1 &&
+                   text[2 + n] != '\n')
+                { line[n] = text[2 + n]; ++n; }
+            line[n] = '\0';
+            free(image);
+
+            char* interp = line;
+            while (*interp == ' ' || *interp == '\t')
+                ++interp;
+            char* extra = interp;
+            while (*extra != '\0' && *extra != ' ' && *extra != '\t')
+                ++extra;
+            if (*extra != '\0') {
+                *extra++ = '\0';
+                while (*extra == ' ' || *extra == '\t')
+                    ++extra;
+            }
+            if (interp[0] == '\0') {
+                depth = 0;
+                errno = ENOEXEC;
+                return -1;
+            }
+
+            /* argv becomes: interpreter, [its argument], the script, then
+             * whatever the caller passed after argv[0]. The script's own path
+             * goes in as it was named, so $0 reads as the script. */
+            char* rebuilt[MAX_ARGS + 3];
+            int at = 0;
+            rebuilt[at++] = interp;
+            if (extra[0] != '\0')
+                rebuilt[at++] = extra;
+            rebuilt[at++] = (char*)full;
+            for (int i = 1; argv != 0 && argv[i] != 0 && at < MAX_ARGS + 2; ++i)
+                rebuilt[at++] = argv[i];
+            rebuilt[at] = 0;
+
+            const int r = execve(interp, rebuilt, envp);
+            depth = 0;
+            return r;                   /* only ever reached on failure */
+        }
     }
 
     /* Last, because it has to reflect the table as it will be handed over -
@@ -119,8 +205,10 @@ int execve(const char* path, char* const argv[], char* const envp[])
         req.entry = entry;
         req.count = count;
         req.pad   = 0;
+        /* The fifth argument is r8, which is where the kernel reads the
+         * environment from. */
         result = (int)__syscall(SYS_execve, (long)image, got, (long)argv,
-                                (long)&req, 0);
+                                (long)&req, (long)envp);
     }
 
     /* Only reached when the exec failed: on success the kernel never returns

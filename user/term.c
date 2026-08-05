@@ -28,6 +28,7 @@
 #include <string.h>
 #include <thread.h>
 #include <unistd.h>
+#include <widget.h>
 #include <window.h>
 
 #define GLYPH_W 8
@@ -35,6 +36,11 @@
 
 #define MAX_COLS 256
 #define MAX_ROWS 128
+
+/* How far back the terminal remembers. The window shows a few dozen lines; a
+ * build or a test run says hundreds, and the ones that matter have already
+ * gone past by the time anybody looks. */
+#define HISTORY_ROWS 1024
 
 #define BG      0x000000
 #define FG      0xC0C0C0
@@ -46,11 +52,22 @@ static unsigned char g_font[256 * 16];
 
 /* The character grid, and the cursor within it. Written by both threads - the
  * reader as output arrives, the main thread as keys are echoed - so everything
- * that touches it holds the lock. */
+ * that touches it holds the lock.
+ *
+ * Lines are numbered from the first one the terminal ever wrote and never
+ * renumbered, which is what makes a scroll position mean something: the view
+ * remembers an absolute line, so output arriving underneath it does not drag
+ * it along. The ring is where those numbers actually live - line `a` is at
+ * `a % HISTORY_ROWS`, valid while it is still at or after g_first.
+ */
 static mutex_t g_lock = MUTEX_INIT;
-static char g_cells[MAX_ROWS][MAX_COLS];
+static char g_cells[HISTORY_ROWS][MAX_COLS];
 static int  g_cols = 80, g_rows = 24;
-static int  g_cur_r, g_cur_c;
+static long g_cur_line;         /* the line the cursor is on */
+static long g_first;            /* the oldest line still remembered */
+static long g_view;             /* the top line of the window */
+static int  g_follow = 1;       /* is the view pinned to the bottom? */
+static int  g_cur_c;
 static volatile int g_dirty = 1;
 static volatile int g_shell_done;
 
@@ -59,33 +76,54 @@ static int g_to_shell;          /* write end of the shell's input */
 
 /* --- the grid ------------------------------------------------------------ */
 
-static void clear_row(int row)
+static char* row_of(long line)
 {
+    long slot = line % HISTORY_ROWS;
+    if (slot < 0)
+        slot += HISTORY_ROWS;
+    return g_cells[slot];
+}
+
+static void clear_line(long line)
+{
+    char* row = row_of(line);
     for (int c = 0; c < MAX_COLS; ++c)
-        g_cells[row][c] = ' ';
+        row[c] = ' ';
+}
+
+/* How many lines there are to look at, and the furthest down the view can go.
+ * Both with the lock held. */
+static long line_count(void) { return g_cur_line - g_first + 1; }
+
+static long last_view(void)
+{
+    const long bottom = g_cur_line - g_rows + 1;
+    return bottom < g_first ? g_first : bottom;
 }
 
 static void term_clear(void)
 {
-    for (int r = 0; r < MAX_ROWS; ++r)
-        clear_row(r);
-    g_cur_r = 0;
-    g_cur_c = 0;
-}
-
-static void scroll_up(void)
-{
-    for (int r = 0; r + 1 < g_rows; ++r)
-        memcpy(g_cells[r], g_cells[r + 1], MAX_COLS);
-    clear_row(g_rows - 1);
-    g_cur_r = g_rows - 1;
+    for (long r = 0; r < HISTORY_ROWS; ++r)
+        clear_line(r);
+    g_cur_line = 0;
+    g_first    = 0;
+    g_view     = 0;
+    g_follow   = 1;
+    g_cur_c    = 0;
 }
 
 static void newline(void)
 {
     g_cur_c = 0;
-    if (++g_cur_r >= g_rows)
-        scroll_up();
+    clear_line(++g_cur_line);
+    /* The oldest line falls off the back once the ring is full - which is the
+     * only place history is ever lost, and the reason HISTORY_ROWS is large. */
+    if (line_count() > HISTORY_ROWS)
+        g_first = g_cur_line - HISTORY_ROWS + 1;
+    if (g_follow)
+        g_view = last_view();
+    else if (g_view < g_first)
+        g_view = g_first;       /* what it was looking at has gone */
 }
 
 /* Call with the lock held. */
@@ -102,7 +140,7 @@ static void term_putc(char ch)
     if (ch == '\b' || ch == 0x7F) {
         if (g_cur_c > 0)
             --g_cur_c;
-        g_cells[g_cur_r][g_cur_c] = ' ';
+        row_of(g_cur_line)[g_cur_c] = ' ';
         return;
     }
     if (ch == '\t') {
@@ -114,7 +152,7 @@ static void term_putc(char ch)
     if ((unsigned char)ch < 32)
         return;                         /* nothing else is understood */
 
-    g_cells[g_cur_r][g_cur_c] = ch;
+    row_of(g_cur_line)[g_cur_c] = ch;
     if (++g_cur_c >= g_cols)
         newline();
 }
@@ -135,16 +173,53 @@ static void draw_glyph(int col, int row, char ch, uint32_t fg, uint32_t bg)
     }
 }
 
+/* The text area stops short of the scrollbar. */
+static int text_width(void)
+{
+    const int w = (int)g_win_w - WG_SCROLL_W;
+    return w < GLYPH_W ? GLYPH_W : w;
+}
+
 static void repaint(int id)
 {
     mutex_lock(&g_lock);
-    for (int r = 0; r < g_rows; ++r)
+    for (int r = 0; r < g_rows; ++r) {
+        const char* row = row_of(g_view + r);
         for (int c = 0; c < g_cols; ++c)
-            draw_glyph(c, r, g_cells[r][c], FG, BG);
-    /* A block cursor, drawn last so it sits over whatever is under it. */
-    draw_glyph(g_cur_c, g_cur_r, g_cells[g_cur_r][g_cur_c], BG, CURSOR);
+            draw_glyph(c, r, row[c], FG, BG);
+    }
+
+    /* A block cursor, drawn last so it sits over whatever is under it - and
+     * only when the line it is on is one of the ones being shown, because
+     * scrolled back is exactly the case where it is not. */
+    const long cur_row = g_cur_line - g_view;
+    if (cur_row >= 0 && cur_row < g_rows)
+        draw_glyph(g_cur_c, (int)cur_row, row_of(g_cur_line)[g_cur_c],
+                   BG, CURSOR);
+
+    /* Whatever the glyphs did not cover: the strip left of the bar when the
+     * width is not a whole number of characters, and the one below the last
+     * row. Without these the window keeps whatever was there before. */
+    const int used_w = g_cols * GLYPH_W, used_h = g_rows * GLYPH_H;
+    wg_target(g_px, g_win_w, g_win_h);
+    if (used_w < text_width())
+        wg_fill(used_w, 0, text_width() - used_w, (int)g_win_h, BG);
+    if (used_h < (int)g_win_h)
+        wg_fill(0, used_h, text_width(), (int)g_win_h - used_h, BG);
+
+    wg_scrollbar_v((int)g_win_w - WG_SCROLL_W, 0, (int)g_win_h,
+                   (int)(g_view - g_first), g_rows, (int)line_count());
     mutex_unlock(&g_lock);
     win_present(id);
+}
+
+/* Put the view back at the bottom, which is where typing belongs: a key
+ * pressed while scrolled back goes to the shell either way, and watching the
+ * echo appear somewhere off-screen is not useful. Lock held. */
+static void follow_bottom(void)
+{
+    g_follow = 1;
+    g_view = last_view();
 }
 
 /* Recompute the grid from the window size. Anything that no longer fits is
@@ -152,7 +227,7 @@ static void repaint(int id)
  * lines actually ended, and a pipe does not carry that. */
 static void resize_grid(void)
 {
-    int cols = (int)(g_win_w / GLYPH_W);
+    int cols = text_width() / GLYPH_W;
     int rows = (int)(g_win_h / GLYPH_H);
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
@@ -163,13 +238,12 @@ static void resize_grid(void)
     g_cols = cols;
     g_rows = rows;
     if (g_cur_c >= g_cols) g_cur_c = g_cols - 1;
-    while (g_cur_r >= g_rows) {
-        /* Keep the bottom of the output, which is where the prompt is. */
-        for (int r = 0; r + 1 < MAX_ROWS; ++r)
-            memcpy(g_cells[r], g_cells[r + 1], MAX_COLS);
-        clear_row(MAX_ROWS - 1);
-        --g_cur_r;
-    }
+    /* Nothing has to be thrown away to make the window smaller any more - the
+     * lines are all still there, and the view just covers fewer of them. */
+    if (g_follow || g_view > last_view())
+        g_view = last_view();
+    if (g_view < g_first)
+        g_view = g_first;
     mutex_unlock(&g_lock);
     g_dirty = 1;
 }
@@ -226,6 +300,14 @@ static int start_shell(void)
          * everything the shell starts, and is what /dev/tty opens. */
         tty_set(dup(0));
 
+        /* What this terminal can do, for anything that asks. Modest and
+         * honest: no colour, no cursor addressing, 80 by 24. A program that
+         * believes TERM and sends escape codes would print them literally -
+         * `clear` already does. */
+        setenv("TERM", "leah", 1);
+        setenv("COLUMNS", "80", 1);
+        setenv("LINES", "24", 1);
+
         close(to_shell[0]);
         close(to_shell[1]);
         close(from_shell[0]);
@@ -255,7 +337,10 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    g_win_w = 80 * GLYPH_W;
+    /* Eighty columns of text plus the bar, so the terminal is still the
+     * eighty columns everything assumes and the scrollbar is not taken out of
+     * them. */
+    g_win_w = 80 * GLYPH_W + WG_SCROLL_W;
     g_win_h = 24 * GLYPH_H;
     const int id = win_create(x, y, g_win_w, g_win_h, "Terminal");
     if (id < 0) {
@@ -265,8 +350,9 @@ int main(int argc, char** argv)
     g_px = win_map(id);
     if (g_px == 0)
         return 1;
+    wg_theme();                 /* the bar is drawn in the desktop's colours */
     /* Below this the shell's prompt has nowhere to go. */
-    win_set_min_size(id, 20 * GLYPH_W, 4 * GLYPH_H);
+    win_set_min_size(id, 20 * GLYPH_W + WG_SCROLL_W, 4 * GLYPH_H);
 
     term_clear();
     resize_grid();
@@ -283,6 +369,7 @@ int main(int argc, char** argv)
      * know that backspace means anything. */
     char line[512];
     unsigned len = 0;
+    int dragging = 0;           /* is the scrollbar's thumb being held? */
 
     for (;;) {
         struct win_event event;
@@ -298,8 +385,62 @@ int main(int argc, char** argv)
             }
             if (event.type == WIN_EVENT_CLOSE)
                 goto done;
+
+            /* The scrollbar. The position is this program's, as the widget
+             * expects: the bar is told where the view is and asked where a
+             * click wants it, and nothing about the history belongs to it. */
+            if (event.type == WIN_EVENT_MOUSE_DOWN ||
+                event.type == WIN_EVENT_MOUSE_MOVE ||
+                event.type == WIN_EVENT_MOUSE_UP) {
+                const int bar_x = (int)g_win_w - WG_SCROLL_W;
+
+                if (event.type == WIN_EVENT_MOUSE_UP) {
+                    dragging = 0;
+                    continue;
+                }
+                if (event.type == WIN_EVENT_MOUSE_MOVE) {
+                    if (!dragging)
+                        continue;
+                    mutex_lock(&g_lock);
+                    g_view = g_first + wg_scroll_drag_v(event.y, 0,
+                                                        (int)g_win_h, g_rows,
+                                                        (int)line_count());
+                    if (g_view < g_first)      g_view = g_first;
+                    if (g_view > last_view())  g_view = last_view();
+                    g_follow = g_view == last_view();
+                    mutex_unlock(&g_lock);
+                    g_dirty = 1;
+                    continue;
+                }
+                if (event.x < bar_x)
+                    continue;               /* a click in the text, not the bar */
+
+                mutex_lock(&g_lock);
+                const int first = (int)(g_view - g_first);
+                const int span  = (int)line_count();
+                if (wg_scroll_on_thumb_v(event.y, 0, (int)g_win_h,
+                                         first, g_rows, span)) {
+                    dragging = 1;
+                } else {
+                    g_view = g_first + wg_scroll_hit_v(event.x, event.y, bar_x,
+                                                       0, (int)g_win_h,
+                                                       first, g_rows, span);
+                    if (g_view < g_first)     g_view = g_first;
+                    if (g_view > last_view()) g_view = last_view();
+                    g_follow = g_view == last_view();
+                }
+                mutex_unlock(&g_lock);
+                g_dirty = 1;
+                continue;
+            }
+
             if (event.type != WIN_EVENT_KEY)
                 continue;
+
+            /* Typing goes to the bottom, wherever the view happened to be. */
+            mutex_lock(&g_lock);
+            follow_bottom();
+            mutex_unlock(&g_lock);
 
             const char ch = (char)event.key;
             if (ch == '\n' || ch == '\r') {

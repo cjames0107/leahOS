@@ -62,10 +62,28 @@
 #define DEV_TTY     4
 #define DEV_CONSOLE 5
 
+/* Where we are in an open file is not this process's business alone.
+ *
+ * UNIX calls the thing a descriptor points at an open file description, and
+ * the position lives in it rather than in the descriptor: fork and dup2 make a
+ * second reference to one description, not a second description, so the two
+ * share a position. `echo one; echo two` with the shell's output in a file
+ * relies on exactly that - both children start where the previous one stopped,
+ * and without it the second overwrites the first.
+ *
+ * vfsd is addressed by path and offset and holds no per-descriptor state, so
+ * the position has to be shared from here, in a page of shared memory. It
+ * starts private and moves there when a second reference is about to exist -
+ * see share_position. fork inherits the mapping and the pages behind it, so a
+ * child needs no help; execve replaces the address space, so the id is carried
+ * over and the mapping made again on first use.
+ */
 struct entry {
     unsigned char kind;
     int           kfd;          /* K_KERNEL: the number the kernel knows */
-    long          offset;       /* K_FILE */
+    int           pos_id;       /* K_FILE: the shared position, or -1 */
+    long*         pos;          /* it, mapped here; null until first asked */
+    long          offset;       /* the position when it could not be shared */
     unsigned      flags;
     char          path[PATH_MAX];
 };
@@ -73,6 +91,8 @@ struct entry {
 static struct entry g_fds[FD_MAX];
 static char         g_cwd[PATH_MAX] = "/";
 static int          g_started;
+
+static void share_position(struct entry* e);
 
 /* --- talking to vfsd ---------------------------------------------------------
  *
@@ -220,7 +240,7 @@ static int g_tty = -1;
 
 static void start(void)
 {
-    int id;
+    int id, fd;
     struct saved* s;
 
     if (g_started)
@@ -234,6 +254,11 @@ static void start(void)
         memcpy(g_fds, s->fds, sizeof(g_fds));
         memcpy(g_cwd, s->cwd, sizeof(g_cwd));
         g_tty = s->tty;
+        /* The positions are still where they were - in shared memory the last
+         * image mapped. This one has a new address space and has mapped none
+         * of them yet, so the pointers it just copied mean nothing here. */
+        for (fd = 0; fd < FD_MAX; ++fd)
+            g_fds[fd].pos = 0;
         s->magic = 0;           /* once: a later process must not inherit it */
         shm_destroy(id);
         return;
@@ -245,6 +270,35 @@ static void start(void)
     g_fds[0].kind = K_KERNEL; g_fds[0].kfd = 0;
     g_fds[1].kind = K_KERNEL; g_fds[1].kfd = 1;
     g_fds[2].kind = K_KERNEL; g_fds[2].kfd = 2;
+}
+
+/* Called from fork, before the kernel is asked for a second process.
+ *
+ * What execve leaves behind is keyed by the pid that left it, and start() is
+ * lazy - it runs on the first call that needs a descriptor. A process that
+ * forks before making any such call hands the lookup to its child, where
+ * getpid() answers with the child's pid, the key does not match, and the child
+ * decides it is a fresh process whose descriptors are the kernel's console.
+ *
+ * That is how `sh -c "echo hello"` with its output redirected printed nothing
+ * anywhere: sh touched no file before forking, so echo inherited a table that
+ * said standard output was the console rather than the file. Commands with a
+ * pipe or a pattern in them worked, because pipe() and readdir() had already
+ * forced the table into existence.
+ *
+ * Claiming it here, while getpid() still returns the pid it was saved under,
+ * is the whole fix.
+ */
+void __fd_before_fork(void)
+{
+    int fd;
+
+    start();
+    /* Everything open right now is about to be named by two processes, so its
+     * position has to stop being private. Files opened after this are one
+     * process's own again, until that process forks. */
+    for (fd = 0; fd < FD_MAX; ++fd)
+        share_position(&g_fds[fd]);
 }
 
 /* Called from execve, with the address space about to go away. */
@@ -292,6 +346,83 @@ static int alloc_fd(void)
             return fd;
     return -1;
 }
+
+/* The key of a shared position. The pid keeps two processes apart and the
+ * sequence keeps one process's own files apart; 4096 of them before the
+ * sequence comes round again, which is more than anything here opens while
+ * still holding the first. */
+#define POS_KEY(pid, seq) \
+    (0xE0000000u | (((unsigned)(pid) & 0xFFFFu) << 12) | ((unsigned)(seq) & 0xFFFu))
+
+static unsigned g_pos_seq;
+
+/* The position of an open file, wherever it actually lives. Mapping is done
+ * here rather than at open() because execve carries the id across and leaves
+ * the pointer behind: the first read or write in the new image finds it. */
+static long* position(struct entry* e)
+{
+    if (e->pos != 0)
+        return e->pos;
+    if (e->pos_id >= 0) {
+        long* p = (long*)shm_map(e->pos_id);
+        if (p != 0) {
+            e->pos = p;
+            return p;
+        }
+        e->pos_id = -1;
+    }
+    /* No shared page to be had. The position still works; it just stops being
+     * visible to anyone this process forks. */
+    e->pos = &e->offset;
+    return e->pos;
+}
+
+/* Move a position somewhere a second reference can reach it.
+ *
+ * Not done at open(). A position that only one descriptor in one process names
+ * cannot be observed to be shared, and a segment costs a page and one of the
+ * system's two hundred and fifty-six - which a program that opens files in a
+ * loop would spend for nothing. The two operations that make a second
+ * reference are fork and dup, so those are where the cost belongs.
+ */
+static void share_position(struct entry* e)
+{
+    long here, *there;
+    int id;
+
+    if (e->kind != K_FILE || e->pos_id >= 0)
+        return;
+    here = *position(e);
+    id = shm_open(POS_KEY(getpid(), g_pos_seq++), sizeof(long), SHM_PUBLIC);
+    if (id < 0)
+        return;                 /* the private one still works, just not shared */
+    there = (long*)shm_map(id);
+    if (there == 0) {
+        shm_destroy(id);
+        return;
+    }
+    *there = here;
+    e->pos_id = id;
+    e->pos = there;
+}
+
+/* A shared position is not freed when the last descriptor here lets go of it.
+ *
+ * It cannot be: the whole point of sharing is that another process has it too,
+ * and this side can only count its own descriptors. Closing on that count is
+ * what broke pipelines - `echo one | wc -l` with the shell's output in a file
+ * has the echo stage dup2 the pipe over its copy of standard output, which
+ * closes the last descriptor *it* can see and destroyed a position the shell
+ * and wc were still using. shm::destroy frees the slot at once, so the id went
+ * straight back out to the next shm_open and two unrelated things wrote
+ * through one segment; what it landed on was vfsd's transfer buffer, and the
+ * next unlink never came back.
+ *
+ * So the lifetime is the creating process's, reclaimed when it exits - the
+ * same rule the vfs transfer buffer above already lives by. That holds a slot
+ * per shared description until then, out of the system's two hundred and
+ * fifty-six, which is why sharing is not done at open().
+ */
 
 /* How many of our entries name the same kernel object. dup2 copies an entry
  * rather than asking the kernel for a second number, so the kernel's own
@@ -367,6 +498,8 @@ int open(const char* path, int flags)
         g_fds[fd].kind  = K_DEVICE;
         g_fds[fd].kfd   = device;
         g_fds[fd].flags = (unsigned)flags;
+        g_fds[fd].pos_id = -1;
+        g_fds[fd].pos    = 0;
         g_fds[fd].offset = 0;
         return fd;
     }
@@ -416,6 +549,8 @@ int open(const char* path, int flags)
 
     g_fds[fd].kind   = K_FILE;
     g_fds[fd].flags  = (unsigned)flags;
+    g_fds[fd].pos_id = -1;
+    g_fds[fd].pos    = 0;
     g_fds[fd].offset = (flags & O_APPEND) != 0 ? size : 0;
     memcpy(g_fds[fd].path, resolved, PATH_MAX);
     return fd;
@@ -429,7 +564,9 @@ int close(int fd)
     if (g_fds[fd].kind == K_KERNEL && kernel_refs(g_fds[fd].kfd) == 1 &&
         g_fds[fd].kfd > 2)
         __syscall(SYS_close, g_fds[fd].kfd, 0, 0, 0, 0);
-    g_fds[fd].kind = K_NONE;
+    g_fds[fd].kind   = K_NONE;
+    g_fds[fd].pos_id = -1;
+    g_fds[fd].pos    = 0;
     return 0;
 }
 
@@ -467,7 +604,7 @@ long read(int fd, void* buffer, unsigned long count)
         long got;
         if (want > VFS_CHUNK)
             want = VFS_CHUNK;
-        if (vfs_call(VFS_READ, e->path, e->offset + done, (long)want, &a) != 0) {
+        if (vfs_call(VFS_READ, e->path, *position(e) + done, (long)want, &a) != 0) {
             if (done > 0)
                 break;
             errno = EIO;
@@ -486,7 +623,7 @@ long read(int fd, void* buffer, unsigned long count)
         if ((unsigned long)got < want)
             break;
     }
-    e->offset += done;
+    *position(e) += done;
     return done;
 }
 
@@ -529,7 +666,7 @@ long write(int fd, const void* buffer, unsigned long count)
         if (want > VFS_CHUNK)
             want = VFS_CHUNK;
         memcpy(g_buf->data, (const char*)buffer + done, want);
-        if (vfs_call(VFS_WRITE, e->path, e->offset + done, (long)want, &a) != 0) {
+        if (vfs_call(VFS_WRITE, e->path, *position(e) + done, (long)want, &a) != 0) {
             if (done > 0)
                 break;
             errno = EIO;
@@ -545,7 +682,7 @@ long write(int fd, const void* buffer, unsigned long count)
             break;
         done += put;
     }
-    e->offset += done;
+    *position(e) += done;
     return done;
 }
 
@@ -559,20 +696,23 @@ long lseek(int fd, long offset, int whence)
         return -1;
     e = &g_fds[fd];
 
-    if (whence == SEEK_SET)
-        e->offset = offset;
-    else if (whence == SEEK_CUR)
-        e->offset += offset;
-    else if (whence == SEEK_END) {
-        if (vfs_call(VFS_STAT, e->path, 0, 0, &a) != 0 || a.word[0] < 0)
+    {
+        long* at = position(e);
+        if (whence == SEEK_SET)
+            *at = offset;
+        else if (whence == SEEK_CUR)
+            *at += offset;
+        else if (whence == SEEK_END) {
+            if (vfs_call(VFS_STAT, e->path, 0, 0, &a) != 0 || a.word[0] < 0)
+                return -1;
+            *at = a.word[0] + offset;
+        } else
             return -1;
-        e->offset = a.word[0] + offset;
-    } else
-        return -1;
 
-    if (e->offset < 0)
-        e->offset = 0;
-    return e->offset;
+        if (*at < 0)
+            *at = 0;
+        return *at;
+    }
 }
 
 int stat(const char* path, struct stat* out)
@@ -776,7 +916,12 @@ int dup2(int oldfd, int newfd)
 
     /* Copying the entry is the whole operation, even for a kernel object: two
      * of our numbers naming one of the kernel's is exactly what dup2 means, and
-     * close() counts the references before it closes anything. */
+     * close() counts the references before it closes anything.
+     *
+     * The position goes shared first. Two descriptors for one open file share
+     * where they are - `cmd >f 2>&1` is the everyday case - and a copy of a
+     * private position would give them one each. */
+    share_position(&g_fds[oldfd]);
     g_fds[newfd] = g_fds[oldfd];
     return newfd;
 }
@@ -797,6 +942,9 @@ int dup(int oldfd)
     const int fd = alloc_fd();
     if (fd < 0)
         return -1;
+    /* The same second reference dup2 makes, so the same sharing: two numbers
+     * for one open file are two numbers for one position. */
+    share_position(&g_fds[oldfd]);
     g_fds[fd] = g_fds[oldfd];
     return fd;
 }

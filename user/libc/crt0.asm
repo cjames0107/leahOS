@@ -16,16 +16,23 @@ SECTION .text.startup
 GLOBAL _start
 EXTERN main
 EXTERN exit
+EXTERN environ
 
 _start:
     ; Terminate the call-frame chain so a debugger stops unwinding here.
     xor rbp, rbp
 
-    ; The kernel left the stack as: [argc][argv[0]]...[NULL][strings]. Load the
-    ; arguments before touching RSP.
+    ; The kernel left the stack as:
+    ;   [argc][argv[0]]...[NULL][envp[0]]...[NULL][strings]
+    ; Load all three before touching RSP.
     mov rdi, [rsp]              ; argc
     lea rsi, [rsp + 8]          ; argv
     lea rdx, [rsi + rdi*8 + 8]  ; envp = argv + (argc + 1) * 8
+
+    ; libc needs the environment whether or not main asks for it - getenv is
+    ; called by things that never see argv. This computation was already here,
+    ; pointing at the strings, because there was no second vector to find.
+    mov [rel environ], rdx
 
     ; Align the stack to 16 bytes; the following CALL pushes the return address,
     ; leaving main entered at the ABI-required 16-aligned-plus-8.

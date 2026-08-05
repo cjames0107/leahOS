@@ -1050,9 +1050,12 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             const auto* request = reinterpret_cast<const u64*>(frame->r10);
             const u64 entry_point = request[0];
             const u32 count = static_cast<u32>(request[1] & 0xFFFFFFFFu);
+            /* r8 is the environment, which may be null - a program started
+             * with none is a program with none, not an error. */
             process::exec(*frame, reinterpret_cast<const u8*>(frame->rdi),
                           static_cast<usize>(frame->rsi),
                           reinterpret_cast<char**>(frame->rdx),
+                          reinterpret_cast<char**>(frame->r8),
                           entry_point,
                           reinterpret_cast<const u8*>(frame->r10) + 16, count);
         }
