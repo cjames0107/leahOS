@@ -10,10 +10,19 @@ typedef struct {
     char*  buffer;      // NULL means "count only", used by printf's sizing
     size_t capacity;
     size_t length;
+    FILE*  stream;      // when set, characters go here instead of the buffer
 } Sink;
 
 static void sink_putc(Sink* sink, char c)
 {
+    if (sink->stream != NULL) {
+        // Straight into the stream's buffer. No length limit, which is the
+        // whole reason fprintf can print something longer than any array a
+        // caller happens to have.
+        fputc((unsigned char)c, sink->stream);
+        ++sink->length;
+        return;
+    }
     if (sink->buffer != NULL && sink->length + 1 < sink->capacity)
         sink->buffer[sink->length] = c;
     ++sink->length;
@@ -170,7 +179,7 @@ static void sink_double(Sink* sink, double value, unsigned prec, char spec,
          * seventeen-digit mantissa, a point, a sign and a three-digit
          * exponent, with room to spare. */
         char buf[48];
-        Sink into = { buf, sizeof(buf), 0 };
+        Sink into = { buf, sizeof(buf), 0, NULL };
         if (exponent < -4 || exponent >= (int)prec)
             sink_exponential(&into, value, prec - 1, e_char);
         else
@@ -301,7 +310,7 @@ static void format(Sink* sink, const char* fmt, va_list args)
             /* Width is applied by measuring first, which costs a second pass
              * over a handful of digits and keeps the padding in one place. */
             if (width > 0) {
-                Sink measure = { NULL, 0, 0 };
+                Sink measure = { NULL, 0, 0, NULL };
                 sink_double(&measure, v, prec, spec, have_prec);
                 if (!left)
                     for (size_t k = measure.length; k < width; ++k)
@@ -347,23 +356,9 @@ static void format(Sink* sink, const char* fmt, va_list args)
     }
 }
 
-int putchar(int c)
-{
-    char ch = (char)c;
-    write(1, &ch, 1);
-    return c;
-}
-
-int puts(const char* str)
-{
-    write(1, str, strlen(str));
-    putchar('\n');
-    return 0;
-}
-
 int vsnprintf(char* buffer, size_t size, const char* fmt, va_list args)
 {
-    Sink sink = { buffer, size, 0 };
+    Sink sink = { buffer, size, 0, NULL };
     format(&sink, fmt, args);
     if (buffer != NULL && size > 0)
         buffer[sink.length < size ? sink.length : size - 1] = '\0';
@@ -379,17 +374,31 @@ int snprintf(char* buffer, size_t size, const char* fmt, ...)
     return n;
 }
 
-int printf(const char* fmt, ...)
+int vfprintf(FILE* stream, const char* fmt, va_list args)
 {
-    // Format into a stack buffer, then hand the whole thing to one write. A
-    // per-character write syscall would work but would be needlessly chatty.
-    char buffer[512];
+    Sink sink = { NULL, 0, 0, stream };
+    format(&sink, fmt, args);
+    return (int)sink.length;
+}
+
+int fprintf(FILE* stream, const char* fmt, ...)
+{
     va_list args;
     va_start(args, fmt);
-    const int n = vsnprintf(buffer, sizeof(buffer), fmt, args);
+    const int n = vfprintf(stream, fmt, args);
     va_end(args);
+    return n;
+}
 
-    const size_t len = (size_t)n < sizeof(buffer) - 1 ? (size_t)n : sizeof(buffer) - 1;
-    write(1, buffer, len);
+int printf(const char* fmt, ...)
+{
+    /* Through the stream rather than straight to the descriptor. It used to
+     * format into a 512-byte array and write that, which silently truncated
+     * anything longer and interleaved badly with fputs - two ways of writing
+     * to the same descriptor, each with its own idea of what had gone out. */
+    va_list args;
+    va_start(args, fmt);
+    const int n = vfprintf(stdout, fmt, args);
+    va_end(args);
     return n;
 }

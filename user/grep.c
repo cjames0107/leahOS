@@ -8,6 +8,7 @@
  */
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -140,7 +141,7 @@ static int search_path(const char* path, const char* pattern)
 {
     struct stat info;
     if (stat(path, &info) != 0) {
-        printf("grep: %s: cannot open\n", path);
+        fprintf(stderr, "grep: %s: %s\n", path, strerror(errno));
         return 1;
     }
     if (info.st_type == S_IFDIR) {
@@ -148,12 +149,12 @@ static int search_path(const char* path, const char* pattern)
             search_dir(path, pattern);
             return 0;
         }
-        printf("grep: %s: is a directory\n", path);
+        fprintf(stderr, "grep: %s: is a directory\n", path);
         return 1;
     }
     const int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        printf("grep: %s: cannot open\n", path);
+        fprintf(stderr, "grep: %s: %s\n", path, strerror(errno));
         return 1;
     }
     search_fd(fd, pattern, path);

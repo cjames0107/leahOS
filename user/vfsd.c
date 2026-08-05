@@ -16,6 +16,7 @@
 #include <shm.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <time.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -675,17 +676,19 @@ static int create(const char* path, int is_dir)
 {
     char parent[256], name[64];
     if (split_path(path, parent, name) != 0)
-        return -1;
+        return -EINVAL;
     struct inode dir;
     const unsigned dir_ino = lookup(parent, &dir);
     if (dir_ino == 0)
-        return -1;
+        return -ENOENT;                 /* the directory it would go in */
+    if ((dir.mode & 0xF000) != 0x4000)
+        return -ENOTDIR;
     if (dir_search(&dir, name, 0, 0, 0) != 0)
-        return -1;                      /* it is already there */
+        return -EEXIST;
 
     const unsigned ino = alloc_inode(is_dir);
     if (ino == 0)
-        return -1;
+        return -ENOSPC;                 /* the inode table is full */
 
     struct inode fresh;
     memset(&fresh, 0, sizeof(fresh));
@@ -698,13 +701,13 @@ static int create(const char* path, int is_dir)
     wr16w(fresh.block, 4, 4);
     wr16w(fresh.block, 6, 0);
     if (write_inode(ino, &fresh, is_dir ? 2u : 1u) != 0)
-        return -1;
+        return -EIO;
 
     if (is_dir) {
         /* A directory is not empty on disk: it holds itself and its parent. */
         const unsigned long phys = extend(&fresh, ino);
         if (phys == 0)
-            return -1;
+            return -EIO;
         fresh.size = g_block_size;
         memset(g_block, 0, g_block_size);
         wr32w(g_block, 0, ino);
@@ -715,11 +718,11 @@ static int create(const char* path, int is_dir)
         g_block[18] = 2; g_block[19] = 2; g_block[20] = '.'; g_block[21] = '.';
         if (write_block(phys, g_block) != 0 ||
             write_inode(ino, &fresh, 2u) != 0)
-            return -1;
+            return -EIO;
     }
 
     if (dir_add(&dir, dir_ino, name, ino, is_dir ? 2 : 1) != 0)
-        return -1;
+        return -EIO;
     if (is_dir) {
         /* The parent gained a ".." pointing at it. */
         unsigned long block; unsigned at;
@@ -905,13 +908,19 @@ int main(void)
 
         memset(&r, 0, sizeof(r));
         r.tag = m.tag;
-        r.word[0] = -1;
+        /* The default is "something went wrong and this handler did not say
+         * what", which is what -1 used to mean for everything. Handlers that
+         * know better set a real code, and most of them do - the difference
+         * between "no such file" and "permission denied" is the whole reason
+         * for having numbers at all. */
+        r.word[0] = -EIO;
 
         if (m.tag == VFS_MOUNTED) {
             r.word[0] = g_mounted;
             r.word[1] = g_block_size;
         } else if (m.tag == VFS_STAT) {
             struct inode in;
+            r.word[0] = -ENOENT;
             if (lookup((const char*)m.data, &in) != 0) {
                 r.word[0] = (long)in.size;
                 r.word[1] = (in.mode & 0xF000) == 0x4000 ? VFS_KIND_DIR
@@ -960,8 +969,15 @@ int main(void)
             }
         } else if (m.tag == VFS_READ) {
             struct inode in;
-            if (lookup((const char*)m.data, &in) != 0 &&
-                may_access(&in, from, 0)) {
+            const int found = lookup((const char*)m.data, &in) != 0;
+            const int is_dir = found && (in.mode & 0xF000) == 0x4000;
+            r.word[0] = !found ? -ENOENT : is_dir ? -EISDIR : -EACCES;
+            /* A directory is refused rather than read. Its blocks are entries,
+             * not contents, and handing them over as data meant `cat` on a
+             * directory printed the raw on-disk records - which looked like a
+             * corrupt file rather than a question that should not have been
+             * asked. Listing one goes through VFS_LIST. */
+            if (found && !is_dir && may_access(&in, from, 0)) {
                 unsigned long offset = (unsigned long)m.word[1];
                 unsigned long want = (unsigned long)m.word[2];
                 if (offset >= in.size) {
@@ -1007,16 +1023,28 @@ int main(void)
 
             /* Look before removing: a directory has to be empty, and finding
              * that out afterwards is too late to put the entry back. */
-            int allowed = split_path((const char*)m.data, parent, name) == 0 &&
-                          (dir_ino = lookup(parent, &dir)) != 0;
+            /* A path that will not split at all is malformed; one whose
+             * parent directory is absent is simply not there. Both used to be
+             * "cannot remove", and conflating them here made `rm` of a missing
+             * file report an invalid argument. */
+            const int split_ok =
+                split_path((const char*)m.data, parent, name) == 0;
+            int allowed = split_ok && (dir_ino = lookup(parent, &dir)) != 0;
+            r.word[0] = split_ok ? -ENOENT : -EINVAL;
             if (allowed) {
                 struct inode probe;
                 const unsigned pino = lookup((const char*)m.data, &probe);
-                if (pino == 0)
+                if (pino == 0) {
                     allowed = 0;
-                else if ((probe.mode & 0xF000) == 0x4000) {
+                    r.word[0] = -ENOENT;
+                } else if ((probe.mode & 0xF000) == 0x4000) {
                     removing_dir = 1;
                     allowed = dir_is_empty(&probe);
+                    /* Not "cannot remove": a directory with things in it is a
+                     * different problem from one that is not there, and the
+                     * person is about to be told which. */
+                    if (!allowed)
+                        r.word[0] = -ENOTEMPTY;
                 }
                 target = probe;
             }
@@ -1096,6 +1124,8 @@ int main(void)
         } else if (m.tag == VFS_WRITE) {
             struct inode in;
             const unsigned ino = lookup((const char*)m.data, &in);
+            r.word[0] = ino == 0 ? -ENOENT
+                      : (in.mode & 0xF000) == 0x4000 ? -EISDIR : -EACCES;
             if (ino != 0 && may_access(&in, from, 1)) {
                 unsigned long offset = (unsigned long)m.word[1];
                 unsigned long want = (unsigned long)m.word[2];
@@ -1140,6 +1170,7 @@ int main(void)
              * plant a file owned by someone else. */
             const int allowed = m.tag == VFS_CHMOD ? (who == 0 || in.uid == who)
                                                    : (who == 0);
+            r.word[0] = ino == 0 ? -ENOENT : (allowed ? -EIO : -EPERM);
             if (ino != 0 && allowed) {
                 if (m.tag == VFS_CHMOD)
                     in.mode = (in.mode & 0xF000) |
@@ -1163,6 +1194,7 @@ int main(void)
              * leave a file claiming to be empty while still owning them. */
             struct inode in;
             const unsigned ino = lookup((const char*)m.data, &in);
+            r.word[0] = ino == 0 ? -ENOENT : -EACCES;
             if (ino != 0 && may_access(&in, from, 1)) {
                 const unsigned long n =
                     (in.size + g_block_size - 1) / g_block_size;

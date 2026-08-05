@@ -6,6 +6,7 @@
  */
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,7 +122,7 @@ int main(int argc, char** argv)
         for (; i < argc; ++i) {
             const int fd = open(argv[i], O_RDONLY);
             if (fd < 0) {
-                printf("sort: %s: cannot open\n", argv[i]);
+                fprintf(stderr, "sort: %s: %s\n", argv[i], strerror(errno));
                 return 1;
             }
             slurp(fd);

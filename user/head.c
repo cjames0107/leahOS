@@ -1,6 +1,7 @@
 /* head - the first few lines of something. */
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -42,7 +43,7 @@ int main(int argc, char** argv)
     for (int k = 0; i < argc; ++i, ++k) {
         const int fd = open(argv[i], O_RDONLY);
         if (fd < 0) {
-            printf("head: %s: cannot open\n", argv[i]);
+            fprintf(stderr, "head: %s: %s\n", argv[i], strerror(errno));
             status = 1;
             continue;
         }

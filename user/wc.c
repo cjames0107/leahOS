@@ -6,30 +6,31 @@
  */
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
 
 struct counts { long lines, words, bytes; };
 
-static void tally(int fd, struct counts* c)
+/* One character at a time, which reads as though it costs a syscall each and
+ * does not: the stream hands them out of a buffer it filled once. This was a
+ * hand-rolled read() into a local array with its own partial-line state, and
+ * so were the same loops in head, tail, sort and less - all five written in
+ * one afternoon, all five slightly different. */
+static void tally(FILE* in, struct counts* c)
 {
-    char buffer[1024];
-    long n;
-    int in_word = 0;
-    while ((n = read(fd, buffer, sizeof(buffer))) > 0) {
-        for (long i = 0; i < n; ++i) {
-            const char ch = buffer[i];
-            ++c->bytes;
-            if (ch == '\n')
-                ++c->lines;
-            const int space = (ch == ' ' || ch == '\t' || ch == '\n' ||
-                               ch == '\r' || ch == '\f' || ch == '\v');
-            if (space) {
-                in_word = 0;
-            } else if (!in_word) {
-                in_word = 1;
-                ++c->words;
-            }
+    int ch, in_word = 0;
+    while ((ch = fgetc(in)) != EOF) {
+        ++c->bytes;
+        if (ch == '\n')
+            ++c->lines;
+        const int space = (ch == ' ' || ch == '\t' || ch == '\n' ||
+                           ch == '\r' || ch == '\f' || ch == '\v');
+        if (space) {
+            in_word = 0;
+        } else if (!in_word) {
+            in_word = 1;
+            ++c->words;
         }
     }
 }
@@ -63,7 +64,7 @@ int main(int argc, char** argv)
 
     if (first_file >= argc) {
         struct counts c = { 0, 0, 0 };
-        tally(0, &c);
+        tally(stdin, &c);
         show(&c, 0, lines_only, words_only, bytes_only);
         return 0;
     }
@@ -71,15 +72,15 @@ int main(int argc, char** argv)
     struct counts total = { 0, 0, 0 };
     int status = 0, files = 0;
     for (i = first_file; i < argc; ++i) {
-        const int fd = open(argv[i], O_RDONLY);
-        if (fd < 0) {
-            printf("wc: %s: cannot open\n", argv[i]);
+        FILE* in = fopen(argv[i], "r");
+        if (in == 0) {
+            fprintf(stderr, "wc: %s: %s\n", argv[i], strerror(errno));
             status = 1;
             continue;
         }
         struct counts c = { 0, 0, 0 };
-        tally(fd, &c);
-        close(fd);
+        tally(in, &c);
+        fclose(in);
         show(&c, argv[i], lines_only, words_only, bytes_only);
         total.lines += c.lines; total.words += c.words; total.bytes += c.bytes;
         ++files;

@@ -19,6 +19,7 @@
  */
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,7 +97,7 @@ int main(int argc, char** argv)
     if (path != 0) {
         const int fd = open(path, O_RDONLY);
         if (fd < 0) {
-            printf("less: %s: cannot open\n", path);
+            fprintf(stderr, "less: %s: %s\n", path, strerror(errno));
             return 1;
         }
         load(fd);

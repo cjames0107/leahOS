@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -45,7 +46,7 @@ int main(int argc, char** argv)
                 ok = 0;
             }
             if (!ok) {
-                printf("touch: %s: cannot update\n", argv[i]);
+                fprintf(stderr, "touch: %s: %s\n", argv[i], strerror(errno));
                 status = 1;
             }
             continue;
@@ -53,7 +54,7 @@ int main(int argc, char** argv)
 
         const int fd = open(argv[i], O_WRONLY | O_CREAT);
         if (fd < 0) {
-            printf("touch: %s: cannot create\n", argv[i]);
+            fprintf(stderr, "touch: %s: %s\n", argv[i], strerror(errno));
             status = 1;
         } else {
             close(fd);

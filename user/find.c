@@ -5,6 +5,7 @@
  * same * and ? that grep and the shell use.
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -106,7 +107,7 @@ int main(int argc, char** argv)
 
     struct stat info;
     if (stat(start, &info) != 0) {
-        printf("find: %s: cannot open\n", start);
+        fprintf(stderr, "find: %s: %s\n", start, strerror(errno));
         return 1;
     }
     walk(start, info.st_type, 0);

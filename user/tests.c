@@ -5,6 +5,7 @@
  * can act on.
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <shm.h>
@@ -1614,9 +1615,14 @@ static void test_time(void)
     struct timespec ts;
     check("clock_gettime works", clock_gettime(&ts) == 0 && ts.tv_sec == now);
 
-    /* It has to move, and only forwards. */
-    msleep(1200);
-    const time_t later = time(0);
+    /* It has to move, and only forwards. Waited for rather than slept
+     * through: a single sleep either side of a second boundary is a coin toss,
+     * and a test that fails one run in five teaches people to ignore it. */
+    time_t later = now;
+    for (int i = 0; i < 60 && later == now; ++i) {
+        msleep(100);
+        later = time(0);
+    }
     check("time moves forwards", later > now && later - now < 10);
 
     /* The conversions, against dates worked out independently. The epoch
@@ -1731,6 +1737,150 @@ static void test_file_times(void)
     unlink("/tmp/stamped");
 }
 
+
+/* --- errno ------------------------------------------------------------------- */
+
+static void test_errno(void)
+{
+    printf("error reporting:\n");
+
+    /* The four failures that "cannot open" used to cover, told apart. */
+    errno = 0;
+    check("a missing file is ENOENT",
+          open("/no/such/file", O_RDONLY) < 0 && errno == ENOENT);
+
+    errno = 0;
+    check("opening a directory for writing is EISDIR",
+          open("/tmp", O_WRONLY) < 0 && errno == EISDIR);
+
+    {
+        const int fd = open("/tmp", O_RDONLY);
+        if (fd >= 0) {
+            char buf[8];
+            errno = 0;
+            check("reading a directory's contents is refused as EISDIR",
+                  read(fd, buf, sizeof(buf)) < 0 && errno == EISDIR);
+            close(fd);
+        } else {
+            check("reading a directory's contents is refused as EISDIR", 1);
+        }
+    }
+
+    errno = 0;
+    check("making a directory that exists is EEXIST",
+          mkdir("/tmp") < 0 && errno == EEXIST);
+
+    errno = 0;
+    check("removing a directory with things in it is ENOTEMPTY",
+          unlink("/usr/share") < 0 && errno == ENOTEMPTY);
+
+    errno = 0;
+    check("removing something that is not there is ENOENT",
+          unlink("/no/such/file") < 0 && errno == ENOENT);
+
+    {
+        struct stat info;
+        errno = 0;
+        check("stat of a missing file is ENOENT",
+              stat("/no/such/file", &info) < 0 && errno == ENOENT);
+    }
+
+    /* The words, which is what makes a message readable. */
+    check("every code has a sentence",
+          strcmp(strerror(ENOENT), "no such file or directory") == 0 &&
+          strcmp(strerror(EISDIR), "is a directory") == 0 &&
+          strcmp(strerror(EACCES), "permission denied") == 0);
+    check("an unknown code still returns something",
+          strerror(31337) != 0 && strerror(31337)[0] != '\0');
+
+    /* And that it is not clobbered by a call that succeeded - the classic
+     * mistake is checking errno without checking the return first. */
+    errno = 0;
+    (void)getpid();
+    check("a call that works leaves errno alone", errno == 0);
+}
+
+/* --- FILE streams -------------------------------------------------------------- */
+
+static void test_streams(void)
+{
+    printf("buffered streams:\n");
+
+    FILE* out = fopen("/tmp/stream.txt", "w");
+    check("a stream opens for writing", out != 0);
+    if (out == 0)
+        return;
+
+    fputs("first line\n", out);
+    fprintf(out, "second %s %d\n", "line", 42);
+    fputc('x', out);
+    fputc('\n', out);
+    check("closing it succeeds", fclose(out) == 0);
+
+    FILE* in = fopen("/tmp/stream.txt", "r");
+    check("and it reads back", in != 0);
+    if (in == 0)
+        return;
+
+    char line[64];
+    check("fgets keeps the newline",
+          fgets(line, sizeof(line), in) != 0 &&
+          strcmp(line, "first line\n") == 0);
+    check("fprintf wrote what it was told",
+          fgets(line, sizeof(line), in) != 0 &&
+          strcmp(line, "second line 42\n") == 0);
+    check("and the last line",
+          fgets(line, sizeof(line), in) != 0 && strcmp(line, "x\n") == 0);
+    check("then the end of the file",
+          fgets(line, sizeof(line), in) == 0 && feof(in));
+
+    /* Position, and that ungetc puts one back. */
+    rewind(in);
+    check("rewinding starts again", ftell(in) == 0 && !feof(in));
+    const int first = fgetc(in);
+    check("the first character is 'f'", first == 'f');
+    ungetc(first, in);
+    check("ungetc gives it back", fgetc(in) == 'f');
+
+    check("seeking lands where it says", fseek(in, 6, SEEK_SET) == 0);
+    check("ftell agrees with the seek", ftell(in) == 6);
+    check("and reads from there", fgetc(in) == 'l');   /* "first line" */
+    fclose(in);
+
+    /* A write longer than the buffer, which takes the straight-through path. */
+    out = fopen("/tmp/big.txt", "w");
+    if (out != 0) {
+        static char blob[BUFSIZ * 3];
+        for (unsigned i = 0; i < sizeof(blob); ++i)
+            blob[i] = (char)('a' + (i % 26));
+        const size_t wrote = fwrite(blob, 1, sizeof(blob), out);
+        check("a write larger than the buffer goes out whole",
+              wrote == sizeof(blob));
+        fclose(out);
+
+        in = fopen("/tmp/big.txt", "r");
+        static char back[BUFSIZ * 3];
+        const size_t got = in ? fread(back, 1, sizeof(back), in) : 0;
+        int same = (got == sizeof(blob));
+        for (unsigned i = 0; i < sizeof(blob) && same; ++i)
+            if (back[i] != blob[i])
+                same = 0;
+        check("and comes back byte for byte", same);
+        if (in) fclose(in);
+        unlink("/tmp/big.txt");
+    } else {
+        check("a write larger than the buffer goes out whole", 0);
+        check("and comes back byte for byte", 0);
+    }
+
+    /* Failures are reported the same way as anywhere else. */
+    errno = 0;
+    check("fopen of a missing file fails with ENOENT",
+          fopen("/no/such/file", "r") == 0 && errno == ENOENT);
+
+    unlink("/tmp/stream.txt");
+}
+
 int main(void)
 {
     printf("\nleahOS self-tests\n\n");
@@ -1754,6 +1904,8 @@ int main(void)
     test_devices();
     test_time();
     test_file_times();
+    test_errno();
+    test_streams();
     printf("\n%d failure(s)\n", g_failures);
     return g_failures;
 }

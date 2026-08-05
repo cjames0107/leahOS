@@ -12,6 +12,7 @@
  */
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -32,7 +33,7 @@ static int load(const char* path, int which)
 {
     const int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        printf("diff: %s: cannot open\n", path);
+        fprintf(stderr, "diff: %s: %s\n", path, strerror(errno));
         return -1;
     }
     char buffer[1024], line[1024];

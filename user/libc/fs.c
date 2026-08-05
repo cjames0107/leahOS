@@ -29,6 +29,7 @@
  * real, on the other side of the boundary.
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <ipc.h>
 #include <shm.h>
@@ -265,6 +266,19 @@ void __fd_save_for_exec(void)
     s->magic = SAVED_MAGIC;
 }
 
+/* A vfsd reply is a count when it succeeded and a negated error code when it
+ * did not. This is the single place that translates, so that no caller has to
+ * decide what -13 meant. Anything outside the range of real codes is a
+ * failure whose reason was never recorded, and EIO is the honest answer for
+ * that rather than a guess. */
+static long from_vfs(long answer)
+{
+    if (answer >= 0)
+        return answer;
+    errno = (answer > -ERRNO_MAX) ? (int)-answer : EIO;
+    return -1;
+}
+
 static int valid(int fd)
 {
     return fd >= 0 && fd < FD_MAX && g_fds[fd].kind != K_NONE;
@@ -364,13 +378,20 @@ int open(const char* path, int flags)
     }
 
     if (!exists) {
-        if ((flags & O_CREAT) == 0)
+        if ((flags & O_CREAT) == 0) {
+            errno = ENOENT;
             return -1;
-        if (vfs_call(VFS_CREATE, resolved, 0, 0, &a) != 0 || a.word[0] < 0)
+        }
+        if (vfs_call(VFS_CREATE, resolved, 0, 0, &a) != 0) {
+            errno = EIO;
+            return -1;
+        }
+        if (from_vfs(a.word[0]) < 0)
             return -1;
         size = 0;
     } else if (is_dir && (flags & O_WRONLY) != 0) {
-        return -1;                      /* a directory cannot be written */
+        errno = EISDIR;
+        return -1;
     } else if (!permitted_stat((unsigned)a.word[2],
                           (unsigned)((a.word[3] >> 16) & 0xFFFF),
                           (unsigned)(a.word[3] & 0xFFFF),
@@ -380,6 +401,7 @@ int open(const char* path, int flags)
          * side of the boundary. It is here because open() answering "yes" and
          * the first read answering "no" is a worse interface than open()
          * saying so, and because that is what open() has always done. */
+        errno = EACCES;
         return -1;
     }
 
@@ -387,8 +409,10 @@ int open(const char* path, int flags)
         vfs_call(VFS_TRUNC, resolved, 0, 0, &a);
 
     fd = alloc_fd();
-    if (fd < 0)
+    if (fd < 0) {
+        errno = EMFILE;
         return -1;
+    }
 
     g_fds[fd].kind   = K_FILE;
     g_fds[fd].flags  = (unsigned)flags;
@@ -443,11 +467,20 @@ long read(int fd, void* buffer, unsigned long count)
         long got;
         if (want > VFS_CHUNK)
             want = VFS_CHUNK;
-        if (vfs_call(VFS_READ, e->path, e->offset + done, (long)want, &a) != 0)
-            return done > 0 ? done : -1;
+        if (vfs_call(VFS_READ, e->path, e->offset + done, (long)want, &a) != 0) {
+            if (done > 0)
+                break;
+            errno = EIO;
+            return -1;
+        }
         got = a.word[0];
-        if (got <= 0)
-            break;                      /* end of file, or refused */
+        if (got < 0) {
+            if (done > 0)
+                break;                  /* what was read still counts */
+            return from_vfs(got);
+        }
+        if (got == 0)
+            break;                      /* the end of the file */
         memcpy((char*)buffer + done, g_buf->data, (unsigned long)got);
         done += got;
         if ((unsigned long)got < want)
@@ -496,10 +529,19 @@ long write(int fd, const void* buffer, unsigned long count)
         if (want > VFS_CHUNK)
             want = VFS_CHUNK;
         memcpy(g_buf->data, (const char*)buffer + done, want);
-        if (vfs_call(VFS_WRITE, e->path, e->offset + done, (long)want, &a) != 0)
-            return done > 0 ? done : -1;
+        if (vfs_call(VFS_WRITE, e->path, e->offset + done, (long)want, &a) != 0) {
+            if (done > 0)
+                break;
+            errno = EIO;
+            return -1;
+        }
         put = a.word[0];
-        if (put <= 0)
+        if (put < 0) {
+            if (done > 0)
+                break;
+            return from_vfs(put);
+        }
+        if (put == 0)
             break;
         done += put;
     }
@@ -540,7 +582,11 @@ int stat(const char* path, struct stat* out)
 
     start();
     __fd_resolve(path, resolved);
-    if (vfs_call(VFS_STAT, resolved, 0, 0, &a) != 0 || a.word[0] < 0)
+    if (vfs_call(VFS_STAT, resolved, 0, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    if (from_vfs(a.word[0]) < 0)
         return -1;
 
     out->st_size = (uint64_t)a.word[0];
@@ -619,7 +665,11 @@ int mkdir(const char* path)
     struct ipc_message a;
     start();
     __fd_resolve(path, resolved);
-    return vfs_call(VFS_MKDIR, resolved, 0, 0, &a) == 0 && a.word[0] >= 0 ? 0 : -1;
+    if (vfs_call(VFS_MKDIR, resolved, 0, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    return from_vfs(a.word[0]) < 0 ? -1 : 0;
 }
 
 int unlink(const char* path)
@@ -628,7 +678,11 @@ int unlink(const char* path)
     struct ipc_message a;
     start();
     __fd_resolve(path, resolved);
-    return vfs_call(VFS_UNLINK, resolved, 0, 0, &a) == 0 && a.word[0] >= 0 ? 0 : -1;
+    if (vfs_call(VFS_UNLINK, resolved, 0, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    return from_vfs(a.word[0]) < 0 ? -1 : 0;
 }
 
 int rename(const char* oldpath, const char* newpath)
