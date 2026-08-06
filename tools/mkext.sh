@@ -46,12 +46,13 @@ mkdir -p "$STAGING/bin" "$STAGING/sbin" "$STAGING/etc" "$STAGING/dev" \
          "$STAGING/usr/local/lib" "$STAGING/usr/local/share" \
          "$STAGING/usr/share/doc" "$STAGING/usr/share/icons" \
          "$STAGING/usr/share/wallpapers" "$STAGING/usr/share/demos" \
+         "$STAGING/usr/share/man" \
          "$STAGING/var/log" "$STAGING/var/tmp" "$STAGING/var/cache" \
          "$STAGING/var/lib" "$STAGING/var/spool"
 
-# /proc and /sys hold what the kernel says about itself, and this kernel says
-# nothing yet - there is no procfs. They are made so the mount points exist and
-# so that nobody has to invent a different name later.
+# /proc holds what the kernel says about itself, and vfsd answers for all of it
+# without touching the disk - the directory here is the mount point and nothing
+# else, which is why it stays empty. /sys is still only a name.
 
 # /dev. The entries are empty files: what they do lives in libc, which is
 # already where path resolution and the descriptor table are, and which is the
@@ -146,6 +147,14 @@ stage_app Tasks     taskman  tasks      ""              "End task"
 stage_app Clock     clock    ""         ""              ""
 stage_app Elements  uitest   elements   ""              ""
 stage_app Music     player   ""         ".WAV .MP3 .OGG" "Open sound..."
+
+# The manual. Plain text: troff is a typesetting language, and the reason
+# manual pages are written in it is that in 1971 the same source had to drive a
+# phototypesetter - not a problem anybody here has. What is left when that goes
+# is a file somebody can read with cat, and a formatter nobody has to write.
+if [ -d docs/man ]; then
+    cp docs/man/*.1 "$STAGING/usr/share/man/"
+fi
 
 # The icon set, copied in as-is. These are ordinary compressed PNGs - nothing
 # converts them at build time, because img_read_png inflates a real deflate

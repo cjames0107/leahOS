@@ -4,10 +4,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static void mode_string(unsigned mode, int is_dir, char* out)
+static void mode_string(unsigned mode, unsigned type, char* out)
 {
     static const char* kBits = "rwx";
-    out[0] = is_dir ? 'd' : '-';
+    out[0] = type == S_IFDIR ? 'd' : type == S_IFLNK ? 'l' : '-';
     for (int i = 0; i < 9; ++i)
         out[1 + i] = (mode & (0400 >> i)) ? kBits[i % 3] : '-';
     out[10] = '\0';
@@ -42,10 +42,13 @@ int main(int argc, char** argv)
 
     const time_t now = time(0);
     for (int i = 0; i < n; ++i) {
-        const int is_dir = entries[i].d_type == S_IFDIR;
+        const int is_dir  = entries[i].d_type == S_IFDIR;
+        const int is_link = entries[i].d_type == S_IFLNK;
         if (!long_format) {
             if (is_dir)
                 printf("%s/\n", entries[i].d_name);
+            else if (is_link)
+                printf("%s@\n", entries[i].d_name);
             else
                 printf("%s\t%lu\n", entries[i].d_name,
                        (unsigned long)entries[i].d_size);
@@ -58,14 +61,20 @@ int main(int argc, char** argv)
         char full[256];
         join(path, entries[i].d_name, full, sizeof(full));
 
+        /* lstat, not stat: a long listing is a list of names, and for a link
+         * the name is the interesting thing - its size, its mode and its date
+         * are the link's own, and what it points at is shown separately. A
+         * plain stat here would describe the target twice and the link never,
+         * including for a link that leads nowhere, which would then be
+         * indistinguishable from a missing file. */
         struct stat st;
-        if (stat(full, &st) < 0) {
+        if (lstat(full, &st) < 0) {
             printf("?????????? %s\n", entries[i].d_name);
             continue;
         }
 
         char mode[11];
-        mode_string(st.st_mode, is_dir, mode);
+        mode_string(st.st_mode, entries[i].d_type, mode);
 
         char owner[32];
         if (username(st.st_uid, owner) != 0)
@@ -85,9 +94,19 @@ int main(int argc, char** argv)
                                                          : "%e %b %H:%M", &t);
             }
         }
-        printf("%s %-8s %8lu %s %s%s\n", mode, owner,
+        char points_at[280] = "";
+        if (is_link) {
+            char target[256];
+            const long got = readlink(full, target, sizeof(target) - 1);
+            if (got >= 0) {
+                target[got] = '\0';
+                snprintf(points_at, sizeof(points_at), " -> %s", target);
+            }
+        }
+
+        printf("%s %-8s %8lu %s %s%s%s\n", mode, owner,
                (unsigned long)st.st_size, when, entries[i].d_name,
-               is_dir ? "/" : "");
+               is_dir ? "/" : "", points_at);
     }
     return 0;
 }

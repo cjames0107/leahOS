@@ -1,0 +1,12 @@
+dirname - everything but the last part
+
+SYNOPSIS
+    dirname PATH
+
+DESCRIPTION
+    A path with no slash in it is in the current directory, so the answer is
+    "." - not the empty string, which would turn `cd $(dirname x)` into `cd`
+    and send somebody home.
+
+SEE ALSO
+    basename

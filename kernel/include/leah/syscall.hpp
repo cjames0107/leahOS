@@ -107,6 +107,8 @@ enum Number : u64 {
     GetPgid     = 84,
     SetSid      = 85,
     GetSid      = 86,
+
+    Uptime      = 87,  // milliseconds since the machine started
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

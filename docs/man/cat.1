@@ -1,0 +1,16 @@
+cat - print files
+
+SYNOPSIS
+    cat [FILE...]
+
+DESCRIPTION
+    Writes each file to standard output, in order. With no files, or with -,
+    copies standard input - which is what makes `cat` the thing at the front
+    of a pipeline.
+
+    A directory is refused rather than printed. Its blocks are entries, not
+    contents, and handing them over as data produces something that looks
+    like a corrupt file rather than an answer.
+
+SEE ALSO
+    less, head, tail, tee

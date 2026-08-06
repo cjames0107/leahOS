@@ -1,0 +1,13 @@
+basename - the last part of a path
+
+SYNOPSIS
+    basename PATH [SUFFIX]
+
+DESCRIPTION
+    With a suffix, removes it if the name ends with it - `basename report.md
+    .md` gives report.
+
+    Trailing slashes are not part of the name: `basename /usr/bin/` is bin.
+
+SEE ALSO
+    dirname

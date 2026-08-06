@@ -1,0 +1,20 @@
+ls - list what is in a directory
+
+SYNOPSIS
+    ls [-l] [DIRECTORY]
+
+DESCRIPTION
+    Lists the current directory, or the one named.
+
+      -l   one entry per line, with its mode, owner, size and date
+
+    Without -l, a directory is shown with a trailing / and a symbolic link
+    with a trailing @, so the three kinds are told apart without a second
+    column.
+
+    A long listing describes the link itself rather than what it points at,
+    and shows the target after an arrow. That is deliberate: a link that
+    leads nowhere would otherwise be indistinguishable from a missing file.
+
+SEE ALSO
+    cat, stat, find, ln

@@ -76,6 +76,7 @@
 #define SYS_getpgid     84
 #define SYS_setsid      85
 #define SYS_getsid      86
+#define SYS_uptime      87
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

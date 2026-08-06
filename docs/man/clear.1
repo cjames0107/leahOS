@@ -1,0 +1,15 @@
+clear - clear the terminal
+
+SYNOPSIS
+    clear
+
+DESCRIPTION
+    Sends the escape sequence that erases the screen and puts the cursor at
+    the top.
+
+    The terminal here understands no escape sequences at all, so this prints
+    them literally. It is kept because scripts written elsewhere use it, and
+    because that will stop being true the moment the terminal learns them.
+
+SEE ALSO
+    term

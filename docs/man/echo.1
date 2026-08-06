@@ -1,0 +1,15 @@
+echo - print the arguments
+
+SYNOPSIS
+    echo [-n] [WORD...]
+
+DESCRIPTION
+    Writes its arguments separated by single spaces, followed by a newline.
+
+      -n   leave the newline off
+
+    The shell has already done the quoting, the variables and the patterns by
+    the time echo sees anything, which is why `echo *` lists a directory.
+
+SEE ALSO
+    printf, sh

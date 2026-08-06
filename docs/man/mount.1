@@ -1,0 +1,18 @@
+mount - what is mounted where
+
+SYNOPSIS
+    mount
+
+DESCRIPTION
+    Lists the filesystems, read from /proc/mounts.
+
+    It does not mount anything. There is one block filesystem here and no way
+    to add a second yet - every superblock field in the server is a singleton
+    - so an option to try would only ever fail.
+
+    Three different things answer for parts of the tree: the ext4 filesystem
+    on the disk, the /dev entries libc answers without asking anybody, and
+    /proc, which is not storage at all.
+
+SEE ALSO
+    df, proc

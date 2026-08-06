@@ -1,0 +1,16 @@
+grep - find lines that match
+
+SYNOPSIS
+    grep [-i] [-v] [-n] PATTERN [FILE...]
+
+DESCRIPTION
+      -i   ignore case
+      -v   print the lines that do not match
+      -n   put the line number in front
+
+    The pattern is a literal string, not a regular expression. That is a real
+    limitation and an honest one: a half-implemented regex engine is worse
+    than a substring search that says so.
+
+SEE ALSO
+    find, sort, uniq

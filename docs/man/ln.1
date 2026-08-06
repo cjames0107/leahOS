@@ -1,0 +1,18 @@
+ln - make a link
+
+SYNOPSIS
+    ln -s TARGET NAME
+
+DESCRIPTION
+    Makes NAME a symbolic link holding the text TARGET.
+
+    Only symbolic links. A hard link is a second directory entry for one
+    inode, which the filesystem underneath could do, but the two are not
+    variations of one idea and offering ln without -s when only -s works
+    would be worse than offering neither.
+
+    The target is stored as written and is not checked. A link to something
+    that does not exist is a normal thing to have.
+
+SEE ALSO
+    readlink, ls, rm

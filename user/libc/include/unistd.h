@@ -81,6 +81,11 @@ int    dup(int oldfd);
 int    tty_fd(void);
 void   tty_set(int fd);
 
+/* Whether that descriptor is the terminal. The question a program should ask
+ * before deciding to page, colour or prompt: `man ls` and `man ls | head` are
+ * both run by a process with a terminal, and only the first should page. */
+int    isatty(int fd);
+
 /* The terminal's control block - where the foreground process group lives, for
  * want of a tty driver to keep it in. A terminal calls tty_control_create
  * before starting its shell; everything below inherits the key. */

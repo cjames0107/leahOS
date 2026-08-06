@@ -34,8 +34,16 @@ struct vfs_shared {
 #define VFS_CHOWN   11  /* data = path, w1 = uid, w2 = gid                    */
 #define VFS_TRUNC   12  /* data = path -> length zero, blocks returned        */
 #define VFS_RENAME  13  /* data = old\0new\0 -> the entry moves, inode stays   */
+#define VFS_SYMLINK 14  /* data = target\0path\0 -> path becomes a link to it  */
+#define VFS_READLINK 15 /* data = path -> data = where it points, w0 = length  */
+#define VFS_LSTAT   16  /* stat, but of the link itself rather than its target */
+#define VFS_STATFS  17  /* -> w0 = block size, w1 = blocks, w2 = free blocks  */
 
 #define VFS_KIND_FILE 0
 #define VFS_KIND_DIR  1
+/* A name that holds another name. Everything above resolves these on the way
+ * through, so a caller only ever sees this kind from LIST and LSTAT - the two
+ * that are asking about the entry rather than about what it leads to. */
+#define VFS_KIND_LINK 2
 
 #endif

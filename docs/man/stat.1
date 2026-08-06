@@ -1,0 +1,13 @@
+stat - everything known about a file
+
+SYNOPSIS
+    stat NAME...
+
+DESCRIPTION
+    Prints the size, kind, mode, owner and all three timestamps.
+
+    mtime is when the contents last changed and ctime is when the inode did,
+    which is why chmod moves the second and not the first.
+
+SEE ALSO
+    ls, chmod

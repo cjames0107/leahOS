@@ -1128,6 +1128,12 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
     }
 
+    case Uptime:
+        // Not the wall clock: this one never jumps, and is the one anything
+        // measuring how long the machine has been up actually wants.
+        frame->rax = timer::uptime_ms();
+        break;
+
     case SetSid: {
         const u32 sid = scheduler::set_sid();
         frame->rax = sid != 0 ? sid : static_cast<u64>(-1);

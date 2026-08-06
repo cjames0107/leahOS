@@ -1,0 +1,18 @@
+kill - send a signal
+
+SYNOPSIS
+    kill [-SIGNAL] PID...
+           kill -l
+
+DESCRIPTION
+    The signal defaults to TERM. It may be a number or a name, with or
+    without the SIG.
+
+    A negative pid is a process group - `kill -TERM -42` ends every process
+    of job 42. That is the form that matters, because a pipeline is several
+    processes and ending one of them is not ending it.
+
+      -l   list the signals
+
+SEE ALSO
+    ps, jobs, sh

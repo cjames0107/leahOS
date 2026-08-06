@@ -1,0 +1,14 @@
+chmod - change permission bits
+
+SYNOPSIS
+    chmod MODE NAME...
+
+DESCRIPTION
+    MODE is octal - 644, 755. Symbolic modes (u+x) are not accepted, because
+    half of that syntax is worse than none.
+
+    Only the owner and root may change a file's mode, and the filesystem
+    server enforces that rather than trusting the caller.
+
+SEE ALSO
+    chown, ls, stat

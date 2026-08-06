@@ -1,0 +1,18 @@
+man - the manual
+
+SYNOPSIS
+    man [PAGE]
+
+DESCRIPTION
+    Prints a manual page, through less when there is a terminal to page onto
+    and straight out when there is not - so `man ls | grep -i sort` works.
+
+    With no argument, lists every page there is.
+
+    The pages are plain text, not troff. troff is a typesetting language, and
+    the reason manual pages are written in it is that in 1971 the same source
+    had to drive a phototypesetter. What is left when that goes is a file
+    anybody can read with cat.
+
+SEE ALSO
+    less, help

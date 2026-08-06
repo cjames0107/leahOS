@@ -1,0 +1,21 @@
+proc - the /proc filesystem
+
+SYNOPSIS
+    /proc
+
+DESCRIPTION
+    Not on the disk and never was. These are questions about the running
+    machine, and the answers are in the kernel, so writing them down anywhere
+    would only make them stale.
+
+      /proc/meminfo    memory, in kilobytes
+      /proc/uptime     seconds since boot
+      /proc/mounts     the mount table, which `mount` prints
+      /proc/cpuinfo    how many processors, and what each has done
+      /proc/version    which system this is
+      /proc/<pid>/status   one process, by number
+
+    A process's directory exists exactly as long as the process does.
+
+SEE ALSO
+    ps, mount, uptime

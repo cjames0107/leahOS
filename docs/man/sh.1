@@ -1,0 +1,26 @@
+sh - the shell
+
+SYNOPSIS
+    sh [-c COMMAND] [SCRIPT]
+
+DESCRIPTION
+    Reads a line, works out what it says, and runs it.
+
+      quoting        'literal' and "expanded", and \ before one character
+      variables      $NAME, ${NAME}, $?, $$, and $1.. inside a script
+      assignment     NAME=value, and export to put one in the environment
+      patterns       * and ? matched against the filesystem
+      lists          ; runs both, && runs the second if the first worked,
+                     || runs it if the first did not
+      redirection    < > >> 2> 2>>
+      pipes          |, any number of stages
+      background     a trailing &, with jobs, fg and bg
+
+    Job control is on when there is a terminal. Every job is a process group,
+    so Ctrl-C reaches a whole pipeline rather than one stage of it, and Ctrl-Z
+    suspends one to be picked up later with fg.
+
+    Builtins: cd exit export unset source : true false jobs fg bg help
+
+SEE ALSO
+    kill, ps, env

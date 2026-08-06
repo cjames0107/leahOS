@@ -1,0 +1,13 @@
+gunzip - expand a gzip file
+
+SYNOPSIS
+    gunzip FILE...
+
+DESCRIPTION
+    Expands each .gz file, leaving the original in place.
+
+    The inflate underneath is this system's own - RFC 1951, with a lookup
+    table for the short codes - and is the same one that reads PNGs.
+
+SEE ALSO
+    tar, cat

@@ -1,0 +1,15 @@
+su - become another user
+
+SYNOPSIS
+    su [USER]
+
+DESCRIPTION
+    Starts a shell as USER, or as root if none is named. Asks for that user's
+    password unless the caller is already root.
+
+    Authentication goes to authd, which is a separate process: the password
+    file is not readable by whoever is asking, and this program never sees
+    the hash.
+
+SEE ALSO
+    id, whoami, login

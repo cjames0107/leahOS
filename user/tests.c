@@ -1962,6 +1962,183 @@ static void test_open_descriptions(void)
 }
 
 
+/* --- symbolic links ------------------------------------------------------------
+ *
+ * A name whose contents are another name. Everything resolves them on the way
+ * through, which is the whole point; the only calls that see one at all are
+ * the two that are asking about the entry rather than about what it leads to.
+ */
+
+static void test_symlinks(void)
+{
+    char target[256];
+    struct stat st;
+    printf("symbolic links:\n");
+
+    unlink("/tmp/link");
+    unlink("/tmp/real.txt");
+
+    FILE* f = fopen("/tmp/real.txt", "w");
+    if (f != 0) {
+        fputs("behind the link\n", f);
+        fclose(f);
+    }
+
+    check("a link can be made", symlink("/tmp/real.txt", "/tmp/link") == 0);
+
+    const long n = readlink("/tmp/link", target, sizeof(target) - 1);
+    target[n < 0 ? 0 : n] = '\0';
+    check_says("and says where it points", target, "/tmp/real.txt");
+
+    /* The difference between the two stats, which is the whole reason there
+     * are two: one describes the name, the other what the name leads to. */
+    check("lstat sees the link", lstat("/tmp/link", &st) == 0 &&
+                                 st.st_type == S_IFLNK);
+    check("stat sees through it", stat("/tmp/link", &st) == 0 &&
+                                  st.st_type == S_IFREG);
+
+    /* Opening follows it, which is what makes a link useful at all. */
+    char back[64];
+    back[0] = '\0';
+    f = fopen("/tmp/link", "r");
+    if (f != 0) {
+        const size_t got = fread(back, 1, sizeof(back) - 1, f);
+        back[got] = '\0';
+        fclose(f);
+    }
+    check_says("and reading it reads the file", back, "behind the link\n");
+
+    /* A relative target is relative to the directory the link is in, not to
+     * wherever the reader happens to be standing. */
+    unlink("/tmp/rel");
+    check("a relative link can be made", symlink("real.txt", "/tmp/rel") == 0);
+    check("and resolves beside itself", stat("/tmp/rel", &st) == 0 &&
+                                        st.st_size == 16);
+
+    /* A link to nothing is a normal thing to have: the target is text, and is
+     * not checked when it is written. */
+    unlink("/tmp/dangling");
+    check("a link may point at nothing",
+          symlink("/no/such/file", "/tmp/dangling") == 0);
+    check("which lstat still sees", lstat("/tmp/dangling", &st) == 0 &&
+                                    st.st_type == S_IFLNK);
+    errno = 0;
+    check("and stat does not", stat("/tmp/dangling", &st) != 0);
+
+    /* Through a link in the middle of a path, which is the case with no
+     * "should this be followed?" about it - there is no other reading. */
+    mkdir("/tmp/realdir");
+    unlink("/tmp/dirlink");
+    f = fopen("/tmp/realdir/inside.txt", "w");
+    if (f != 0) { fputs("x", f); fclose(f); }
+    check("a link to a directory works",
+          symlink("/tmp/realdir", "/tmp/dirlink") == 0);
+    check("and a path goes through it",
+          stat("/tmp/dirlink/inside.txt", &st) == 0 && st.st_size == 1);
+
+    /* A loop has to end somewhere rather than being followed forever. */
+    unlink("/tmp/loopa");
+    unlink("/tmp/loopb");
+    symlink("/tmp/loopb", "/tmp/loopa");
+    symlink("/tmp/loopa", "/tmp/loopb");
+    check("a loop is refused rather than followed",
+          stat("/tmp/loopa", &st) != 0);
+
+    /* Removing a link removes the link. */
+    check("removing a link leaves the file", unlink("/tmp/link") == 0 &&
+                                             stat("/tmp/real.txt", &st) == 0);
+
+    unlink("/tmp/rel");
+    unlink("/tmp/dangling");
+    unlink("/tmp/dirlink");
+    unlink("/tmp/loopa");
+    unlink("/tmp/loopb");
+    unlink("/tmp/realdir/inside.txt");
+    unlink("/tmp/realdir");
+    unlink("/tmp/real.txt");
+}
+
+
+/* --- /proc ---------------------------------------------------------------------
+ *
+ * Questions about the running machine, answered by the filesystem server from
+ * what the kernel tells it. Nothing here is on the disk.
+ */
+
+static void test_procfs(void)
+{
+    struct stat st;
+    char text[1024];
+    printf("/proc:\n");
+
+    check("/proc is a directory", stat("/proc", &st) == 0 &&
+                                  st.st_type == S_IFDIR);
+
+    /* Every one of these is generated when it is read, so a size of zero
+     * would mean the generator did not run. */
+    static const char* const kFiles[] = {
+        "/proc/meminfo", "/proc/uptime", "/proc/mounts",
+        "/proc/cpuinfo", "/proc/version",
+    };
+    int present = 0;
+    for (unsigned i = 0; i < sizeof(kFiles) / sizeof(kFiles[0]); ++i)
+        if (stat(kFiles[i], &st) == 0 && st.st_type == S_IFREG && st.st_size > 0)
+            ++present;
+    check("the fixed entries are all there and not empty", present == 5);
+
+    FILE* in = fopen("/proc/version", "r");
+    text[0] = '\0';
+    if (in != 0) {
+        const size_t got = fread(text, 1, sizeof(text) - 1, in);
+        text[got] = '\0';
+        fclose(in);
+    }
+    check("version reads as something", strstr(text, "leahOS") != 0);
+
+    /* The mount table has the root filesystem in it, whatever else it has. */
+    in = fopen("/proc/mounts", "r");
+    text[0] = '\0';
+    if (in != 0) {
+        const size_t got = fread(text, 1, sizeof(text) - 1, in);
+        text[got] = '\0';
+        fclose(in);
+    }
+    check("mounts lists the root filesystem", strstr(text, "ext4") != 0);
+    check("and the two that are not storage",
+          strstr(text, "procfs") != 0 && strstr(text, "devfs") != 0);
+
+    /* A process's directory exists exactly while the process does, so this
+     * one is here by virtue of asking. */
+    char own[64];
+    snprintf(own, sizeof(own), "/proc/%d/status", getpid());
+    check("this process has a directory", stat(own, &st) == 0);
+
+    in = fopen(own, "r");
+    text[0] = '\0';
+    if (in != 0) {
+        const size_t got = fread(text, 1, sizeof(text) - 1, in);
+        text[got] = '\0';
+        fclose(in);
+    }
+    check("whose status names it", strstr(text, "tests") != 0);
+    check("and gives its process group", strstr(text, "pgid") != 0);
+
+    snprintf(own, sizeof(own), "/proc/%d/status", 30000);
+    check("a process that does not exist has none", stat(own, &st) != 0);
+
+    /* Uptime moves, which is the one thing it has to do. */
+    const unsigned long first = uptime_ms();
+    msleep(40);
+    check("uptime goes forwards", uptime_ms() > first);
+
+    /* And the listing is built rather than stored: /proc has more in it than
+     * the fixed names, because every process adds one. */
+    struct dirent entries[64];
+    const int listed = getdents("/proc", entries, 64);
+    check("listing /proc shows more than the fixed names", listed > 5);
+}
+
+
 /* --- process groups, and stopping things -------------------------------------
  *
  * The two halves of job control. A group is what a signal from a keyboard goes
@@ -2287,6 +2464,8 @@ int main(void)
     test_errno();
     test_streams();
     test_open_descriptions();
+    test_symlinks();
+    test_procfs();
     test_jobs();
     test_environment();
     test_shell();

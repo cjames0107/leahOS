@@ -86,4 +86,8 @@ size_t strftime(char* out, size_t max, const char* format, const struct tm* t);
  * newline. Into a caller's buffer of at least 26 bytes. */
 char* ctime_r(const time_t* when, char* out);
 
+/* How long the machine has been up, in milliseconds. Not the wall clock: this
+ * one never jumps, so it is the one to measure an interval with. */
+unsigned long uptime_ms(void);
+
 #endif /* _TIME_H */

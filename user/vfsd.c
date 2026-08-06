@@ -20,6 +20,7 @@
 #include <time.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <proc.h>
 #include <vfsd.h>
 
 /* --- the disk, one level down --------------------------------------------- */
@@ -446,7 +447,9 @@ static unsigned dir_search(const struct inode* dir, const char* name,
                         name_out[i] = (char)g_block[at + 8 + i];
                     name_out[i] = '\0';
                     if (kind_out != 0)
-                        *kind_out = (type == 2) ? VFS_KIND_DIR : VFS_KIND_FILE;
+                        *kind_out = (type == 2) ? VFS_KIND_DIR
+                                  : (type == 7) ? VFS_KIND_LINK
+                                                : VFS_KIND_FILE;
                     return ino;
                 }
             }
@@ -457,9 +460,59 @@ static unsigned dir_search(const struct inode* dir, const char* name,
 }
 
 /* Resolve an absolute path to an inode number. */
-static unsigned lookup(const char* path, struct inode* out)
+#define MODE_KIND(m)  ((m) & 0xF000u)
+#define MODE_DIR      0x4000u
+#define MODE_LINK     0xA000u
+#define MODE_FILE     0x8000u
+
+/* Where a symbolic link points.
+ *
+ * ext4 keeps a short target in the sixty bytes the block pointers would have
+ * used - there is nothing to point at, so the space is free - and a long one
+ * in an ordinary data block. Sixty bytes covers very nearly every symlink
+ * there has ever been, but not all of them, so both are read here.
+ */
+static int read_link(const struct inode* in, char* out, unsigned max)
 {
+    if (in->size == 0 || in->size >= max)
+        return -1;
+    if (in->size < sizeof(in->block)) {
+        memcpy(out, in->block, in->size);
+        out[in->size] = '\0';
+        return 0;
+    }
+    const unsigned long phys = map_block(in, 0);
+    if (phys == 0 || read_block(phys, g_block) != 0)
+        return -1;
+    memcpy(out, g_block, in->size);
+    out[in->size] = '\0';
+    return 0;
+}
+
+/* How many links one resolution may go through before giving up. Every UNIX
+ * has this limit and they are all small; a chain longer than a handful is a
+ * loop somebody made by accident, and following it forever is how a
+ * filesystem server stops answering. */
+#define MAX_LINK_DEPTH 8
+
+/* Walk a path to the inode it names.
+ *
+ * `follow_last` is the whole difference between stat and lstat, and between
+ * reading a link's target and reading the link: every UNIX call is one or the
+ * other, and the resolver is the only place that can tell them apart.
+ *
+ * A link found part way through is always followed - `/tmp/link/file` means
+ * the file inside whatever the link leads to, and there is no reading of that
+ * which does not follow it.
+ */
+static unsigned lookup_deep(const char* path, struct inode* out,
+                            int follow_last, int depth)
+{
+    char work[512];
     unsigned ino = ROOT_INODE;
+
+    if (depth > MAX_LINK_DEPTH)
+        return 0;
     if (read_inode(ino, out) != 0)
         return 0;
 
@@ -473,11 +526,52 @@ static unsigned lookup(const char* path, struct inode* out)
         while (path[at] != '/' && path[at] != '\0' && n < sizeof(part) - 1)
             part[n++] = path[at++];
         part[n] = '\0';
-        ino = dir_search(out, part, 0, 0, 0);
-        if (ino == 0 || read_inode(ino, out) != 0)
+
+        /* Anything left after this component. Empty means this was the last
+         * one, which is the case follow_last is about. */
+        const char* rest = path + at;
+        while (*rest == '/')
+            ++rest;
+        const int last = *rest == '\0';
+
+        const unsigned found = dir_search(out, part, 0, 0, 0);
+        if (found == 0 || read_inode(found, out) != 0)
             return 0;
+        ino = found;
+
+        if (MODE_KIND(out->mode) == MODE_LINK && (!last || follow_last)) {
+            char target[512];
+            if (read_link(out, target, sizeof(target)) != 0)
+                return 0;
+
+            /* A relative target is relative to the directory the link is in,
+             * which is the path so far minus this component. Rebuilt rather
+             * than tracked, because the parent is only needed here. */
+            if (target[0] == '/') {
+                snprintf(work, sizeof(work), "%s%s%s", target,
+                         last ? "" : "/", last ? "" : rest);
+            } else {
+                unsigned cut = at - n;      /* just before this component */
+                while (cut > 0 && path[cut - 1] == '/')
+                    --cut;
+                snprintf(work, sizeof(work), "%.*s/%s%s%s", (int)cut, path,
+                         target, last ? "" : "/", last ? "" : rest);
+            }
+            return lookup_deep(work, out, follow_last, depth + 1);
+        }
     }
     return ino;
+}
+
+static unsigned lookup(const char* path, struct inode* out)
+{
+    return lookup_deep(path, out, 1, 0);
+}
+
+/* The link itself, not what it leads to. */
+static unsigned lookup_nofollow(const char* path, struct inode* out)
+{
+    return lookup_deep(path, out, 0, 0);
 }
 
 /* Give a file one more block, appending to the extent root. Four extents fit
@@ -672,7 +766,11 @@ static int split_path(const char* path, char* parent, char* last)
 }
 
 /* Make an empty file or directory and link it into its parent. */
-static int create(const char* path, int is_dir)
+/* Make a name. `link_to` non-null makes a symbolic link rather than a file or
+ * a directory, which is a third kind of thing to create and otherwise exactly
+ * the same job - the same parent lookup, the same allocation, the same entry
+ * added at the end. */
+static int create_node(const char* path, int is_dir, const char* link_to)
 {
     char parent[256], name[64];
     if (split_path(path, parent, name) != 0)
@@ -692,7 +790,7 @@ static int create(const char* path, int is_dir)
 
     struct inode fresh;
     memset(&fresh, 0, sizeof(fresh));
-    fresh.mode = is_dir ? (0040755) : (0100644);
+    fresh.mode = is_dir ? (0040755) : link_to != 0 ? (0120777) : (0100644);
     fresh.size = 0;
     touch_inode(&fresh, 1);
     /* An empty extent root: the magic, no entries, and room for four. */
@@ -700,6 +798,35 @@ static int create(const char* path, int is_dir)
     wr16w(fresh.block, 2, 0);
     wr16w(fresh.block, 4, 4);
     wr16w(fresh.block, 6, 0);
+    if (link_to != 0) {
+        const unsigned long len = strlen(link_to);
+        fresh.size = len;
+        if (len < sizeof(fresh.block)) {
+            /* Short enough to live where the block pointers would have been.
+             * A link has nothing to point at, so the sixty bytes are free. */
+            memset(fresh.block, 0, sizeof(fresh.block));
+            memcpy(fresh.block, link_to, len);
+            if (write_inode(ino, &fresh, 1u) != 0)
+                return -EIO;
+        } else {
+            /* Long enough to need a block of its own. Written before the
+             * inode, so a link never exists pointing at nothing. */
+            if (write_inode(ino, &fresh, 1u) != 0)
+                return -EIO;
+            const unsigned long phys = extend(&fresh, ino);
+            if (phys == 0)
+                return -ENOSPC;
+            memset(g_block, 0, g_block_size);
+            memcpy(g_block, link_to, len < g_block_size ? len : g_block_size);
+            if (write_block(phys, g_block) != 0 ||
+                write_inode(ino, &fresh, 1u) != 0)
+                return -EIO;
+        }
+        if (dir_add(&dir, dir_ino, name, ino, 7) != 0)
+            return -EIO;
+        return 0;
+    }
+
     if (write_inode(ino, &fresh, is_dir ? 2u : 1u) != 0)
         return -EIO;
 
@@ -733,6 +860,267 @@ static int create(const char* path, int is_dir)
         }
     }
     return 0;
+}
+
+static int create(const char* path, int is_dir)
+{
+    return create_node(path, is_dir, 0);
+}
+
+/* --- what is mounted ----------------------------------------------------------
+ *
+ * A table rather than a fact, even though there is one disk on it.
+ *
+ * Three different things answer for parts of this tree and until now none of
+ * them said so anywhere: the ext4 filesystem this server keeps, the /dev
+ * entries libc answers without asking anybody, and /proc below, which is not
+ * storage at all. A person asking "what is this directory" deserves an answer,
+ * and `mount` with nothing to print is a worse answer than none.
+ *
+ * Mounting a *second* block filesystem is not here. Every one of this server's
+ * superblock globals - the block size, the group descriptors, the inode size -
+ * is a singleton, and a second device means all of them per-mount. The table
+ * is the half that is honest to have without it.
+ */
+struct mount_entry {
+    const char* at;
+    const char* what;
+    const char* kind;
+    const char* how;
+};
+
+static const struct mount_entry kMounts[] = {
+    { "/",     "/dev/sda2", "ext4", "rw"        },
+    { "/dev",  "devfs",     "devfs", "rw"       },
+    { "/proc", "procfs",    "procfs", "ro"      },
+};
+
+#define MOUNT_COUNT (sizeof(kMounts) / sizeof(kMounts[0]))
+
+/* --- /proc --------------------------------------------------------------------
+ *
+ * Not on the disk and never was. These are questions about the running machine
+ * - what it is doing, how long it has been doing it, how much memory is left -
+ * and the answers exist in the kernel, so writing them down somewhere would
+ * only make them stale.
+ *
+ * They are served here rather than in libc, where /dev is served, because /dev
+ * is a fixed list of five names and this is not: the contents change with
+ * every process that starts, and a listing has to be built when it is asked
+ * for. That is a filesystem's job, and this is the filesystem.
+ *
+ * Everything is generated whole into a buffer and then sliced by the offset
+ * the reader asked for. These are all small - a page at the very most - and a
+ * seekable stream over a value that changes underneath is a worse lie than a
+ * snapshot per read.
+ */
+
+#define PROC_MAX 4096
+
+static int is_proc(const char* path)
+{
+    return strncmp(path, "/proc", 5) == 0 &&
+           (path[5] == '\0' || path[5] == '/');
+}
+
+/* The pid a /proc path names, or 0 for one that names none. */
+static unsigned proc_pid_of(const char* path, const char** rest)
+{
+    unsigned pid = 0, digits = 0;
+    const char* at = path + 5;
+    while (*at == '/')
+        ++at;
+    while (*at >= '0' && *at <= '9') {
+        pid = pid * 10 + (unsigned)(*at++ - '0');
+        ++digits;
+    }
+    if (digits == 0 || (*at != '\0' && *at != '/'))
+        return 0;
+    while (*at == '/')
+        ++at;
+    if (rest != 0)
+        *rest = at;
+    return pid;
+}
+
+static const char* state_word(unsigned state)
+{
+    switch (state) {
+    case PROC_READY:   return "ready";
+    case PROC_RUNNING: return "running";
+    case PROC_BLOCKED: return "waiting";
+    case PROC_STOPPED: return "stopped";
+    case PROC_ZOMBIE:  return "zombie";
+    default:           return "dead";
+    }
+}
+
+/* Build the contents of a /proc file. Returns the length, or -1 when the path
+ * is not one of them. */
+static int proc_contents(const char* path, char* out, unsigned max)
+{
+    const char* rest = "";
+    const unsigned pid = proc_pid_of(path, &rest);
+
+    if (pid != 0) {
+        struct proc_info tasks[96];
+        const int n = proc_list(tasks, 96);
+        for (int i = 0; i < n; ++i) {
+            if (tasks[i].pid != pid)
+                continue;
+            if (strcmp(rest, "status") != 0)
+                return -1;
+            return snprintf(out, max,
+                            "name\t%s\n"
+                            "pid\t%u\n"
+                            "ppid\t%u\n"
+                            "pgid\t%u\n"
+                            "sid\t%u\n"
+                            "uid\t%u\n"
+                            "state\t%s\n"
+                            "ticks\t%lu\n"
+                            "memory\t%lu kB\n",
+                            tasks[i].name, tasks[i].pid, tasks[i].parent,
+                            tasks[i].pgid, tasks[i].sid, tasks[i].uid,
+                            state_word(tasks[i].state),
+                            (unsigned long)tasks[i].ticks,
+                            (unsigned long)(tasks[i].bytes / 1024));
+        }
+        return -1;
+    }
+
+    if (strcmp(path, "/proc/meminfo") == 0) {
+        struct mem_info m;
+        if (mem_info(&m) != 0)
+            return -1;
+        return snprintf(out, max,
+                        "total\t%lu kB\nused\t%lu kB\nfree\t%lu kB\n",
+                        (unsigned long)(m.usable / 1024),
+                        (unsigned long)(m.used / 1024),
+                        (unsigned long)(m.free / 1024));
+    }
+    if (strcmp(path, "/proc/uptime") == 0) {
+        const unsigned long ms = uptime_ms();
+        return snprintf(out, max, "%lu.%03lu\n", ms / 1000, ms % 1000);
+    }
+    if (strcmp(path, "/proc/mounts") == 0) {
+        int at = 0;
+        for (unsigned i = 0; i < MOUNT_COUNT && at < (int)max; ++i)
+            at += snprintf(out + at, max - (unsigned)at, "%s %s %s %s\n",
+                           kMounts[i].what, kMounts[i].at, kMounts[i].kind,
+                           kMounts[i].how);
+        return at;
+    }
+    if (strcmp(path, "/proc/cpuinfo") == 0) {
+        struct cpu_stat cpus[32];
+        const int n = cpu_info(cpus, 32);
+        int at = snprintf(out, max, "processors\t%d\n", n < 0 ? 0 : n);
+        for (int i = 0; i < n && at < (int)max; ++i)
+            at += snprintf(out + at, max - (unsigned)at,
+                           "cpu%d\tbusy %lu idle %lu\n", i,
+                           (unsigned long)cpus[i].busy,
+                           (unsigned long)cpus[i].idle);
+        return at;
+    }
+    if (strcmp(path, "/proc/version") == 0)
+        return snprintf(out, max, "leahOS x86-64\n");
+    return -1;
+}
+
+/* The fixed names in /proc, beside one directory per process. */
+static const char* const kProcFiles[] = {
+    "cpuinfo", "meminfo", "mounts", "uptime", "version",
+};
+
+#define PROC_FILE_COUNT (sizeof(kProcFiles) / sizeof(kProcFiles[0]))
+
+/* What a /proc path is: a directory, a file, or nothing. */
+static int proc_kind(const char* path, unsigned* kind, unsigned long* size)
+{
+    char scratch[PROC_MAX];
+
+    if (strcmp(path, "/proc") == 0 || strcmp(path, "/proc/") == 0) {
+        *kind = VFS_KIND_DIR;
+        *size = 0;
+        return 0;
+    }
+    {
+        const char* rest = "";
+        const unsigned pid = proc_pid_of(path, &rest);
+        if (pid != 0 && rest[0] == '\0') {
+            /* A process's own directory exists exactly while it does. */
+            struct proc_info tasks[96];
+            const int n = proc_list(tasks, 96);
+            for (int i = 0; i < n; ++i)
+                if (tasks[i].pid == pid) {
+                    *kind = VFS_KIND_DIR;
+                    *size = 0;
+                    return 0;
+                }
+            return -1;
+        }
+    }
+    {
+        const int len = proc_contents(path, scratch, sizeof(scratch));
+        if (len < 0)
+            return -1;
+        *kind = VFS_KIND_FILE;
+        *size = (unsigned long)len;
+        return 0;
+    }
+}
+
+/* The Nth entry of a /proc directory. Processes come after the fixed names, in
+ * the order the kernel reports them, which is the order they were made. */
+static int proc_entry(const char* path, unsigned index, char* name,
+                      unsigned* kind, unsigned long* size)
+{
+    char scratch[PROC_MAX];
+
+    if (strcmp(path, "/proc") == 0 || strcmp(path, "/proc/") == 0) {
+        if (index < PROC_FILE_COUNT) {
+            char full[64];
+            snprintf(name, 64, "%s", kProcFiles[index]);
+            snprintf(full, sizeof(full), "/proc/%s", kProcFiles[index]);
+            const int len = proc_contents(full, scratch, sizeof(scratch));
+            *kind = VFS_KIND_FILE;
+            *size = len < 0 ? 0 : (unsigned long)len;
+            return 0;
+        }
+        struct proc_info tasks[96];
+        const int n = proc_list(tasks, 96);
+        const unsigned want = index - PROC_FILE_COUNT;
+        unsigned seen = 0;
+        for (int i = 0; i < n; ++i) {
+            /* Processes, not threads: /proc/N is a process, and a thread is
+             * not one however much it looks like a task from in here. */
+            if (tasks[i].pid != tasks[i].tgid)
+                continue;
+            if (seen++ != want)
+                continue;
+            snprintf(name, 64, "%u", tasks[i].pid);
+            *kind = VFS_KIND_DIR;
+            *size = 0;
+            return 0;
+        }
+        return -1;
+    }
+    {
+        const char* rest = "";
+        const unsigned pid = proc_pid_of(path, &rest);
+        if (pid != 0 && rest[0] == '\0' && index == 0) {
+            snprintf(name, 64, "status");
+            char full[64];
+            snprintf(full, sizeof(full), "/proc/%u/status", pid);
+            const int len = proc_contents(full, scratch, sizeof(scratch));
+            if (len < 0)
+                return -1;
+            *kind = VFS_KIND_FILE;
+            *size = (unsigned long)len;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 static int mount(void)
@@ -915,16 +1303,122 @@ int main(void)
          * for having numbers at all. */
         r.word[0] = -EIO;
 
-        if (m.tag == VFS_MOUNTED) {
+        /* /proc first, and before anything touches the disk: none of it is on
+         * the disk, and the empty directory that is there only exists so the
+         * name is not a lie to `ls /`. */
+        if (is_proc((const char*)m.data) &&
+            (m.tag == VFS_STAT || m.tag == VFS_LSTAT || m.tag == VFS_READ ||
+             m.tag == VFS_LIST)) {
+            const char* path = (const char*)m.data;
+            unsigned kind = VFS_KIND_FILE;
+            unsigned long size = 0;
+
+            if (m.tag == VFS_STAT || m.tag == VFS_LSTAT) {
+                r.word[0] = -ENOENT;
+                if (proc_kind(path, &kind, &size) == 0) {
+                    r.word[0] = (long)size;
+                    r.word[1] = (long)kind;
+                    /* Readable by everyone and writable by nobody, which is
+                     * the truth: these are answers, not storage. */
+                    r.word[2] = kind == VFS_KIND_DIR ? 0555 : 0444;
+                    r.word[3] = 0;
+                }
+            } else if (m.tag == VFS_LIST) {
+                char name[64];
+                r.word[0] = -ENOENT;
+                if (proc_entry(path, (unsigned)m.word[1], name,
+                               &kind, &size) == 0) {
+                    unsigned n = 0;
+                    while (name[n] != '\0' && n < sizeof(r.data) - 1) {
+                        r.data[n] = name[n];
+                        ++n;
+                    }
+                    r.data[n] = '\0';
+                    r.bytes = n;
+                    r.word[0] = (long)kind;
+                    r.word[1] = (long)size;
+                    r.word[2] = kind == VFS_KIND_DIR ? 0555 : 0444;
+                    r.word[3] = 0;
+                }
+            } else {
+                char text[PROC_MAX];
+                const int len = proc_contents(path, text, sizeof(text));
+                r.word[0] = len < 0 ? -ENOENT : 0;
+                if (len >= 0 && out != 0) {
+                    /* Generated whole and then sliced, because it is a
+                     * snapshot: a reader that came back for the second half
+                     * of a value that has since changed would get two halves
+                     * of two different answers. */
+                    unsigned long offset = (unsigned long)m.word[1];
+                    unsigned long want = (unsigned long)m.word[2];
+                    if (offset >= (unsigned long)len) {
+                        r.word[0] = 0;
+                    } else {
+                        if (want > (unsigned long)len - offset)
+                            want = (unsigned long)len - offset;
+                        if (want > VFS_CHUNK)
+                            want = VFS_CHUNK;
+                        memcpy(out->data, text + offset, want);
+                        r.word[0] = (long)want;
+                    }
+                }
+            }
+        } else if (m.tag == VFS_STATFS) {
+            /* Straight out of the superblock, which is held in memory anyway.
+             *
+             * A mount point that is not storage gets zeros, and df prints a
+             * dash for those: /proc has no size, and /dev is a set of names
+             * libc answers without asking anybody, so reporting the disk's
+             * figures under either would be counting the same megabytes twice
+             * under three headings. */
+            const char* p = (const char*)m.data;
+            const int sized = !is_proc(p) &&
+                              !(strncmp(p, "/dev", 4) == 0 &&
+                                (p[4] == '\0' || p[4] == '/'));
+            r.word[0] = g_block_size;
+            r.word[1] = sized ? (long)rd32(g_sb, 4) : 0;
+            r.word[2] = sized ? (long)rd32(g_sb, 12) : 0;
+            r.word[3] = 0;
+        } else if (m.tag == VFS_MOUNTED) {
             r.word[0] = g_mounted;
             r.word[1] = g_block_size;
-        } else if (m.tag == VFS_STAT) {
+        } else if (m.tag == VFS_READLINK) {
             struct inode in;
+            char target[512];
             r.word[0] = -ENOENT;
-            if (lookup((const char*)m.data, &in) != 0) {
+            if (lookup_nofollow((const char*)m.data, &in) != 0) {
+                if (MODE_KIND(in.mode) != MODE_LINK) {
+                    r.word[0] = -EINVAL;        /* not a link, so no target */
+                } else if (read_link(&in, target, sizeof(target)) != 0) {
+                    r.word[0] = -EIO;
+                } else {
+                    unsigned n = 0;
+                    while (target[n] != '\0' && n < sizeof(r.data) - 1) {
+                        r.data[n] = target[n];
+                        ++n;
+                    }
+                    r.data[n] = '\0';
+                    r.bytes = n;
+                    r.word[0] = (long)n;
+                }
+            }
+        } else if (m.tag == VFS_SYMLINK) {
+            /* Two strings in the data, the target first: it is the one that
+             * may be anything at all, including a path to nowhere, so the one
+             * that must not be parsed. */
+            const char* target = (const char*)m.data;
+            const char* where  = target + strlen(target) + 1;
+            r.word[0] = create_node(where, 0, target);
+        } else if (m.tag == VFS_STAT || m.tag == VFS_LSTAT) {
+            struct inode in;
+            const int follow = m.tag == VFS_STAT;
+            r.word[0] = -ENOENT;
+            if ((follow ? lookup((const char*)m.data, &in)
+                        : lookup_nofollow((const char*)m.data, &in)) != 0) {
                 r.word[0] = (long)in.size;
-                r.word[1] = (in.mode & 0xF000) == 0x4000 ? VFS_KIND_DIR
-                                                         : VFS_KIND_FILE;
+                r.word[1] = MODE_KIND(in.mode) == MODE_DIR  ? VFS_KIND_DIR
+                          : MODE_KIND(in.mode) == MODE_LINK ? VFS_KIND_LINK
+                                                            : VFS_KIND_FILE;
                 r.word[2] = in.mode & 0777;
                 /* Both owners in one word: they are always wanted together
                  * and there are only four to spend. */
@@ -1033,7 +1527,11 @@ int main(void)
             r.word[0] = split_ok ? -ENOENT : -EINVAL;
             if (allowed) {
                 struct inode probe;
-                const unsigned pino = lookup((const char*)m.data, &probe);
+                /* Not lookup: removing a name removes *that name*, and a
+                 * symbolic link is a name. Following it here would ask
+                 * whether the target is an empty directory - a question about
+                 * something that is not being removed at all. */
+                const unsigned pino = lookup_nofollow((const char*)m.data, &probe);
                 if (pino == 0) {
                     allowed = 0;
                     r.word[0] = -ENOENT;
@@ -1056,7 +1554,14 @@ int main(void)
                  * half way, which is the shape of leak fsck cannot repair. */
                 struct inode victim;
                 if (read_inode(ino, &victim) == 0) {
-                    const unsigned long n =
+                    /* A short symbolic link has no blocks: its target lives in
+                     * the sixty bytes the extent root would have used. Walking
+                     * that as an extent tree would be reading the target text
+                     * as block numbers, and freeing whatever they came to. */
+                    const int inline_link =
+                        MODE_KIND(victim.mode) == MODE_LINK &&
+                        victim.size < sizeof(victim.block);
+                    const unsigned long n = inline_link ? 0 :
                         (victim.size + g_block_size - 1) / g_block_size;
                     for (unsigned long b = 0; b < n; ++b) {
                         const unsigned long phys = map_block(&victim, b);

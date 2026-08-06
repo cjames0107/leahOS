@@ -1,0 +1,15 @@
+ps - what is running
+
+SYNOPSIS
+    ps [-T] [-a] [-l]
+
+DESCRIPTION
+      -T   threads as well as processes
+      -a   everybody's, not only yours
+      -l   the job and login columns: PGID and SID
+
+    A thread is a task here, so it appears as one. A process is a task whose
+    pid and tgid are the same; -T shows the rest.
+
+SEE ALSO
+    kill, jobs, taskman

@@ -123,7 +123,7 @@ SBIN_PROGRAMS := init login wserver desktop blockd vfsd netd e1000d audiod \
                  authd usbd ps2d useradd passwd ifconfig
 BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami date \
                  chmod chown stat less grep find wc head tail sort diff tar \
-                 gunzip ps kill sleep
+                 gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df
 USRBIN_PROGRAMS := hello gui tone lspci ping ping6 arp nslookup fetch fetch6 env \
                  screenshot tests ipctest nictest nettest blktest vfstest \
                  mvtest v6test churn

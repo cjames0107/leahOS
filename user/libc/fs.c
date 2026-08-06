@@ -34,7 +34,9 @@
 #include <ipc.h>
 #include <shm.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <vfsd.h>
@@ -539,6 +541,27 @@ void tty_set(int fd)
     g_tty = fd;
 }
 
+/* Whether this descriptor is the terminal.
+ *
+ * Not "does this process have a terminal", which is what tty_fd answers and
+ * is a different question with a different use. `man ls` should page and
+ * `man ls | head` should not, and both run in a process with a terminal - the
+ * difference is entirely in where descriptor 1 goes. Asking the wrong one of
+ * these left a pager sitting in the foreground of a pipeline whose reader had
+ * already finished, holding the terminal against the person trying to type.
+ */
+int isatty(int fd)
+{
+    start();
+    if (!valid(fd) || g_tty < 0 || !valid(g_tty))
+        return 0;
+    /* The same kernel object, whatever numbers the two go by here: a terminal
+     * that has been dup'd is still the terminal. */
+    return g_fds[fd].kind == K_KERNEL &&
+           g_fds[g_tty].kind == K_KERNEL &&
+           g_fds[fd].kfd == g_fds[g_tty].kfd;
+}
+
 unsigned tty_control_key(void)
 {
     start();
@@ -832,14 +855,17 @@ long lseek(int fd, long offset, int whence)
     }
 }
 
-int stat(const char* path, struct stat* out)
+/* stat and lstat differ by one tag, so they are one function. Which of the two
+ * a caller wants is the question "am I asking about this name, or about what
+ * it leads to?", and only the caller knows. */
+static int stat_either(const char* path, struct stat* out, unsigned tag)
 {
     char resolved[PATH_MAX];
     struct ipc_message a;
 
     start();
     __fd_resolve(path, resolved);
-    if (vfs_call(VFS_STAT, resolved, 0, 0, &a) != 0) {
+    if (vfs_call(tag, resolved, 0, 0, &a) != 0) {
         errno = EIO;
         return -1;
     }
@@ -847,7 +873,9 @@ int stat(const char* path, struct stat* out)
         return -1;
 
     out->st_size = (uint64_t)a.word[0];
-    out->st_type = a.word[1] == VFS_KIND_DIR ? S_IFDIR : S_IFREG;
+    out->st_type = a.word[1] == VFS_KIND_DIR  ? S_IFDIR
+                 : a.word[1] == VFS_KIND_LINK ? S_IFLNK
+                                              : S_IFREG;
     out->st_mode = (uint32_t)a.word[2];
     out->st_uid  = (uint32_t)((a.word[3] >> 16) & 0xFFFF);
     out->st_gid  = (uint32_t)(a.word[3] & 0xFFFF);
@@ -862,6 +890,91 @@ int stat(const char* path, struct stat* out)
         out->st_ctime = (int64_t)stamps[1];
         out->st_atime = (int64_t)stamps[2];
     }
+    return 0;
+}
+
+int stat(const char* path, struct stat* out)
+{
+    return stat_either(path, out, VFS_STAT);
+}
+
+int lstat(const char* path, struct stat* out)
+{
+    return stat_either(path, out, VFS_LSTAT);
+}
+
+int symlink(const char* target, const char* path)
+{
+    char resolved[PATH_MAX];
+    struct ipc_message q, a;
+    unsigned n = 0, k = 0;
+
+    start();
+    if (vfs_port() < 0)
+        return -1;
+    __fd_resolve(path, resolved);
+
+    /* Two strings in the one data field: the target first, because it is the
+     * one that is text rather than a path - it is stored as written, and may
+     * name something that does not exist yet or ever. */
+    memset(&q, 0, sizeof(q));
+    q.tag = VFS_SYMLINK;
+    while (target[n] != '\0' && n + 2 < sizeof(q.data))
+        { q.data[n] = target[n]; ++n; }
+    q.data[n++] = '\0';
+    while (resolved[k] != '\0' && n + 1 < sizeof(q.data))
+        { q.data[n++] = resolved[k++]; }
+    q.data[n++] = '\0';
+    q.bytes = n;
+    q.shm_key = (int)g_buf_key;
+    q.shm_bytes = sizeof(struct vfs_shared);
+
+    memset(&a, 0, sizeof(a));
+    if (ipc_call(g_vfs, &q, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    return from_vfs(a.word[0]) < 0 ? -1 : 0;
+}
+
+long readlink(const char* path, char* out, unsigned long max)
+{
+    char resolved[PATH_MAX];
+    struct ipc_message a;
+    unsigned long n;
+
+    start();
+    __fd_resolve(path, resolved);
+    if (vfs_call(VFS_READLINK, resolved, 0, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    if (from_vfs(a.word[0]) < 0)
+        return -1;
+
+    /* No terminating null, as everywhere: a target may contain anything, so
+     * the length is the answer and the caller adds the null if it wants one. */
+    n = (unsigned long)a.word[0];
+    if (n > max)
+        n = max;
+    memcpy(out, a.data, n);
+    return (long)n;
+}
+
+int statfs(const char* path, struct statfs* out)
+{
+    char resolved[PATH_MAX];
+    struct ipc_message a;
+
+    start();
+    __fd_resolve(path, resolved);
+    if (vfs_call(VFS_STATFS, resolved, 0, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    out->f_bsize  = (uint64_t)a.word[0];
+    out->f_blocks = (uint64_t)a.word[1];
+    out->f_bfree  = (uint64_t)a.word[2];
     return 0;
 }
 
@@ -884,7 +997,9 @@ int getdents(const char* path, struct dirent* buffer, int max)
         buffer[n].d_name[i] = '\0';
         if (i == 0)
             break;
-        buffer[n].d_type = a.word[0] == VFS_KIND_DIR ? S_IFDIR : S_IFREG;
+        buffer[n].d_type = a.word[0] == VFS_KIND_DIR  ? S_IFDIR
+                         : a.word[0] == VFS_KIND_LINK ? S_IFLNK
+                                                      : S_IFREG;
         buffer[n].d_size = (uint64_t)a.word[1];
         buffer[n].d_mode = (unsigned)a.word[2];
         buffer[n].d_mtime = a.word[3];

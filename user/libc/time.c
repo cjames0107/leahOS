@@ -303,3 +303,8 @@ char* ctime_r(const time_t* when, char* out)
     strftime(out, 26, "%a %b %e %H:%M:%S %Y\n", &t);
     return out;
 }
+
+unsigned long uptime_ms(void)
+{
+    return (unsigned long)__syscall(SYS_uptime, 0, 0, 0, 0, 0);
+}

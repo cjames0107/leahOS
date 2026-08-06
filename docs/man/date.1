@@ -1,0 +1,16 @@
+date - print the date and time
+
+SYNOPSIS
+    date [+FORMAT]
+
+DESCRIPTION
+    Prints the current date and time. With an argument beginning +, uses it
+    as a strftime format.
+
+    The clock is read from the CMOS at boot and advanced by the timer since,
+    so it is right if the machine's battery-backed clock was. There is no
+    timezone database: everything is UTC unless /etc/timezone holds an offset
+    in minutes.
+
+SEE ALSO
+    uptime, touch
