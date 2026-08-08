@@ -18,6 +18,14 @@
 #define WG_PAPER   0xFFFFFFu
 #define WG_DIM     0x808080u
 
+/* One radius for every control in the interface, matching the windows they sit
+ * in. Smaller than a window's, because a button inside a rounded panel with the
+ * same radius reads as a hole rather than as a control. */
+#define WG_RADIUS  6
+
+/* The bitmap cell these were, kept because layout code still counts in them.
+ * Text is proportional now: ask wg_text_width what a string actually measures
+ * rather than multiplying by eight. */
 #define WG_GLYPH_W 8
 #define WG_GLYPH_H 16
 
@@ -72,6 +80,13 @@ void wg_icon_scaled(int x, int y, const uint32_t* px, int sw, int sh,
 void wg_bevel(int x, int y, int w, int h, int raised);
 
 void wg_text(int x, int y, const char* s, uint32_t colour);
+
+/* What a string measures, in pixels, in the font actually being used. The
+ * glyphs are not all one width any more, so strlen times eight is a guess that
+ * is wrong in both directions. */
+int  wg_text_width(const char* s);
+int  wg_text_height(void);
+int  wg_text_size(void);
 
 /* Text clipped to `max_w` pixels, ending in ".." when it does not fit - which
  * is what a file listing needs far more often than it needs the whole name. */

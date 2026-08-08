@@ -1,4 +1,7 @@
 #include <display.h>
+#include <draw.h>
+#include <font.h>
+#include <paths.h>
 #include <shm.h>
 #include <wproto.h>
 #include <stdio.h>
@@ -43,6 +46,34 @@ void wg_target(uint32_t* pixels, unsigned width, unsigned height)
     g_px = pixels;
     g_w = width;
     g_h = height;
+}
+
+/* The proportional font, opened once and shared by every control.
+ *
+ * Lazily, because most of the programs linking libc never draw anything and
+ * should not pay forty kilobytes and a parse for a font they will not use. */
+static struct font* g_face;
+static int          g_face_tried;
+
+static struct font* face(void)
+{
+    if (!g_face_tried) {
+        g_face_tried = 1;
+        g_face = font_open(PATH_FONTS "/sans.ttf");
+    }
+    return g_face;
+}
+
+/* The surface draw.c wants, over whatever wg_target was pointed at. No clip:
+ * a client owns every pixel of its own window. */
+static struct surface canvas(void)
+{
+    struct surface s;
+    s.pixels = g_px;
+    s.w = (int)g_w;
+    s.h = (int)g_h;
+    s.cx = s.cy = s.cw = s.ch = 0;
+    return s;
 }
 
 int wg_font(void)
@@ -229,69 +260,121 @@ int wg_slider_value(int x, int w, int mx, int max)
     return span > 0 ? at * max / span : 0;
 }
 
+/* What used to be two one-pixel lines suggesting a light source.
+ *
+ * There is no light source any more - depth comes from a shadow outside a
+ * shape rather than from a highlight drawn inside its edge - so this is a
+ * rounded hairline, darker when the caller asked for sunken. The name and the
+ * signature stay because dozens of call sites use them and all of them mean
+ * "outline this box". */
 void wg_bevel(int x, int y, int w, int h, int raised)
 {
-    const uint32_t tl = raised ? WG_LIGHT : WG_SHADOW;
-    const uint32_t br = raised ? WG_SHADOW : WG_LIGHT;
-    for (int i = 0; i < w; ++i) {
-        wg_plot(x + i, y, tl);
-        wg_plot(x + i, y + h - 1, br);
-    }
-    for (int i = 0; i < h; ++i) {
-        wg_plot(x, y + i, tl);
-        wg_plot(x + w - 1, y + i, br);
-    }
+    const struct surface c = canvas();
+    draw_round_rect_outline(&c, x, y, w, h, WG_RADIUS, 1,
+                            raised ? 0x59FFFFFFu : 0x26000000u);
 }
 
+int wg_text_size(void)
+{
+    /* Chosen so a line still occupies the sixteen-pixel slot every caller was
+     * written against: thirteen pixels of em gives about twelve of ascent and
+     * four of descent, which lands where the bitmap cell used to. Callers that
+     * laid text out by counting sixteens keep working. */
+    return (int)(13 * g_scale);
+}
+
+int wg_text_width(const char* s)
+{
+    struct font* f = face();
+    if (f == 0)
+        return (int)strlen(s) * WG_GLYPH_W * (int)g_scale;
+    return font_width(f, wg_text_size(), s);
+}
+
+int wg_text_height(void)
+{
+    struct font* f = face();
+    return f != 0 ? font_line_height(f, wg_text_size())
+                  : WG_GLYPH_H * (int)g_scale;
+}
+
+/* `y` is the top of the line, as it always was - not the baseline. Every
+ * caller in this system positions text by the top of a row, and changing that
+ * would mean touching all of them to gain nothing. */
 void wg_text(int x, int y, const char* s, uint32_t colour)
 {
-    /* The font is a bitmap, so "larger text" can only mean whole-pixel doubling.
-     * Saying so is better than pretending to a range of sizes there is no
-     * outline to produce. */
-    const unsigned k = g_scale;
-    for (unsigned i = 0; s[i] != '\0'; ++i) {
-        const unsigned char* glyph = &g_font[(unsigned char)s[i] * 16];
-        for (int row = 0; row < WG_GLYPH_H; ++row)
-            for (int col = 0; col < WG_GLYPH_W; ++col) {
-                if (!(glyph[row] & (0x80 >> col)))
+    struct font* f = face();
+    if (f == 0)
+        return;
+
+    const int size = wg_text_size();
+    const int baseline = y + font_ascent(f, size);
+    const struct surface c = canvas();
+    const unsigned alpha = (colour >> 24) != 0 ? (colour >> 24) & 0xFF : 255;
+    const uint32_t rgb = colour & 0x00FFFFFFu;
+
+    const char* at = s;
+    for (;;) {
+        const unsigned ch = utf8_next(&at);
+        if (ch == 0)
+            break;
+        struct glyph g;
+        if (font_glyph(f, size, ch, &g) != 0)
+            continue;
+        for (int gy = 0; gy < g.h; ++gy)
+            for (int gx = 0; gx < g.w; ++gx) {
+                const unsigned cov = g.coverage[(long)gy * g.w + gx];
+                if (cov == 0)
                     continue;
-                for (unsigned dy = 0; dy < k; ++dy)
-                    for (unsigned dx = 0; dx < k; ++dx)
-                        wg_plot(x + (int)(i * WG_GLYPH_W * k + (unsigned)col * k + dx),
-                                y + (int)((unsigned)row * k + dy), colour);
+                draw_pixel(&c, x + g.left + gx, baseline - g.top + gy,
+                           (((alpha * cov + 127) / 255) << 24) | rgb);
             }
+        x += g.advance;
     }
 }
 
 void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w)
 {
-    const int fits = max_w / WG_GLYPH_W;
-    if (fits <= 0)
+    if (max_w <= 0)
         return;
-    const int len = (int)strlen(s);
-    if (len <= fits) {
+    if (wg_text_width(s) <= max_w) {
         wg_text(x, y, s, colour);
         return;
     }
-    char cut[160];
-    int keep = fits - 2;
-    if (keep < 1) keep = 1;
-    if (keep > (int)sizeof(cut) - 3) keep = (int)sizeof(cut) - 3;
-    for (int i = 0; i < keep; ++i)
-        cut[i] = s[i];
-    cut[keep] = '.';
-    cut[keep + 1] = '.';
-    cut[keep + 2] = '\0';
-    wg_text(x, y, cut, colour);
+    /* Trimmed a character at a time and measured each time, because the glyphs
+     * are no longer all one width and there is no count that means "this many
+     * pixels". The ellipsis has to fit too. */
+    char cut[192];
+    int keep = (int)strlen(s);
+    if (keep > (int)sizeof(cut) - 3)
+        keep = (int)sizeof(cut) - 3;
+    while (keep > 0) {
+        memcpy(cut, s, (size_t)keep);
+        cut[keep] = '.';
+        cut[keep + 1] = '.';
+        cut[keep + 2] = '\0';
+        if (wg_text_width(cut) <= max_w)
+            break;
+        --keep;
+    }
+    if (keep > 0)
+        wg_text(x, y, cut, colour);
 }
 
 void wg_button(int x, int y, int w, int h, const char* label, int down)
 {
-    wg_fill(x, y, w, h, WG_FACE);
-    wg_bevel(x, y, w, h, !down);
-    const int tw = (int)strlen(label) * WG_GLYPH_W;
-    wg_text(x + (w - tw) / 2 + down, y + (h - WG_GLYPH_H) / 2 + down,
-            label, WG_INK);
+    const struct surface c = canvas();
+    /* A soft pill: a wash of white, brighter while it is held. Nothing moves
+     * by a pixel when pressed - the old chrome shifted its label down and
+     * right to fake the button going in, and a change of tone says it without
+     * the text jumping. */
+    draw_round_rect(&c, x, y, w, h, WG_RADIUS,
+                    down ? 0x8CFFFFFFu : 0x4DFFFFFFu);
+    draw_round_rect_outline(&c, x, y, w, h, WG_RADIUS, 1, 0x40FFFFFFu);
+
+    const int tw = wg_text_width(label);
+    wg_text(x + (w - tw) / 2, y + (h - wg_text_height()) / 2, label,
+            0xF0101810u);
 }
 
 /* --- scrollbars ----------------------------------------------------------- */
