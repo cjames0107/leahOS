@@ -1038,27 +1038,23 @@ int lstat(const char* path, struct stat* out)
     return stat_either(path, out, VFS_LSTAT);
 }
 
-int symlink(const char* target, const char* path)
+/* Two strings in the one data field. Both symlink and link take a pair, and
+ * in both the first is the thing being pointed at - for a symlink that is text
+ * stored as written, for a hard link it is a path resolved now. */
+static int vfs_pair(unsigned tag, const char* first, const char* second)
 {
-    char resolved[PATH_MAX];
     struct ipc_message q, a;
     unsigned n = 0, k = 0;
 
-    start();
     if (vfs_port() < 0)
         return -1;
-    __fd_resolve(path, resolved);
-
-    /* Two strings in the one data field: the target first, because it is the
-     * one that is text rather than a path - it is stored as written, and may
-     * name something that does not exist yet or ever. */
     memset(&q, 0, sizeof(q));
-    q.tag = VFS_SYMLINK;
-    while (target[n] != '\0' && n + 2 < sizeof(q.data))
-        { q.data[n] = target[n]; ++n; }
+    q.tag = tag;
+    while (first[n] != '\0' && n + 2 < sizeof(q.data))
+        { q.data[n] = first[n]; ++n; }
     q.data[n++] = '\0';
-    while (resolved[k] != '\0' && n + 1 < sizeof(q.data))
-        { q.data[n++] = resolved[k++]; }
+    while (second[k] != '\0' && n + 1 < sizeof(q.data))
+        { q.data[n++] = second[k++]; }
     q.data[n++] = '\0';
     q.bytes = n;
     q.shm_key = (int)g_buf_key;
@@ -1070,6 +1066,25 @@ int symlink(const char* target, const char* path)
         return -1;
     }
     return from_vfs(a.word[0]) < 0 ? -1 : 0;
+}
+
+int symlink(const char* target, const char* path)
+{
+    char resolved[PATH_MAX];
+    start();
+    __fd_resolve(path, resolved);
+    /* The target is not resolved: it is stored exactly as written, and may be
+     * relative, or name something that does not exist yet or ever. */
+    return vfs_pair(VFS_SYMLINK, target, resolved);
+}
+
+int link(const char* existing, const char* path)
+{
+    char from[PATH_MAX], to[PATH_MAX];
+    start();
+    __fd_resolve(existing, from);
+    __fd_resolve(path, to);
+    return vfs_pair(VFS_LINK, from, to);
 }
 
 long readlink(const char* path, char* out, unsigned long max)

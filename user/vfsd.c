@@ -867,6 +867,57 @@ static int create(const char* path, int is_dir)
     return create_node(path, is_dir, 0);
 }
 
+/* A second name for a file that already exists.
+ *
+ * Not a copy and not a symbolic link: one inode with two directory entries
+ * pointing at it, and no way to tell which of them came first. That is what
+ * the link count in the inode is for, and why unlink has to consult it rather
+ * than freeing whatever it removed a name for.
+ *
+ * Directories are refused. A second name for a directory makes the tree a
+ * graph, and every operation that walks it - find, rm -r, a resolver counting
+ * its depth - has to be prepared for a cycle. Every UNIX refuses this for the
+ * same reason.
+ */
+static int link_node(const char* existing, const char* path)
+{
+    struct inode target;
+    /* Not followed: a link to a symbolic link is a second name for the link
+     * itself, which is what every other system does with it. */
+    const unsigned ino = lookup_nofollow(existing, &target);
+    if (ino == 0)
+        return -ENOENT;
+    if (MODE_KIND(target.mode) == MODE_DIR)
+        return -EPERM;
+
+    char parent[256], name[64];
+    if (split_path(path, parent, name) != 0)
+        return -EINVAL;
+    struct inode dir;
+    const unsigned dir_ino = lookup(parent, &dir);
+    if (dir_ino == 0)
+        return -ENOENT;
+    if (MODE_KIND(dir.mode) != MODE_DIR)
+        return -ENOTDIR;
+    if (dir_search(&dir, name, 0, 0, 0) != 0)
+        return -EEXIST;
+
+    const unsigned type = MODE_KIND(target.mode) == MODE_LINK ? 7 : 1;
+    if (dir_add(&dir, dir_ino, name, ino, (int)type) != 0)
+        return -EIO;
+
+    /* One more name, so one more link. Written straight into the inode rather
+     * than through write_inode, which would need the whole inode read back
+     * and would rewrite fields nothing here is changing. */
+    unsigned long block; unsigned at;
+    if (inode_location(ino, &block, &at) == 0 &&
+        read_block(block, g_block) == 0) {
+        wr16w(g_block, at + 26, rd16(g_block, at + 26) + 1);
+        write_block(block, g_block);
+    }
+    return 0;
+}
+
 /* --- what is mounted ----------------------------------------------------------
  *
  * A table rather than a fact, even though there is one disk on it.
@@ -1410,6 +1461,12 @@ int main(void)
                     r.word[0] = (long)n;
                 }
             }
+        } else if (m.tag == VFS_LINK) {
+            /* Two strings in the data, the existing name first - the same
+             * shape as SYMLINK, and for the same reason. */
+            const char* existing = (const char*)m.data;
+            const char* where = existing + strlen(existing) + 1;
+            r.word[0] = link_node(existing, where);
         } else if (m.tag == VFS_SYMLINK) {
             /* Two strings in the data, the target first: it is the one that
              * may be anything at all, including a path to nowhere, so the one
@@ -1520,7 +1577,7 @@ int main(void)
         } else if (m.tag == VFS_UNLINK) {
             char parent[256], name[64];
             struct inode dir, target;
-            unsigned ino = 0, dir_ino = 0;
+            unsigned ino = 0, dir_ino = 0, ino_probe = 0;
             int removing_dir = 0;
 
             /* Look before removing: a directory has to be empty, and finding
@@ -1540,6 +1597,7 @@ int main(void)
                  * whether the target is an empty directory - a question about
                  * something that is not being removed at all. */
                 const unsigned pino = lookup_nofollow((const char*)m.data, &probe);
+                ino_probe = pino;
                 if (pino == 0) {
                     allowed = 0;
                     r.word[0] = -ENOENT;
@@ -1556,7 +1614,29 @@ int main(void)
             }
             (void)target;
 
-            if (allowed && dir_remove(&dir, name, &ino) == 0 && ino != 0) {
+            /* How many names this inode had before one was taken away. A
+             * file with two is not freed by removing one of them - that is
+             * the whole point of a hard link, and freeing it anyway leaves
+             * the other name pointing at reallocated blocks. */
+            const unsigned had = (allowed && ino_probe != 0)
+                                     ? inode_links(ino_probe) : 1;
+
+            const int removed = allowed &&
+                                dir_remove(&dir, name, &ino) == 0 && ino != 0;
+
+            /* A name went, so the inode has one fewer. Done whether or not the
+             * inode is about to be freed, because an fsck reading a count that
+             * disagrees with the number of entries pointing at it reports
+             * exactly that, and it would be right. */
+            if (removed && !removing_dir && had > 1) {
+                unsigned long lb; unsigned lat;
+                if (inode_location(ino, &lb, &lat) == 0 &&
+                    read_block(lb, g_block) == 0) {
+                    wr16w(g_block, lat + 26, had - 1);
+                    write_block(lb, g_block);
+                }
+                r.word[0] = 0;          /* the name is gone; the file is not */
+            } else if (removed) {
                 /* The blocks go back, then the inode. The other order would
                  * leave a freed inode still owning blocks if this stopped
                  * half way, which is the shape of leak fsck cannot repair. */

@@ -32,11 +32,22 @@
 
 static int g_failures;
 
+/* The names that failed, kept so the summary can list them rather than only
+ * count them - a number tells you to go looking, a name tells you where. */
+#define MAX_FAILED 24
+static char g_failed[MAX_FAILED][96];
+static int  g_failed_count;
+static int  g_checks;
+
 static void check(const char* what, int ok)
 {
+    ++g_checks;
     printf("  %s %s\n", ok ? "ok  " : "FAIL", what);
-    if (!ok)
+    if (!ok) {
         ++g_failures;
+        if (g_failed_count < MAX_FAILED)
+            snprintf(g_failed[g_failed_count++], 96, "%s", what);
+    }
 }
 
 /* Says what it actually got when a check fails, because "FAIL echo hello" on
@@ -2344,6 +2355,75 @@ static void test_symlinks(void)
 }
 
 
+/* --- hard links -----------------------------------------------------------------
+ *
+ * A second directory entry for one inode. The difference from a symbolic link
+ * is that there is no original: writing through one name changes what the
+ * other names, and the file survives until the last name goes.
+ */
+
+static void test_hard_links(void)
+{
+    struct stat a, b;
+    printf("hard links:\n");
+
+    unlink("/tmp/one");
+    unlink("/tmp/two");
+
+    FILE* f = fopen("/tmp/one", "w");
+    if (f != 0) { fputs("shared\n", f); fclose(f); }
+
+    check("a second name can be made", link("/tmp/one", "/tmp/two") == 0);
+    check("and both are ordinary files",
+          stat("/tmp/one", &a) == 0 && stat("/tmp/two", &b) == 0 &&
+          a.st_type == S_IFREG && b.st_type == S_IFREG);
+    check("of the same size", a.st_size == b.st_size);
+
+    /* Writing through one is writing through both, which is the whole
+     * difference from a copy. */
+    f = fopen("/tmp/one", "w");
+    if (f != 0) { fputs("changed together\n", f); fclose(f); }
+    char back[64];
+    back[0] = '\0';
+    f = fopen("/tmp/two", "r");
+    if (f != 0) {
+        const size_t n = fread(back, 1, sizeof(back) - 1, f);
+        back[n] = '\0';
+        fclose(f);
+    }
+    check_says("writing through one changes the other", back,
+               "changed together\n");
+
+    /* Removing one name leaves the file. This is what unlink got wrong for as
+     * long as there were no hard links to notice it with: it freed whatever it
+     * removed a name for, which would have left the other name pointing at
+     * blocks that had gone back to the pool. */
+    check("removing one name works", unlink("/tmp/one") == 0);
+    check("and the other still reads",
+          stat("/tmp/two", &b) == 0 && b.st_size == 17);
+
+    back[0] = '\0';
+    f = fopen("/tmp/two", "r");
+    if (f != 0) {
+        const size_t n = fread(back, 1, sizeof(back) - 1, f);
+        back[n] = '\0';
+        fclose(f);
+    }
+    check_says("with its contents intact", back, "changed together\n");
+
+    check("and the last name can go", unlink("/tmp/two") == 0);
+    check("after which it is gone", stat("/tmp/two", &b) != 0);
+
+    /* A directory may not have a second name: that would make the tree a
+     * graph, and every walk of it a cycle waiting to happen. */
+    mkdir("/tmp/hldir");
+    check("a directory cannot be hard linked",
+          link("/tmp/hldir", "/tmp/hldir2") != 0);
+    unlink("/tmp/hldir2");
+    unlink("/tmp/hldir");
+}
+
+
 /* --- /proc ---------------------------------------------------------------------
  *
  * Questions about the running machine, answered by the filesystem server from
@@ -2754,10 +2834,32 @@ int main(void)
     test_poll();
     test_termios();
     test_symlinks();
+    test_hard_links();
     test_procfs();
     test_jobs();
     test_environment();
     test_shell();
     printf("\n%d failure(s)\n", g_failures);
+
+    /* And to the serial console, which is readable from outside the machine.
+     * The screen is a screen: it scrolls, it is captured on a timer, and a run
+     * that outlasts whoever is watching leaves no record at all. This line
+     * always lands, and says which names failed as well as how many. */
+    {
+        const int console = open("/dev/console", O_WRONLY);
+        if (console >= 0) {
+            char line[256];
+            int n = snprintf(line, sizeof(line),
+                             "\ntests: %d check(s), %d failure(s)\n",
+                             g_checks, g_failures);
+            write(console, line, (unsigned long)n);
+            for (int i = 0; i < g_failed_count; ++i) {
+                n = snprintf(line, sizeof(line), "tests: FAILED %s\n",
+                             g_failed[i]);
+                write(console, line, (unsigned long)n);
+            }
+            close(console);
+        }
+    }
     return g_failures;
 }

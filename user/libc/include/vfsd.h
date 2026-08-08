@@ -38,6 +38,7 @@ struct vfs_shared {
 #define VFS_READLINK 15 /* data = path -> data = where it points, w0 = length  */
 #define VFS_LSTAT   16  /* stat, but of the link itself rather than its target */
 #define VFS_STATFS  17  /* -> w0 = block size, w1 = blocks, w2 = free blocks  */
+#define VFS_LINK    18  /* data = target\0path\0 -> a second name, one inode  */
 
 #define VFS_KIND_FILE 0
 #define VFS_KIND_DIR  1

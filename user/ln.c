@@ -1,10 +1,15 @@
-/* Make a name that points at another name.
+/* Make a second name for something.
  *
- * Only symbolic links. A hard link is a second directory entry for one inode,
- * which the filesystem underneath could do - the link count is already there
- * and already maintained - but the two are not variations of one idea, and
- * offering `ln` without `-s` when only `-s` works would be worse than offering
- * neither. So this asks for the flag, and says why when it is missing.
+ * Two quite different things wearing one command, as everywhere:
+ *
+ *   a hard link is another directory entry for the same inode. There is no
+ *   original and no copy; the file goes away when the last name does.
+ *
+ *   a symbolic link is a small file holding a path. It can point at a
+ *   directory, at another filesystem, or at nothing at all, and it stops
+ *   working if what it names is moved.
+ *
+ * The default is the hard one, because that is what `ln` has always meant.
  */
 
 #include <errno.h>
@@ -46,19 +51,17 @@ int main(int argc, char** argv)
     }
 
     if (argc - at != 2) {
-        printf("usage: ln -s TARGET NAME\n");
+        printf("usage: ln [-s] TARGET NAME\n");
+        printf("  without -s, another name for the same file\n");
         return 1;
     }
-    if (!symbolic) {
-        fprintf(stderr, "ln: only symbolic links are made here; use -s\n");
-        return 1;
-    }
-
     char destination[256];
     resolve_destination(argv[at], argv[at + 1], destination,
                         sizeof(destination));
 
-    if (symlink(argv[at], destination) != 0) {
+    const int failed = symbolic ? symlink(argv[at], destination)
+                                : link(argv[at], destination);
+    if (failed != 0) {
         fprintf(stderr, "ln: %s: %s\n", destination, strerror(errno));
         return 1;
     }

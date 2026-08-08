@@ -50,6 +50,13 @@ int lstat(const char* path, struct stat* out);
  * and is how a link to a filesystem that is not mounted yet behaves. */
 int symlink(const char* target, const char* path);
 
+/* A second name for a file that already exists: one inode, two directory
+ * entries, and no way to tell which came first. Not a copy - writing through
+ * one name changes what the other names. Directories are refused, because a
+ * second name for one turns the tree into a graph and every walk of it into a
+ * cycle waiting to happen. */
+int link(const char* existing, const char* path);
+
 /* What a link holds, without a terminating null - the length is the return,
  * as it is everywhere, because a target may legitimately contain anything.
  * -1 with EINVAL when the path is not a link. */
