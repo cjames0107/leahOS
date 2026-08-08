@@ -1,13 +1,24 @@
 tail - the last lines
 
 SYNOPSIS
-    tail [-n COUNT] [FILE...]
+    tail [-n COUNT] [-f] [FILE...]
 
 DESCRIPTION
     Prints the last ten lines, or COUNT of them.
 
-    There is no -f. Following a file means waiting for it to change, and
-    there is nothing here that reports that yet.
+      -n COUNT   how many
+      -f         keep printing whatever is appended, until Ctrl-C
+
+    A file cannot be polled - it is always ready, because a read returns
+    at once whether or not anything was added - so -f watches the size and
+    sleeps between looks, which is what it is underneath on any system
+    without change notification. A file that has become shorter has been
+    rewritten rather than appended to, so following starts again from the
+    beginning: a log that has just been rotated looks exactly like that.
+
+    One file at a time. Following several means interleaving them and
+    reprinting a header whenever the source changes, which is a different
+    program.
 
 SEE ALSO
     head, less, cat

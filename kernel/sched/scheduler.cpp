@@ -151,6 +151,9 @@ struct Task {
 };
 
 Task g_tasks[kMaxTasks];
+
+// The load average over one, five and fifteen minutes, in hundredths.
+u64 g_load[3] = { 0, 0, 0 };
 u32  g_task_count = 0;
 // Which task each CPU is running, and which idle task belongs to it. Both were
 // single globals before there was more than one processor; a CPU picking a task
@@ -1406,6 +1409,13 @@ void set_current_name(const char* name)
 u64  signal_restorer()          { return group_leader(current())->sig_restorer; }
 void signal_set_restorer(u64 r) { group_leader(current())->sig_restorer = r; }
 
+void load_average(u64 out[3])
+{
+    cpu::InterruptGuard guard;
+    for (int i = 0; i < 3; ++i)
+        out[i] = g_load[i];
+}
+
 u32 current_uid() { return current()->uid; }
 u32 current_gid() { return current()->gid; }
 
@@ -1591,6 +1601,34 @@ void on_tick()
     // process - a window server, say - poll at a sane rate instead of spinning:
     // a task that never blocks holds the kernel lock over and over and can stop
     // another processor from getting into the kernel at all.
+    /* The load average: how many tasks wanted to run, smoothed.
+     *
+     * Sampled every five seconds rather than every tick, and decayed towards
+     * the new sample rather than replaced by it - which is what makes it an
+     * average over a window instead of an instantaneous count that flickers.
+     * Kept in hundredths, because the kernel has no floating point and a load
+     * of "1" and a load of "1.75" are worth telling apart.
+     *
+     * The three windows are the traditional one, five and fifteen minutes, and
+     * the decay constants are the ones every UNIX uses: exp(-5/60),
+     * exp(-5/300), exp(-5/900), scaled by 2048.
+     */
+    if ((timer::ticks() % (5 * timer::kFrequencyHz)) == 0) {
+        u32 runnable = 0;
+        for (u32 i = 0; i < g_task_count; ++i) {
+            const Task& t = g_tasks[i];
+            if (is_idle_task(i))
+                continue;
+            if (t.state == State::Running || t.state == State::Ready)
+                ++runnable;
+        }
+        constexpr u64 kDecay[3] = { 1884, 2014, 2037 };   // of 2048
+        const u64 sample = static_cast<u64>(runnable) * 100;
+        for (int w = 0; w < 3; ++w)
+            g_load[w] = (g_load[w] * kDecay[w] +
+                         sample * (2048 - kDecay[w])) / 2048;
+    }
+
     const u64 now = timer::ticks();
     for (u32 i = 0; i < g_task_count; ++i) {
         Task& task = g_tasks[i];

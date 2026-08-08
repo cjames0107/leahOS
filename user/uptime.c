@@ -1,10 +1,13 @@
-/* How long the machine has been up, and what time it thinks it is.
+/* How long the machine has been up, what time it thinks it is, and how busy
+ * it has been.
  *
- * No load average. A load average is a decaying count of runnable tasks kept
- * by the scheduler, and this one does not keep it - printing a made-up number
- * in the place people read one from would be worse than leaving the space.
+ * The load average is a decaying count of runnable tasks. The scheduler keeps
+ * it now - sampled every five seconds and decayed towards each sample over
+ * one, five and fifteen minutes, with the constants every other UNIX uses - so
+ * the three numbers here mean what they mean everywhere.
  */
 
+#include <proc.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -26,8 +29,15 @@ int main(void)
     if (days > 0)
         printf("%lu day%s, ", days, days == 1 ? "" : "s");
     if (hours > 0)
-        printf("%lu:%02lu\n", hours, minutes);
+        printf("%lu:%02lu,  ", hours, minutes);
     else
-        printf("%lu min\n", minutes);
+        printf("%lu min,  ", minutes);
+
+    unsigned long load[3] = { 0, 0, 0 };
+    load_average(load);
+    printf("load average: %lu.%02lu, %lu.%02lu, %lu.%02lu\n",
+           load[0] / 100, load[0] % 100,
+           load[1] / 100, load[1] % 100,
+           load[2] / 100, load[2] % 100);
     return 0;
 }

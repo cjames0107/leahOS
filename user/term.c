@@ -274,8 +274,25 @@ static void csi_final(char ch)
                 erase_span(r, 0, g_cols - 1);
             erase_span(g_cur_line, 0, g_cur_c);
         } else {
-            for (long r = top; r < top + g_rows; ++r)
-                erase_span(r, 0, g_cols - 1);
+            /* Erase everything: the screen is scrolled away rather than
+             * painted over.
+             *
+             * A terminal without scrollback has nowhere to put the old screen,
+             * so it overwrites it and homes the cursor. Here there is
+             * somewhere, and overwriting would be worse in both directions:
+             * what was on screen would be lost even though the history it
+             * belongs to is still there, and the cursor would be left pointing
+             * into the middle of that history with everything printed
+             * afterwards landing on top of it.
+             *
+             * So a fresh window's worth of blank lines is appended and the
+             * view moves down to them. What was there scrolls up, exactly
+             * where a person expects to find it. */
+            for (int r = 0; r < g_rows; ++r)
+                newline();
+            g_cur_c = 0;
+            g_follow = 1;
+            g_view = last_view();
         }
         break;
     }

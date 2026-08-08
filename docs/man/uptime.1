@@ -4,11 +4,14 @@ SYNOPSIS
     uptime
 
 DESCRIPTION
-    Prints the time of day and how long since boot.
+    Prints the time of day, how long since boot, and the load average.
 
-    No load average. A load average is a decaying count of runnable tasks
-    kept by the scheduler, and this one does not keep it - a made-up number
-    where people read a real one would be worse than a gap.
+    The load average is how many tasks wanted to run, sampled every five
+    seconds and decayed towards each sample over one, five and fifteen
+    minutes - the same windows and the same decay constants every other
+    UNIX uses, so the numbers mean what they mean elsewhere.
+
+    Also in /proc/loadavg, which is where this reads them from the kernel.
 
 SEE ALSO
     ps, date

@@ -88,6 +88,17 @@ int   setvbuf(FILE* stream, char* buffer, int mode, size_t size);
 /* Supports %s %c %% and %d %i %u %x %p %f %e %g, with an optional width, a
  * precision, and the l/ll length modifiers. */
 int printf(const char* format, ...) __attribute__((format(printf, 1, 2)));
+
+/* The other direction. Supports %d %i %u %x %o %c %s %f %e %g and %%, with a
+ * width and a * to match a field without storing it. Returns how many
+ * conversions were assigned, or -1 at the end of the input with none.
+ *
+ * Whitespace in the format matches any run of it including none, and every
+ * conversion but %c skips leading whitespace first - the two rules that make
+ * a scanf format behave the way it reads. */
+int sscanf(const char* text, const char* format, ...)
+    __attribute__((format(scanf, 2, 3)));
+int vsscanf(const char* text, const char* format, va_list args);
 int vsnprintf(char* buffer, size_t size, const char* format, va_list args);
 int snprintf(char* buffer, size_t size, const char* format, ...)
     __attribute__((format(printf, 3, 4)));

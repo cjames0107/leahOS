@@ -13,29 +13,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Up to four whitespace-separated fields. Written out rather than scanf'd
- * because there is no sscanf here, and one loop is smaller than one. */
-static int split(char* line, char* field[], int max)
-{
-    int n = 0;
-    char* at = line;
-    while (*at != '\0' && n < max) {
-        while (*at == ' ' || *at == '\t' || *at == '\n')
-            *at++ = '\0';
-        if (*at == '\0')
-            break;
-        field[n++] = at;
-        while (*at != '\0' && *at != ' ' && *at != '\t' && *at != '\n')
-            ++at;
-        /* Ended here, so end it here. Without this the last field on a line
-         * keeps its newline and prints in the middle of the format rather
-         * than at the end of it. */
-        if (*at != '\0' && n == max)
-            *at = '\0';
-    }
-    return n;
-}
-
 int main(void)
 {
     FILE* in = fopen("/proc/mounts", "r");
@@ -46,11 +23,10 @@ int main(void)
 
     char line[256];
     while (fgets(line, sizeof(line), in) != 0) {
-        char* field[4];
-        if (split(line, field, 4) < 4)
+        char what[64], at[64], kind[32], how[16];
+        if (sscanf(line, "%63s %63s %31s %15s", what, at, kind, how) != 4)
             continue;
-        printf("%s on %s type %s (%s)\n", field[0], field[1],
-               field[2], field[3]);
+        printf("%s on %s type %s (%s)\n", what, at, kind, how);
     }
     fclose(in);
     return 0;

@@ -1,16 +1,35 @@
 grep - find lines that match
 
 SYNOPSIS
-    grep [-i] [-v] [-n] PATTERN [FILE...]
+    grep [-ivnclrF] PATTERN [FILE...]
 
 DESCRIPTION
       -i   ignore case
       -v   print the lines that do not match
       -n   put the line number in front
+      -c   print how many matched, not which
+      -l   print only the names of files with a match
+      -r   search a directory and everything under it
+      -F   the pattern is a literal string, not an expression
 
-    The pattern is a literal string, not a regular expression. That is a real
-    limitation and an honest one: a half-implemented regex engine is worse
-    than a substring search that says so.
+    The pattern is a regular expression:
+
+      .           any one character
+      [abc] [^a]  a set, with a-z ranges and a leading ^ to invert
+      * + ?       none or more, one or more, none or one
+      {n} {n,} {n,m}   exactly, at least, between
+      |           either side, and ( ) to group
+      ^ $         the start and the end of the line
+      \d \w \s    a digit, a word character, whitespace; \D \W \S for not
+
+    No backreferences: they need the engine to remember what a group
+    matched, and are the feature that makes a regex language stop being
+    regular.
+
+    Matching is by backtracking, so a pattern built to be slow can be.
+    There is a step limit rather than a cleverer engine, because a
+    cleverer engine is a much larger program and nothing here searches
+    input chosen by an adversary.
 
 SEE ALSO
-    find, sort, uniq
+    find, sort, uniq, sh

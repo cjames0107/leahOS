@@ -1022,6 +1022,14 @@ static int proc_contents(const char* path, char* out, unsigned max)
                            (unsigned long)cpus[i].idle);
         return at;
     }
+    if (strcmp(path, "/proc/loadavg") == 0) {
+        unsigned long load[3] = { 0, 0, 0 };
+        load_average(load);
+        return snprintf(out, max, "%lu.%02lu %lu.%02lu %lu.%02lu\n",
+                        load[0] / 100, load[0] % 100,
+                        load[1] / 100, load[1] % 100,
+                        load[2] / 100, load[2] % 100);
+    }
     if (strcmp(path, "/proc/version") == 0)
         return snprintf(out, max, "leahOS x86-64\n");
     return -1;
@@ -1029,7 +1037,7 @@ static int proc_contents(const char* path, char* out, unsigned max)
 
 /* The fixed names in /proc, beside one directory per process. */
 static const char* const kProcFiles[] = {
-    "cpuinfo", "meminfo", "mounts", "uptime", "version",
+    "cpuinfo", "loadavg", "meminfo", "mounts", "uptime", "version",
 };
 
 #define PROC_FILE_COUNT (sizeof(kProcFiles) / sizeof(kProcFiles[0]))

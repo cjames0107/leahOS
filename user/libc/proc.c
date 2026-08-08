@@ -15,3 +15,8 @@ int cpu_info(struct cpu_stat* out, int max)
 {
     return (int)__syscall(SYS_cpuinfo, (long)out, (long)max, 0, 0, 0);
 }
+
+int load_average(unsigned long out[3])
+{
+    return (int)__syscall(SYS_loadavg, (long)out, 0, 0, 0, 0);
+}

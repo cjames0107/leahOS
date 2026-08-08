@@ -284,6 +284,12 @@ struct TaskInfo {
 // live task, threads as well as processes - a thread is a task here.
 u32 snapshot(TaskInfo* out, u32 max);
 
+// How many tasks wanted to run, averaged over one, five and fifteen minutes,
+// in hundredths - so 150 is a load of 1.5. Sampled every five seconds and
+// decayed towards each sample, which is what makes it an average rather than
+// an instantaneous count that flickers.
+void load_average(u64 out[3]);
+
 // Per-processor slice counts, for a monitor that wants to show more than one
 // bar. `busy` counts slices given to real work and `idle` those given to that
 // CPU's idle task; the difference between them is the only notion of "load"

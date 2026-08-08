@@ -6,9 +6,14 @@ SYNOPSIS
 DESCRIPTION
     Prints the lines that differ, in the usual < and > form.
 
-    Line by line, without the longest-common-subsequence work a real diff
-    does, so a line inserted near the top makes everything after it look
-    changed.
+    Which lines correspond is decided by the longest common subsequence -
+    the most lines appearing in both files in the same order - so a line
+    inserted near the top does not make everything after it look changed.
+
+    The table is O(n*m), which is the textbook algorithm and the reason
+    there is a line limit. Real diffs use Myers' algorithm, which finds
+    the same answer in O((n+m)d) where d is the size of the difference:
+    much better when the files are similar, which they usually are.
 
 SEE ALSO
-    cmp, grep
+    grep, cat, sort

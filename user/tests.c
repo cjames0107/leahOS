@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <poll.h>
+#include <regex.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <shm.h>
@@ -1630,7 +1631,14 @@ static void test_time(void)
     check("the clock reads a plausible date", now > 1700000000 && now < 4000000000);
 
     struct timespec ts;
-    check("clock_gettime works", clock_gettime(&ts) == 0 && ts.tv_sec == now);
+    /* Within a second of the reading above, not equal to it. These are two
+     * separate reads of a running clock, and demanding they land in the same
+     * second is a test that fails whenever a second boundary happens to fall
+     * between them - rarely, and for no reason worth reporting. */
+    const int gettime_ok = clock_gettime(&ts) == 0 &&
+                           ts.tv_sec >= now && ts.tv_sec <= now + 1 &&
+                           ts.tv_nsec >= 0 && ts.tv_nsec < 1000000000;
+    check("clock_gettime works", gettime_ok);
 
     /* It has to move, and only forwards. Waited for rather than slept
      * through: a single sleep either side of a second boundary is a coin toss,
@@ -1961,6 +1969,131 @@ static void test_open_descriptions(void)
     }
 
     unlink("/tmp/ofd.txt");
+}
+
+
+/* --- regular expressions --------------------------------------------------------
+ *
+ * grep searched for a literal substring for a long time and said so, because a
+ * half-built engine that mishandles a pattern quietly is worse than a
+ * substring search that is honest. This is the engine that replaced it.
+ */
+
+static void check_re(const char* pattern, const char* text, int want)
+{
+    const char* error = 0;
+    struct regex* re = regex_compile(pattern, 0, &error);
+    char what[160];
+
+    if (re == 0) {
+        snprintf(what, sizeof(what), "/%s/ compiles", pattern);
+        check(what, 0);
+        printf("       %s\n", error);
+        return;
+    }
+    const int got = regex_search(re, text, 0, 0);
+    snprintf(what, sizeof(what), "/%s/ %s [%s]", pattern,
+             want ? "matches" : "does not match", text);
+    check(what, got == want);
+    regex_free(re);
+}
+
+static void test_regex(void)
+{
+    printf("regular expressions:\n");
+
+    check_re("abc", "xxabcxx", 1);
+    check_re("^abc", "xabc", 0);
+    check_re("abc$", "abcx", 0);
+    check_re("a.c", "abc", 1);
+    check_re("a.c", "ac", 0);
+    check_re("a*b", "aaab", 1);
+    check_re("a+b", "b", 0);
+    check_re("a?b", "b", 1);
+    check_re("[a-z]+", "ABC", 0);
+    check_re("[^a-z]+", "ABC", 1);
+    check_re("(ab)+c", "ababc", 1);
+    check_re("cat|dog", "hotdog", 1);
+    check_re("cat|dog", "hotbird", 0);
+    check_re("^(a|b)*$", "abab", 1);
+    check_re("^(a|b)*$", "abcab", 0);
+    check_re("a{3}", "aa", 0);
+    check_re("a{2,3}b", "aaaab", 1);
+    check_re("\\d+", "abc123", 1);
+    check_re("\\d+", "abcdef", 0);
+    check_re("a\\.c", "abc", 0);
+    check_re("a\\.c", "a.c", 1);
+
+    /* Case folding is done when the pattern is compiled, so a set has to be
+     * folded too and not only a literal. */
+    const char* error = 0;
+    struct regex* re = regex_compile("[a-z]+", 1, &error);
+    check("ignoring case folds a set as well as a letter",
+          re != 0 && regex_search(re, "ABC", 0, 0));
+    regex_free(re);
+
+    /* The leftmost match, and how far it reached. */
+    re = regex_compile("[0-9]+", 0, &error);
+    int from = -1, to = -1;
+    check("a match reports where it was",
+          re != 0 && regex_search(re, "ab123cd", &from, &to) &&
+          from == 2 && to == 5);
+    regex_free(re);
+
+    /* A pattern that cannot be compiled says so rather than matching nothing,
+     * which is a different answer and a misleading one. */
+    error = 0;
+    check("an unmatched bracket is refused",
+          regex_compile("(abc", 0, &error) == 0 && error != 0);
+
+    /* And the one that makes backtracking engines hang. It has to come back,
+     * even if the answer is only "no". */
+    re = regex_compile("(a*)*b", 0, &error);
+    check("a pathological pattern still terminates",
+          re != 0 && regex_search(re, "aaaaaaaaaaaaaaaaaaaaaaaac", 0, 0) == 0);
+    regex_free(re);
+}
+
+
+/* --- reading a formatted string -------------------------------------------------- */
+
+static void test_sscanf(void)
+{
+    printf("sscanf:\n");
+
+    int a = 0, b = 0;
+    check("two numbers", sscanf("12 34", "%d %d", &a, &b) == 2 &&
+                         a == 12 && b == 34);
+
+    char word[32] = "", rest[32] = "";
+    check("words are split on whitespace",
+          sscanf("  hello   world ", "%31s %31s", word, rest) == 2 &&
+          strcmp(word, "hello") == 0 && strcmp(rest, "world") == 0);
+
+    a = 0;
+    check("hexadecimal", sscanf("ff", "%x", &a) == 1 && a == 255);
+
+    a = b = 0;
+    check("literal text between conversions",
+          sscanf("x=10,y=20", "x=%d,y=%d", &a, &b) == 2 && a == 10 && b == 20);
+
+    a = 0;
+    check("a field can be skipped",
+          sscanf("skip 7", "%*s %d", &a) == 1 && a == 7);
+
+    double d = 0.0;
+    check("a double", sscanf("3.5", "%lf", &d) == 1 && d > 3.4 && d < 3.6);
+
+    a = 99;
+    check("text that does not match stops the scan",
+          sscanf("nope", "%d", &a) == 0 && a == 99);
+
+    /* The shape mount and df actually use. */
+    char what[64] = "", at[64] = "", kind[32] = "", how[16] = "";
+    check("four fields, as /proc/mounts has",
+          sscanf("/dev/sda2 / ext4 rw\n", "%63s %63s %31s %15s",
+                 what, at, kind, how) == 4 &&
+          strcmp(kind, "ext4") == 0 && strcmp(how, "rw") == 0);
 }
 
 
@@ -2616,6 +2749,8 @@ int main(void)
     test_errno();
     test_streams();
     test_open_descriptions();
+    test_regex();
+    test_sscanf();
     test_poll();
     test_termios();
     test_symlinks();

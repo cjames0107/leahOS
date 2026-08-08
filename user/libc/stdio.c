@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -422,6 +423,165 @@ int printf(const char* fmt, ...)
     va_list args;
     va_start(args, fmt);
     const int n = vfprintf(stdout, fmt, args);
+    va_end(args);
+    return n;
+}
+
+/* --- reading a formatted string ---------------------------------------------
+ *
+ * The other direction, and the one that was missing: mount and df both split
+ * /proc/mounts by hand because there was nothing to ask. Enough of scanf to be
+ * worth having - %d %i %u %x %o %c %s %f %e %g %%, a width, and * to match a
+ * field without storing it - and not the parts nobody uses.
+ *
+ * Whitespace in the format matches any run of whitespace including none, and
+ * every conversion but %c and %[ skips leading whitespace first. Those are the
+ * two rules that make scanf formats behave the way people expect, and getting
+ * either wrong makes every format subtly wrong.
+ */
+
+static int is_space(int c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+           c == '\f' || c == '\v';
+}
+
+int vsscanf(const char* text, const char* format, va_list args)
+{
+    const char* in = text;
+    int assigned = 0;
+
+    for (const char* f = format; *f != '\0'; ++f) {
+        if (is_space(*f)) {
+            while (is_space(*in))
+                ++in;
+            continue;
+        }
+        if (*f != '%') {
+            if (*in != *f)
+                return assigned;        /* the text stopped matching */
+            ++in;
+            continue;
+        }
+
+        ++f;
+        if (*f == '%') {
+            if (*in != '%')
+                return assigned;
+            ++in;
+            continue;
+        }
+
+        int skip = 0;
+        unsigned width = 0;
+        if (*f == '*') { skip = 1; ++f; }
+        while (*f >= '0' && *f <= '9')
+            width = width * 10 + (unsigned)(*f++ - '0');
+        while (*f == 'l' || *f == 'h')  /* accepted; everything here is int */
+            ++f;
+        const char kind = *f;
+        if (kind == '\0')
+            break;
+
+        if (kind != 'c')
+            while (is_space(*in))
+                ++in;
+        if (*in == '\0')
+            return assigned > 0 ? assigned : -1;    /* -1 is end of input */
+
+        switch (kind) {
+        case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': {
+            const int base = (kind == 'x' || kind == 'X') ? 16
+                           : kind == 'o' ? 8 : 10;
+            const char* start = in;
+            int negative = 0;
+            if (*in == '+' || *in == '-')
+                negative = *in++ == '-';
+            long value = 0;
+            unsigned digits = 0;
+            for (;;) {
+                int d;
+                const char c = *in;
+                if (c >= '0' && c <= '9')                    d = c - '0';
+                else if (base == 16 && c >= 'a' && c <= 'f') d = c - 'a' + 10;
+                else if (base == 16 && c >= 'A' && c <= 'F') d = c - 'A' + 10;
+                else break;
+                if (d >= base)
+                    break;
+                if (width != 0 && (unsigned)(in - start) >= width)
+                    break;
+                value = value * base + d;
+                ++in;
+                ++digits;
+            }
+            if (digits == 0) {
+                in = start;
+                return assigned;
+            }
+            if (negative)
+                value = -value;
+            if (!skip) {
+                *va_arg(args, int*) = (int)value;
+                ++assigned;
+            }
+            break;
+        }
+        case 'f': case 'e': case 'E': case 'g': case 'G': {
+            char* stop = 0;
+            const double value = strtod(in, &stop);
+            if (stop == in)
+                return assigned;
+            in = stop;
+            if (!skip) {
+                *va_arg(args, double*) = value;
+                ++assigned;
+            }
+            break;
+        }
+        case 'c': {
+            const unsigned many = width != 0 ? width : 1;
+            char* out = skip ? 0 : va_arg(args, char*);
+            for (unsigned k = 0; k < many; ++k) {
+                if (*in == '\0')
+                    return assigned;
+                if (out != 0)
+                    out[k] = *in;
+                ++in;
+            }
+            if (out != 0)
+                ++assigned;
+            break;
+        }
+        case 's': {
+            char* out = skip ? 0 : va_arg(args, char*);
+            unsigned n = 0;
+            while (*in != '\0' && !is_space(*in) &&
+                   (width == 0 || n < width)) {
+                if (out != 0)
+                    out[n] = *in;
+                ++n;
+                ++in;
+            }
+            if (n == 0)
+                return assigned;
+            if (out != 0) {
+                out[n] = '\0';
+                ++assigned;
+            }
+            break;
+        }
+        default:
+            return assigned;            /* a conversion this does not know */
+        }
+    }
+    return assigned;
+}
+
+int sscanf(const char* text, const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    const int n = vsscanf(text, format, args);
     va_end(args);
     return n;
 }

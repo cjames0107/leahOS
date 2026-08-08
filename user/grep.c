@@ -1,65 +1,61 @@
-/* grep - find lines containing a pattern.
+/* grep - find lines matching a pattern.
  *
- * Fixed strings, not regular expressions - with one exception: `*` and `?`
- * match the way they do in a filename, because that is the glob every other
- * tool here uses and having two pattern languages in one system is worse than
- * having a simple one. A pattern with no wildcard in it is a plain substring
- * search, which is what almost every use is.
+ * Regular expressions, now that libc has an engine for them. This searched for
+ * a fixed string with glob wildcards for a long time, and said so in its
+ * manual, because a half-built regex that silently mishandles a pattern is
+ * worse than a substring search that is honest about being one. The engine is
+ * in <regex.h> and is shared, so there is still only one pattern language in
+ * the system for this kind of matching.
+ *
+ * -F is here for the cases where the pattern is data rather than a pattern:
+ * searching for "a[1]" should not need it spelled "a\[1\]".
  */
 
 #include <fcntl.h>
 #include <errno.h>
+#include <regex.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 static int g_ignore_case, g_invert, g_numbers, g_count_only, g_recursive;
-static int g_names_only, g_show_name;
+static int g_names_only, g_show_name, g_fixed;
 static long g_total_matches;
+static struct regex* g_re;
 
 static int fold(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
 
-/* Does `text` start with a match for `pattern`, allowing * and ?. Recursive on
- * `*` only, and the recursion is bounded by the length of the text. */
-static int match_here(const char* pattern, const char* text)
+/* A plain substring search, for -F. Kept rather than expressed as a pattern
+ * because escaping every special character to search for a literal is exactly
+ * the awkwardness -F exists to remove. */
+static int contains(const char* needle, const char* hay)
 {
-    for (;;) {
-        if (*pattern == '\0')
-            return 1;                   /* the pattern ran out: a match */
-        if (*pattern == '*') {
-            ++pattern;
-            /* Try the shortest expansion first, then longer ones. */
-            for (const char* t = text;; ++t) {
-                if (match_here(pattern, t))
-                    return 1;
-                if (*t == '\0')
-                    return 0;
-            }
+    for (const char* at = hay;; ++at) {
+        const char* a = needle;
+        const char* b = at;
+        while (*a != '\0') {
+            int x = (unsigned char)*a, y = (unsigned char)*b;
+            if (g_ignore_case) { x = fold(x); y = fold(y); }
+            if (y == '\0' || x != y)
+                break;
+            ++a;
+            ++b;
         }
-        if (*text == '\0')
-            return 0;
-        if (*pattern != '?') {
-            int a = (unsigned char)*pattern, b = (unsigned char)*text;
-            if (g_ignore_case) { a = fold(a); b = fold(b); }
-            if (a != b)
-                return 0;
-        }
-        ++pattern;
-        ++text;
-    }
-}
-
-/* Anywhere in the line, which is what grep means - so the search slides along
- * the text rather than anchoring at the front. */
-static int line_matches(const char* pattern, const char* line)
-{
-    for (const char* at = line;; ++at) {
-        if (match_here(pattern, at))
+        if (*a == '\0')
             return 1;
         if (*at == '\0')
             return 0;
     }
+}
+
+static int line_matches(const char* pattern, const char* line)
+{
+    if (g_fixed)
+        return contains(pattern, line);
+    /* regex_search already tries every starting position, which is what
+     * "anywhere in the line" means and what grep has always meant. */
+    return regex_search(g_re, line, 0, 0);
 }
 
 static void search_fd(int fd, const char* pattern, const char* name)
@@ -171,6 +167,7 @@ int main(int argc, char** argv)
         for (int k = 1; argv[i][k] != '\0'; ++k) {
             switch (argv[i][k]) {
             case 'i': g_ignore_case = 1; break;
+            case 'F': g_fixed = 1; break;
             case 'v': g_invert = 1; break;
             case 'n': g_numbers = 1; break;
             case 'c': g_count_only = 1; break;
@@ -183,11 +180,22 @@ int main(int argc, char** argv)
         }
     }
     if (i >= argc) {
-        printf("usage: grep [-ivncrl] pattern [file...]\n");
-        printf("  * and ? match as they do in a filename\n");
+        printf("usage: grep [-ivncrlF] PATTERN [FILE...]\n");
+        printf("  the pattern is a regular expression; -F for a literal one\n");
         return 2;
     }
     const char* pattern = argv[i++];
+
+    if (!g_fixed) {
+        const char* error = 0;
+        g_re = regex_compile(pattern, g_ignore_case, &error);
+        if (g_re == 0) {
+            /* Said plainly and once, before anything is read: a pattern that
+             * cannot be compiled is not a search that found nothing. */
+            fprintf(stderr, "grep: %s: %s\n", pattern, error);
+            return 2;
+        }
+    }
 
     if (i >= argc) {
         search_fd(0, pattern, "(standard input)");

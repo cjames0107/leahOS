@@ -1215,6 +1215,16 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
     }
 
+    case LoadAvg: {
+        if (!user_range_ok(frame->rdi, sizeof(u64) * 3)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        scheduler::load_average(reinterpret_cast<u64*>(frame->rdi));
+        frame->rax = 0;
+        break;
+    }
+
     case Uptime:
         // Not the wall clock: this one never jumps, and is the one anything
         // measuring how long the machine has been up actually wants.

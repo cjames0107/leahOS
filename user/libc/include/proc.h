@@ -50,4 +50,9 @@ struct cpu_stat {
 };
 int cpu_info(struct cpu_stat* out, int max);
 
+/* How many tasks wanted to run, over one, five and fifteen minutes, in
+ * hundredths - so 150 means a load of 1.5. Integers because the kernel that
+ * keeps them has no floating point; the caller can divide. */
+int load_average(unsigned long out[3]);
+
 #endif /* _PROC_H */
