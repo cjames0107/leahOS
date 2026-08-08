@@ -276,8 +276,21 @@ $(MEDIA_STAMP): tools/mkmedia.py | $(BUILD)
 media: $(MEDIA_STAMP)
 .PHONY: media
 
-$(EXT_IMG): $(USER_ELFS) tools/mkext.sh $(MEDIA_STAMP) | $(DIST)
-	@APPS="$(EXT_APPS)" MEDIA_DIR="$(BUILD)/media" \
+# The font, stripped to the tables that draw glyphs. Google Sans Flex ships as
+# four megabytes, nearly all of it variable-axis deltas and OpenType layout
+# that this system reads none of; what is left is about forty kilobytes.
+FONT_SRC  := media/fonts/GoogleSansFlex-VariableFont_GRAD,ROND,opsz,slnt,wdth,wght.ttf
+FONT_OUT  := $(BUILD)/fonts/sans.ttf
+
+$(FONT_OUT): $(FONT_SRC) tools/mkfont.py | $(BUILD)
+	@mkdir -p $(dir $@)
+	@python3 tools/mkfont.py "$(FONT_SRC)" $@
+
+fonts: $(FONT_OUT)
+.PHONY: fonts
+
+$(EXT_IMG): $(USER_ELFS) tools/mkext.sh $(MEDIA_STAMP) $(FONT_OUT) | $(DIST)
+	@APPS="$(EXT_APPS)" MEDIA_DIR="$(BUILD)/media" FONT_DIR="$(BUILD)/fonts" \
 	    tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
 
 $(SATA_IMG): | $(DIST)

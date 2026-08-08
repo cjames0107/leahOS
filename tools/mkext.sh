@@ -20,11 +20,36 @@ fi
 
 OUT="$1"; SIZE_MIB="$2"; shift 2
 
-E2_DIR="$(brew --prefix e2fsprogs 2>/dev/null)/sbin"
+# Where mke2fs and debugfs live.
+#
+# Homebrew keeps e2fsprogs off the default PATH, because macOS has its own
+# tools by those names for its own filesystems. Asking `brew --prefix` was the
+# obvious way to find them and turned out to be the fragile one: brew refuses
+# to run at all when it dislikes the working directory, and under `set -e` a
+# refusal it printed to a swallowed stderr took the whole build down with no
+# message at all. So the known locations are tried first and brew is the last
+# resort rather than the first.
+E2_DIR=""
+for candidate in \
+    /opt/homebrew/opt/e2fsprogs/sbin \
+    /usr/local/opt/e2fsprogs/sbin \
+    /sbin /usr/sbin
+do
+    if [ -x "$candidate/mke2fs" ] && [ -x "$candidate/debugfs" ]; then
+        E2_DIR="$candidate"
+        break
+    fi
+done
+if [ -z "$E2_DIR" ]; then
+    prefix="$(brew --prefix e2fsprogs 2>/dev/null || true)"
+    if [ -n "$prefix" ] && [ -x "$prefix/sbin/mke2fs" ]; then
+        E2_DIR="$prefix/sbin"
+    fi
+fi
 MKE2FS="$E2_DIR/mke2fs"
-if [ ! -x "$MKE2FS" ]; then
-    echo "error: mke2fs not found under $E2_DIR" >&2
-    echo "install it with:  brew install e2fsprogs" >&2
+if [ -z "$E2_DIR" ] || [ ! -x "$MKE2FS" ]; then
+    echo "error: mke2fs and debugfs not found" >&2
+    echo "install them with:  brew install e2fsprogs" >&2
     exit 1
 fi
 
@@ -46,7 +71,7 @@ mkdir -p "$STAGING/bin" "$STAGING/sbin" "$STAGING/etc" "$STAGING/dev" \
          "$STAGING/usr/local/lib" "$STAGING/usr/local/share" \
          "$STAGING/usr/share/doc" "$STAGING/usr/share/icons" \
          "$STAGING/usr/share/wallpapers" "$STAGING/usr/share/demos" \
-         "$STAGING/usr/share/man" \
+         "$STAGING/usr/share/man" "$STAGING/usr/share/fonts" \
          "$STAGING/var/log" "$STAGING/var/tmp" "$STAGING/var/cache" \
          "$STAGING/var/lib" "$STAGING/var/spool"
 
@@ -156,11 +181,38 @@ if [ -d docs/man ]; then
     cp docs/man/*.1 "$STAGING/usr/share/man/"
 fi
 
+# The font. One file, already stripped by tools/mkfont.py to the tables a
+# rasteriser reads - the four megabytes it arrives as are variable-axis deltas
+# and layout tables that nothing here consults.
+if [ -n "${FONT_DIR:-}" ] && [ -d "$FONT_DIR" ]; then
+    cp "$FONT_DIR"/*.ttf "$STAGING/usr/share/fonts/" 2>/dev/null || true
+fi
+
 # The icon set, copied in as-is. These are ordinary compressed PNGs - nothing
 # converts them at build time, because img_read_png inflates a real deflate
 # stream now and can simply read them.
+# The icon set. It arrives sorted into folders now - UI/ for the pieces of the
+# file manager, applications/ for the things in the dock, glyphs/ for the
+# Material symbols the new chrome draws - and is flattened on the way in,
+# because a path is how a program names an icon and it should not have to know
+# which drawer the artwork was filed in. Names are lowercased so that Files.png
+# and files.png are the same icon, which on a case-sensitive filesystem they
+# otherwise are not.
 if [ -d media/icons ]; then
-    cp media/icons/*.png "$STAGING/usr/share/icons/"
+    for group in UI applications; do
+        [ -d "media/icons/$group" ] || continue
+        for icon in "media/icons/$group"/*.png; do
+            [ -e "$icon" ] || continue
+            base="$(basename "$icon" | tr '"'"'A-Z'"'"' '"'"'a-z'"'"')"
+            cp "$icon" "$STAGING/usr/share/icons/$base"
+        done
+    done
+    # The glyphs stay as they are: they are vector, and the chrome fills them
+    # at whatever size it needs rather than at one baked in here.
+    if [ -d media/icons/glyphs ]; then
+        mkdir -p "$STAGING/usr/share/icons/glyphs"
+        cp media/icons/glyphs/*.svg "$STAGING/usr/share/icons/glyphs/" 2>/dev/null || true
+    fi
 fi
 
 # The photographs and the music, which do need converting - JPEG and MP3 are
