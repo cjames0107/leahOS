@@ -20,13 +20,17 @@
  */
 
 #include <display.h>
+#include <draw.h>
+#include <font.h>
 #include <image.h>
+#include <paths.h>
 #include <shm.h>
 #include <sys/mman.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <svg.h>
 #include <unistd.h>
 #include <wproto.h>
 
@@ -51,11 +55,23 @@
 #define TITLE_HEIGHT WS_TITLE_HEIGHT
 #define BORDER       WS_BORDER
 #define CLOSE_SIZE   12
+#define CORNER       WS_CORNER
+/* How far a shadow reaches past the window, and how far it falls. Both are
+ * needed outside the frame drawing, because the damage rectangle has to cover
+ * the shadow or it is composed into a region that is then thrown away. */
+#define SHADOW_BLUR   9
+#define SHADOW_DROP   6
+#define SHADOW_SPREAD (SHADOW_BLUR * 2 + SHADOW_DROP)
+#define CONTROL_SIZE 13         /* one title-bar control, square */
 /* The grip bar along the bottom, and the grow box sitting at its right end.
  * A strip of its own rather than a corner overlapping the content, so a click
  * near the bottom-right of a window is unambiguously a resize and never a
  * stroke the client was expecting. */
-#define GRIP_H       14
+/* The resize band along the bottom. It is part of the frame and the panel
+ * covers it, so nothing is drawn in it - a grow box with three diagonal lines
+ * belongs to the chrome this replaces. Its height is what a pointer needs to
+ * find, not what an eye needs to see. */
+#define GRIP_H       8
 #define GRIP_W       16
 
 /* Polling rates. Fast enough that the pointer does not feel detached, slow
@@ -246,57 +262,114 @@ static void back_plot(int x, int y, uint32_t colour)
     g_back[(unsigned)y * g_fb.width + (unsigned)x] = colour;
 }
 
-/* Clipped up front rather than per pixel: a window's face is most of its area,
- * and a pass that only has to repaint a title bar should not walk the rest. */
-static void fill(int x, int y, unsigned w, unsigned h, uint32_t colour)
+/* The same, blended. The old chrome never needed this - every pixel it drew
+ * was opaque - and the new one needs it for almost every pixel it draws. */
+static void back_blend(int x, int y, uint32_t colour)
 {
-    const int x0 = imax(x, g_clip.x), y0 = imax(y, g_clip.y);
-    const int x1 = imin(x + (int)w, g_clip.x + g_clip.w);
-    const int y1 = imin(y + (int)h, g_clip.y + g_clip.h);
-    for (int row = y0; row < y1; ++row)
-        for (int col = x0; col < x1; ++col)
-            g_back[(unsigned)row * g_fb.width + (unsigned)col] = colour;
+    if (x < g_clip.x || y < g_clip.y ||
+        x >= g_clip.x + g_clip.w || y >= g_clip.y + g_clip.h)
+        return;
+    uint32_t* p = &g_back[(unsigned)y * g_fb.width + (unsigned)x];
+    *p = draw_over(*p, colour);
 }
 
-/* Raised (or, inverted, sunken): light on the top and left edges, shadow on the
- * bottom and right. */
-/* A one-pixel border, drawn as four fills. Every panel in this interface has
- * one: the hard black edge is what separates a window from the desktop, and
- * the bevel inside it is what gives it depth. */
-static void outline_rect(int x, int y, int w, int h, uint32_t colour)
+/* --- the new chrome ---------------------------------------------------------
+ *
+ * A window is a pane of frosted glass: what is behind it, blurred; a wash of
+ * white over that; a hairline round the edge; and a shadow underneath. All
+ * four come from draw.c, and all this has to do is hand them the damage
+ * rectangle so nothing is painted outside the region being recomposed.
+ */
+
+static struct font*    g_typeface;      /* the proportional one, for titles */
+static struct svg_icon g_close_glyph;
+static int             g_close_ready;
+
+/* The back buffer as draw.c wants it, narrowed to whatever is being composed.
+ * Rebuilt per call rather than kept, because the clip changes every time and a
+ * stale one is a corrupted screen rather than a wrong pixel. */
+static struct surface canvas(void)
 {
-    fill(x, y, w, 1, colour);
-    fill(x, y + h - 1, w, 1, colour);
-    fill(x, y, 1, h, colour);
-    fill(x + w - 1, y, 1, h, colour);
+    struct surface s;
+    s.pixels = g_back;
+    s.w = (int)g_fb.width;
+    s.h = (int)g_fb.height;
+    s.cx = g_clip.x;
+    s.cy = g_clip.y;
+    s.cw = g_clip.w;
+    s.ch = g_clip.h;
+    return s;
 }
 
-static void bevel(int x, int y, unsigned w, unsigned h, int raised)
+/* One shadow per window size. A shadow depends only on the shape casting it,
+ * never on what is inside, so this is the difference between blurring one per
+ * window per frame and blurring one per size ever. */
+#define SHADOW_CACHE 8
+static struct { int w, h; struct shadow* shadow; } g_shadows[SHADOW_CACHE];
+static int g_shadow_next;
+
+static struct shadow* shadow_for(int w, int h)
 {
-    const uint32_t tl = raised ? LIGHT : SHADOW;
-    const uint32_t br = raised ? SHADOW : LIGHT;
-    for (unsigned i = 0; i < w; ++i) {
-        back_plot(x + (int)i, y, tl);
-        back_plot(x + (int)i, y + (int)h - 1, br);
-    }
-    for (unsigned i = 0; i < h; ++i) {
-        back_plot(x, y + (int)i, tl);
-        back_plot(x + (int)w - 1, y + (int)i, br);
-    }
+    for (int i = 0; i < SHADOW_CACHE; ++i)
+        if (g_shadows[i].shadow != 0 && g_shadows[i].w == w &&
+            g_shadows[i].h == h)
+            return g_shadows[i].shadow;
+
+    struct shadow* made = draw_shadow_make(w, h, CORNER, SHADOW_BLUR, 80);
+    if (made == 0)
+        return 0;
+    const int slot = g_shadow_next;
+    g_shadow_next = (g_shadow_next + 1) % SHADOW_CACHE;
+    if (g_shadows[slot].shadow != 0)
+        draw_shadow_free(g_shadows[slot].shadow);
+    g_shadows[slot].w = w;
+    g_shadows[slot].h = h;
+    g_shadows[slot].shadow = made;
+    return made;
 }
 
-static void draw_text(int x, int y, const char* text, uint32_t colour)
+static int text_width(int px, const char* text)
 {
-    for (unsigned i = 0; text[i] != '\0'; ++i) {
-        const unsigned char* glyph = &g_font[(unsigned char)text[i] * 16];
-        for (unsigned row = 0; row < 16; ++row) {
-            for (unsigned col = 0; col < 8; ++col) {
-                if ((glyph[row] & (0x80 >> col)) != 0)
-                    back_plot(x + (int)(i * 8 + col), y + (int)row, colour);
+    return g_typeface != 0 ? font_width(g_typeface, px, text)
+                           : (int)strlen(text) * 8;
+}
+
+/* Proportional text, blended per pixel through the glyph's coverage. */
+static void draw_string(int x, int baseline, int px, const char* text,
+                        uint32_t colour)
+{
+    if (g_typeface == 0)
+        return;
+    const unsigned alpha = (colour >> 24) & 0xFF;
+    const uint32_t rgb = colour & 0x00FFFFFFu;
+    const char* at = text;
+    for (;;) {
+        const unsigned c = utf8_next(&at);
+        if (c == 0)
+            break;
+        struct glyph g;
+        if (font_glyph(g_typeface, px, c, &g) != 0)
+            continue;
+        for (int gy = 0; gy < g.h; ++gy)
+            for (int gx = 0; gx < g.w; ++gx) {
+                const unsigned cov = g.coverage[(long)gy * g.w + gx];
+                if (cov == 0)
+                    continue;
+                back_blend(x + g.left + gx, baseline - g.top + gy,
+                           (((alpha * cov + 127) / 255) << 24) | rgb);
             }
-        }
+        x += g.advance;
     }
 }
+
+/* Where the three controls sit, left to right: close, minimise, maximise.
+ * `which` is 0, 1 or 2. */
+static void control_box(const struct ws_window* w, int which, int* x, int* y)
+{
+    *x = w->x + BORDER + 8 + which * (CONTROL_SIZE + 9);
+    *y = w->y + BORDER + (TITLE_HEIGHT - CONTROL_SIZE) / 2;
+}
+
 
 /* Sizes come from the server's validated copy, never from the client's fields. */
 /* A desktop window is all content: no border, no title bar, no grip. */
@@ -328,8 +401,14 @@ static struct rect frame_rect(int slot)
 
 static void damage_window(int slot)
 {
-    /* Exactly the frame. Nothing is drawn outside it any more - the shadow that
-     * used to spill past the edge is what this had to be grown for. */
+    /* Exactly the frame, which means the shadow is composed and then thrown
+     * away - it falls outside this rectangle and is clipped off.
+     *
+     * Growing it by SHADOW_SPREAD does make the shadow appear, and also makes
+     * neighbouring frames disappear: something else in the composite depends
+     * on a damage rectangle being no larger than the window that raised it,
+     * and I have not found what. Left correct-but-flat rather than pretty-and-
+     * broken; the shadow is one line away once that is understood. */
     const struct rect r = frame_rect(slot);
     damage_rect(r.x, r.y, r.w, r.h);
 }
@@ -372,86 +451,112 @@ static void draw_window(int slot, int focused)
         return;
     }
 
-    /* Square, outlined, and raised. A window of this era is a grey panel with
-     * a hard black edge - the depth comes from the bevel inside that edge, not
-     * from anything soft outside it. */
-    fill(w->x, w->y, (int)fw, (int)fh, FACE);
-    outline_rect(w->x, w->y, (int)fw, (int)fh, OUTLINE);
-    bevel(w->x + 1, w->y + 1, (int)fw - 2, (int)fh - 2, 1);
+    /* Frosted glass, in the order light would build it: a shadow underneath,
+     * the backdrop blurred through the window's own shape, a wash of white
+     * over that, and a hairline to catch the edge. */
+    const struct surface c = canvas();
 
-    const int tx = w->x + BORDER, ty = w->y + BORDER;
-    const int tw = (int)fw - BORDER * 2;
-    fill(tx, ty, tw, TITLE_HEIGHT, focused ? TITLE_ACTIVE : TITLE_IDLE);
+    struct shadow* shade = shadow_for((int)fw, (int)fh);
+    if (shade != 0)
+        draw_shadow_cast(&c, shade, w->x, w->y, SHADOW_DROP);
 
-    /* The pinstripes. Six lines across the bar say "this window is active",
-     * and their absence says it is not - which is the whole signal, done
-     * without a second colour. */
-    if (focused) {
-        for (int line = 0; line < 6; ++line) {
-            const int ly = ty + 3 + line * 2;
-            if (ly < ty + TITLE_HEIGHT - 3)
-                fill(tx + 2, ly, tw - 4, 1, SHADOW);
+    draw_blur(&c, w->x, w->y, (int)fw, (int)fh, 22, CORNER);
+
+    /* The focused window is a shade brighter and a shade more opaque. That is
+     * the whole focus signal now - the pinstripes it replaces were a way of
+     * saying this in one colour, which is a constraint that has gone. */
+    draw_round_rect(&c, w->x, w->y, (int)fw, (int)fh, CORNER,
+                    focused ? 0x66FFFFFFu : 0x4DF2F2F2u);
+    draw_round_rect_outline(&c, w->x, w->y, (int)fw, (int)fh, CORNER, 1,
+                            focused ? 0x59FFFFFFu : 0x33FFFFFFu);
+
+    /* The three controls, left to right. Only the close box has a vector
+     * glyph; a minimise is a bar and a maximise is a square outline, both of
+     * which are quicker to draw than to load. */
+    for (int which = 0; which < 3; ++which) {
+        int bx, by;
+        control_box(w, which, &bx, &by);
+        const uint32_t ink = focused ? 0xD9101810u : 0x73101810u;
+
+        if (which == 0 && g_close_ready) {
+            svg_draw(&c, &g_close_glyph, bx, by, ink);
+        } else if (which == 0) {
+            /* No glyph loaded: an X of two strokes, so a window is never left
+             * without a way to close it. */
+            for (int i = 2; i < CONTROL_SIZE - 2; ++i) {
+                back_blend(bx + i, by + i, ink);
+                back_blend(bx + i, by + CONTROL_SIZE - 1 - i, ink);
+            }
+        } else if (which == 1) {
+            draw_round_rect(&c, bx + 2, by + CONTROL_SIZE / 2 - 1,
+                            CONTROL_SIZE - 4, 2, 1, ink);
+        } else {
+            draw_round_rect_outline(&c, bx + 2, by + 2,
+                                    CONTROL_SIZE - 4, CONTROL_SIZE - 4,
+                                    2, 1, ink);
         }
     }
-    fill(tx, ty + TITLE_HEIGHT - 1, tw, 1, OUTLINE);
-
-    int cx, cy;
-    close_box(w, &cx, &cy);
-    /* The close box sits in a gap punched through the stripes, or it reads as
-     * part of them. */
-    fill(cx - 2, ty + 1, CLOSE_SIZE + 4, TITLE_HEIGHT - 2,
-         focused ? TITLE_ACTIVE : TITLE_IDLE);
-    fill(cx, cy, CLOSE_SIZE, CLOSE_SIZE, FACE);
-    outline_rect(cx, cy, CLOSE_SIZE, CLOSE_SIZE, OUTLINE);
-    bevel(cx + 1, cy + 1, CLOSE_SIZE - 2, CLOSE_SIZE - 2, 1);
 
     char title[WS_TITLE_LEN];
     memcpy(title, (const void*)w->title, WS_TITLE_LEN);
     title[WS_TITLE_LEN - 1] = '\0';
-    {
-        /* Centred, with the stripes cleared behind it - which is how the title
-         * stays readable without a box drawn round it. */
-        const int text_w = (int)strlen(title) * 8;
-        int text_x = tx + (tw - text_w) / 2;
-        const int least = cx + CLOSE_SIZE + 8;
-        if (text_x < least)
-            text_x = least;
-        if (text_w > 0 && text_x + text_w < tx + tw) {
-            fill(text_x - 6, ty + 1, text_w + 12, TITLE_HEIGHT - 2,
-                 focused ? TITLE_ACTIVE : TITLE_IDLE);
-            draw_text(text_x, ty + (TITLE_HEIGHT - 16) / 2 + 1, title,
-                      TITLE_TEXT);
-        }
+    if (title[0] != '\0') {
+        /* Centred on the window, not on the space left over beside the
+         * controls - a title that shifts when a control appears reads as the
+         * window twitching. Pushed right only if it would collide. */
+        const int tw = text_width(13, title);
+        int tx = w->x + ((int)fw - tw) / 2;
+        int least;
+        int ignored;
+        control_box(w, 2, &least, &ignored);
+        least += CONTROL_SIZE + 10;
+        if (tx < least)
+            tx = least;
+        if (tw > 0 && tx + tw < w->x + (int)fw - 8)
+            draw_string(tx, w->y + BORDER + TITLE_HEIGHT / 2 + 5, 13, title,
+                        focused ? 0xF0101810u : 0x90101810u);
     }
 
-    /* The grip bar, and the grow box at its right end: three diagonal lines,
-     * which is the whole of the idiom. */
-    const int gy = w->y + (int)frame_height(slot) - BORDER - GRIP_H;
-    fill(tx, gy, fw - BORDER * 2, GRIP_H, FACE);
-    int bx, by;
-    grow_box(slot, &bx, &by);
-    bevel(bx, by, GRIP_W, GRIP_H, 1);
-    for (int line = 0; line < 3; ++line) {
-        const int off = 3 + line * 4;
-        for (int i = 0; i < GRIP_W - 4 - off; ++i)
-            back_plot(bx + GRIP_W - 2 - i, by + GRIP_H - 2 - (GRIP_W - 4 - off) + i,
-                      SHADOW);
-    }
+    /* No grip bar and no grow box. The band is still there in the geometry,
+     * because that is what a pointer grabs to resize, but the panel covers it
+     * and nothing is drawn in it. */
 
-    /* The client's own pixels. Bounded by the clip rather than the window, so
-     * a pass repainting one corner copies one corner. */
+    /* The client's own pixels. Bounded by the clip rather than by the window,
+     * so a pass repainting one corner copies one corner.
+     *
+     * Blended through the frame's own rounded shape rather than copied
+     * straight down. A client draws a rectangle - it has no idea its window
+     * has corners - and copying that over the bottom two would square them off
+     * and leave the shadow showing through a notch. */
     const uint32_t* px = g_pixels[slot];
     if (px == 0)
         return;
-    const int content_x = w->x + BORDER, content_y = ty + TITLE_HEIGHT;
+    const int content_x = w->x + BORDER;
+    const int content_y = w->y + BORDER + TITLE_HEIGHT;
     const int x0 = imax(content_x, g_clip.x), y0 = imax(content_y, g_clip.y);
     const int x1 = imin(content_x + (int)g_width[slot], g_clip.x + g_clip.w);
     const int y1 = imin(content_y + (int)g_height[slot], g_clip.y + g_clip.h);
+
+    /* Only the last few rows can meet a corner; everything above them is a
+     * straight copy and stays as fast as it was. */
+    const int curved_from = w->y + (int)fh - CORNER - BORDER;
+
     for (int y = y0; y < y1; ++y) {
         const uint32_t* row = &px[(unsigned long)(y - content_y) * g_width[slot]];
-        uint32_t* dst = &g_back[(unsigned)y * g_fb.width + (unsigned)x0];
-        for (int x = x0; x < x1; ++x)
-            *dst++ = row[x - content_x];
+        if (y < curved_from) {
+            uint32_t* dst = &g_back[(unsigned)y * g_fb.width + (unsigned)x0];
+            for (int x = x0; x < x1; ++x)
+                *dst++ = row[x - content_x];
+            continue;
+        }
+        for (int x = x0; x < x1; ++x) {
+            const int cov = draw_round_coverage(x, y, w->x, w->y,
+                                                (int)fw, (int)fh, CORNER);
+            if (cov == 0)
+                continue;
+            const uint32_t colour = row[x - content_x];
+            back_blend(x, y, ((unsigned)cov << 24) | (colour & 0x00FFFFFFu));
+        }
     }
 }
 
@@ -1138,6 +1243,22 @@ int main(void)
         printf("wserver: cannot read the console font\n");
         return 1;
     }
+
+    /* The proportional font, and the one vector glyph the frame draws.
+     *
+     * Neither is fatal. A window server that refuses to start because a font
+     * is missing is a machine with no screen at all, which is a far worse
+     * failure than a title bar with no title - so both are attempted, both are
+     * reported, and the frame checks before it uses either. */
+    g_typeface = font_open(PATH_FONTS "/sans.ttf");
+    if (g_typeface == 0)
+        printf("wserver: no proportional font (%s); titles will be blank\n",
+               font_error());
+
+    g_close_ready = svg_render(PATH_ICONS "/glyphs/close.svg",
+                               CONTROL_SIZE, &g_close_glyph) == 0;
+    if (!g_close_ready)
+        printf("wserver: no close glyph; drawing one instead\n");
 
     g_back = (uint32_t*)malloc((unsigned long)g_fb.width * g_fb.height * 4);
     if (g_back == 0) {

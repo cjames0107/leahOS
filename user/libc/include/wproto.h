@@ -40,8 +40,18 @@
 
 /* The chrome, which both sides have to agree about: the server draws it and a
  * client needs it to turn its own coordinates into screen ones. */
-#define WS_TITLE_HEIGHT 18
-#define WS_BORDER       3
+/* Tall enough for three controls and a line of proportional text with air
+ * around it. The old eighteen was sized for an 8x16 bitmap font and a close
+ * box, and nothing about it survives that font going. */
+#define WS_TITLE_HEIGHT 28
+/* A hairline. The frame used to be a hard outline with a bevel inside it, and
+ * three pixels of grey was that bevel; the depth now comes from a shadow
+ * outside the window rather than from anything drawn in its edge. */
+#define WS_BORDER       1
+
+/* Every window, panel and control is rounded by the same amount. One radius
+ * for the whole interface is what makes it read as one interface. */
+#define WS_CORNER       8
 
 #define WS_MAX_WINDOWS 16
 #define WS_EVENT_SLOTS 32

@@ -33,6 +33,8 @@
 /* Read-only data shared between programs. */
 #define PATH_SHARE      "/usr/share"
 #define PATH_ICONS      "/usr/share/icons"
+#define PATH_FONTS      "/usr/share/fonts"
+#define PATH_GLYPHS     "/usr/share/icons/glyphs"
 #define PATH_WALLPAPERS "/usr/share/wallpapers"
 #define PATH_DOC        "/usr/share/doc"
 #define PATH_DEMOS      "/usr/share/demos"

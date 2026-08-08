@@ -49,6 +49,12 @@ void draw_rect(const struct surface* s, int x, int y, int w, int h,
     int x1 = x + w, y1 = y + h;
     if (x1 > s->w) x1 = s->w;
     if (y1 > s->h) y1 = s->h;
+    if (s->cw > 0 && s->ch > 0) {
+        if (x0 < s->cx) x0 = s->cx;
+        if (y0 < s->cy) y0 = s->cy;
+        if (x1 > s->cx + s->cw) x1 = s->cx + s->cw;
+        if (y1 > s->cy + s->ch) y1 = s->cy + s->ch;
+    }
 
     const unsigned a = (colour >> 24) & 0xFF;
     if (a == 0)
@@ -133,6 +139,12 @@ void draw_round_rect(const struct surface* s, int x, int y, int w, int h,
     int x1 = x + w, y1 = y + h;
     if (x1 > s->w) x1 = s->w;
     if (y1 > s->h) y1 = s->h;
+    if (s->cw > 0 && s->ch > 0) {
+        if (x0 < s->cx) x0 = s->cx;
+        if (y0 < s->cy) y0 = s->cy;
+        if (x1 > s->cx + s->cw) x1 = s->cx + s->cw;
+        if (y1 > s->cy + s->ch) y1 = s->cy + s->ch;
+    }
 
     const unsigned alpha = (colour >> 24) & 0xFF;
     const uint32_t rgb = colour & 0x00FFFFFFu;
@@ -172,6 +184,12 @@ void draw_round_rect_outline(const struct surface* s, int x, int y,
     int x1 = x + w, y1 = y + h;
     if (x1 > s->w) x1 = s->w;
     if (y1 > s->h) y1 = s->h;
+    if (s->cw > 0 && s->ch > 0) {
+        if (x0 < s->cx) x0 = s->cx;
+        if (y0 < s->cy) y0 = s->cy;
+        if (x1 > s->cx + s->cw) x1 = s->cx + s->cw;
+        if (y1 > s->cy + s->ch) y1 = s->cy + s->ch;
+    }
 
     const unsigned alpha = (colour >> 24) & 0xFF;
     const uint32_t rgb = colour & 0x00FFFFFFu;
@@ -388,6 +406,120 @@ void draw_blur(const struct surface* s, int x, int y, int w, int h,
     free(small);
     free(scratch);
 }
+
+/* --- filling a path ---------------------------------------------------------
+ *
+ * Shared with the font, which is where it started. A glyph and an icon are the
+ * same problem once the outline exists: closed contours in, coverage out. The
+ * comment explaining why this accumulates signed area rather than testing
+ * pixel centres is in font.c, where the need for it is obvious.
+ */
+
+void draw_edge_deposit(float* area, int w, int h, int stride,
+                    float x0, float y0, float x1, float y1)
+{
+    float direction = 1.0f;
+    if (y0 > y1) {
+        float t;
+        t = x0; x0 = x1; x1 = t;
+        t = y0; y0 = y1; y1 = t;
+        direction = -1.0f;
+    }
+    if (y1 <= 0.0f || y0 >= (float)h)
+        return;
+
+    const float dxdy = (x1 - x0) / (y1 - y0);
+    if (y0 < 0.0f) {
+        x0 -= y0 * dxdy;                /* enter at the top edge instead */
+        y0 = 0.0f;
+    }
+
+    int y = (int)y0;
+    const int y_end = (int)((y1 < (float)h ? y1 : (float)h) + 0.9999f);
+    float x = x0;
+
+    for (; y < y_end && y < h; ++y) {
+        const float top    = (float)y     > y0 ? (float)y     : y0;
+        const float bottom = (float)(y + 1) < y1 ? (float)(y + 1) : y1;
+        const float dy = bottom - top;
+        if (dy <= 0.0f)
+            continue;
+
+        const float x_next = x + dxdy * dy;
+        const float d = dy * direction;
+
+        float left  = x < x_next ? x : x_next;
+        float right = x < x_next ? x_next : x;
+        if (left < 0.0f)  left = 0.0f;
+        if (right < 0.0f) right = 0.0f;
+        if (left  > (float)w) left  = (float)w;
+        if (right > (float)w) right = (float)w;
+
+        float* row = area + (long)y * stride;
+        const float left_floor = floor(left);
+        const int   first = (int)left_floor;
+        const int   after = (int)ceil(right);   /* one past the last column */
+
+        if (after <= first + 1) {
+            /* The crossing stays within one column. Split the deposit between
+             * it and its neighbour by where the midpoint of the crossing fell,
+             * which is the same formula as below with the sum collapsed. */
+            const float middle = 0.5f * (left + right) - left_floor;
+            row[first]     += d * (1.0f - middle);
+            row[first + 1] += d * middle;
+        } else {
+            /* Across several columns. Each gets the area of the trapezium the
+             * edge cut out of it, which for a straight line is exact - and the
+             * whole point of doing this analytically rather than by sampling.
+             *
+             * The first and last columns are partial wedges; everything
+             * between them is crossed completely and takes an equal share. The
+             * running total is carried along so the last column can be given
+             * whatever is left, which keeps the row summing to exactly d and
+             * stops a seam appearing down the middle of a wide stroke. */
+            const float inverse   = 1.0f / (right - left);
+            const float into_first = left - left_floor;
+            const float first_area = 0.5f * inverse *
+                                     (1.0f - into_first) * (1.0f - into_first);
+            const float past_last  = right - (float)after + 1.0f;
+            const float last_area  = 0.5f * inverse * past_last * past_last;
+
+            row[first] += d * first_area;
+
+            if (after == first + 2) {
+                row[first + 1] += d * (1.0f - first_area - last_area);
+            } else {
+                const float second = inverse * (1.5f - into_first);
+                row[first + 1] += d * (second - first_area);
+                for (int c = first + 2; c < after - 1; ++c)
+                    row[c] += d * inverse;
+                const float before_last =
+                    second + (float)(after - first - 3) * inverse;
+                row[after - 1] += d * (1.0f - before_last - last_area);
+            }
+            row[after] += d * last_area;
+        }
+        x = x_next;
+    }
+}
+
+void draw_area_resolve(const float* area, int w, int h, int stride,
+                       unsigned char* out)
+{
+    for (int y = 0; y < h; ++y) {
+        const float* row = area + (long)y * stride;
+        unsigned char* line = out + (long)y * w;
+        float running = 0.0f;
+        for (int x = 0; x < w; ++x) {
+            running += row[x];
+            float c = running < 0.0f ? -running : running;
+            if (c > 1.0f)
+                c = 1.0f;
+            line[x] = (unsigned char)(c * 255.0f + 0.5f);
+        }
+    }
+}
+
 
 /* --- shadows ---------------------------------------------------------------- */
 

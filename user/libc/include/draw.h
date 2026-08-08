@@ -24,7 +24,16 @@
 struct surface {
     uint32_t* pixels;
     int       w, h;
+    /* What may be written to. A compositor repaints one damage rectangle at a
+     * time and anything drawn outside it corrupts the screen, so the clip
+     * belongs on the surface rather than in every caller. A zero width means
+     * the whole surface, which is what a plain `{pixels, w, h}` gives. */
+    int       cx, cy, cw, ch;
 };
+
+/* Whether (x, y) may be written. Exposed because a caller with its own
+ * per-pixel loop - a glyph blitter, say - needs the same test. */
+int draw_clipped(const struct surface* s, int x, int y);
 
 /* --- blending -------------------------------------------------------------- */
 
@@ -81,6 +90,19 @@ int draw_round_coverage(int px, int py, int x, int y, int w, int h,
  * rounded panel leaves four soft squares poking out from behind the glass. */
 void draw_blur(const struct surface* s, int x, int y, int w, int h,
                int radius, int corner);
+
+/* --- filling a path ---------------------------------------------------------
+ *
+ * The rasteriser the font uses, shared so that vector icons are filled by the
+ * same code. Deposit every edge of every closed contour into `area`, which is
+ * `(w + 2) * h` floats and starts at zero, then resolve it into `w * h` bytes
+ * of coverage. The two extra columns are slack for an edge that leaves the
+ * right-hand side.
+ */
+void draw_edge_deposit(float* area, int w, int h, int stride,
+                       float x0, float y0, float x1, float y1);
+void draw_area_resolve(const float* area, int w, int h, int stride,
+                       unsigned char* out);
 
 /* --- shadows ---------------------------------------------------------------
  *

@@ -211,7 +211,15 @@ if [ -d media/icons ]; then
     # at whatever size it needs rather than at one baked in here.
     if [ -d media/icons/glyphs ]; then
         mkdir -p "$STAGING/usr/share/icons/glyphs"
-        cp media/icons/glyphs/*.svg "$STAGING/usr/share/icons/glyphs/" 2>/dev/null || true
+        # Named for what they are, not for how they were exported. The files
+        # arrive as close_24dp_E3E3E3_FILL0_wght400_GRAD0_opsz24.svg, which
+        # records a size, a colour and four axis values that a vector renderer
+        # setting all four itself has no use for.
+        for glyph in media/icons/glyphs/*.svg; do
+            [ -e "$glyph" ] || continue
+            short="$(basename "$glyph" | sed 's/_[0-9]*dp_.*//')"
+            cp "$glyph" "$STAGING/usr/share/icons/glyphs/$short.svg"
+        done
     fi
 fi
 

@@ -28,6 +28,7 @@
  */
 
 #include <fcntl.h>
+#include <draw.h>
 #include <font.h>
 #include <math.h>
 #include <stdio.h>
@@ -511,110 +512,9 @@ static void flatten(const struct outline* o, int first, int last,
  * which is why a near-horizontal edge comes out smooth instead of staircased.
  */
 
-static void deposit(float* area, int w, int h, int stride,
-                    float x0, float y0, float x1, float y1)
-{
-    float direction = 1.0f;
-    if (y0 > y1) {
-        float t;
-        t = x0; x0 = x1; x1 = t;
-        t = y0; y0 = y1; y1 = t;
-        direction = -1.0f;
-    }
-    if (y1 <= 0.0f || y0 >= (float)h)
-        return;
-
-    const float dxdy = (x1 - x0) / (y1 - y0);
-    if (y0 < 0.0f) {
-        x0 -= y0 * dxdy;                /* enter at the top edge instead */
-        y0 = 0.0f;
-    }
-
-    int y = (int)y0;
-    const int y_end = (int)((y1 < (float)h ? y1 : (float)h) + 0.9999f);
-    float x = x0;
-
-    for (; y < y_end && y < h; ++y) {
-        const float top    = (float)y     > y0 ? (float)y     : y0;
-        const float bottom = (float)(y + 1) < y1 ? (float)(y + 1) : y1;
-        const float dy = bottom - top;
-        if (dy <= 0.0f)
-            continue;
-
-        const float x_next = x + dxdy * dy;
-        const float d = dy * direction;
-
-        float left  = x < x_next ? x : x_next;
-        float right = x < x_next ? x_next : x;
-        if (left < 0.0f)  left = 0.0f;
-        if (right < 0.0f) right = 0.0f;
-        if (left  > (float)w) left  = (float)w;
-        if (right > (float)w) right = (float)w;
-
-        float* row = area + (long)y * stride;
-        const float left_floor = floor(left);
-        const int   first = (int)left_floor;
-        const int   after = (int)ceil(right);   /* one past the last column */
-
-        if (after <= first + 1) {
-            /* The crossing stays within one column. Split the deposit between
-             * it and its neighbour by where the midpoint of the crossing fell,
-             * which is the same formula as below with the sum collapsed. */
-            const float middle = 0.5f * (left + right) - left_floor;
-            row[first]     += d * (1.0f - middle);
-            row[first + 1] += d * middle;
-        } else {
-            /* Across several columns. Each gets the area of the trapezium the
-             * edge cut out of it, which for a straight line is exact - and the
-             * whole point of doing this analytically rather than by sampling.
-             *
-             * The first and last columns are partial wedges; everything
-             * between them is crossed completely and takes an equal share. The
-             * running total is carried along so the last column can be given
-             * whatever is left, which keeps the row summing to exactly d and
-             * stops a seam appearing down the middle of a wide stroke. */
-            const float inverse   = 1.0f / (right - left);
-            const float into_first = left - left_floor;
-            const float first_area = 0.5f * inverse *
-                                     (1.0f - into_first) * (1.0f - into_first);
-            const float past_last  = right - (float)after + 1.0f;
-            const float last_area  = 0.5f * inverse * past_last * past_last;
-
-            row[first] += d * first_area;
-
-            if (after == first + 2) {
-                row[first + 1] += d * (1.0f - first_area - last_area);
-            } else {
-                const float second = inverse * (1.5f - into_first);
-                row[first + 1] += d * (second - first_area);
-                for (int c = first + 2; c < after - 1; ++c)
-                    row[c] += d * inverse;
-                const float before_last =
-                    second + (float)(after - first - 3) * inverse;
-                row[after - 1] += d * (1.0f - before_last - last_area);
-            }
-            row[after] += d * last_area;
-        }
-        x = x_next;
-    }
-}
-
-static void accumulate(const float* area, int w, int h, int stride,
-                       unsigned char* out)
-{
-    for (int y = 0; y < h; ++y) {
-        const float* row = area + (long)y * stride;
-        unsigned char* line = out + (long)y * w;
-        float running = 0.0f;
-        for (int x = 0; x < w; ++x) {
-            running += row[x];
-            float c = running < 0.0f ? -running : running;
-            if (c > 1.0f)
-                c = 1.0f;
-            line[x] = (unsigned char)(c * 255.0f + 0.5f);
-        }
-    }
-}
+/* The fill lives in draw.c, shared with the SVG loader: both turn closed
+ * contours into coverage, and the only difference between a letter and an
+ * icon is where the outline came from. */
 
 /* --- the cache -------------------------------------------------------------
  *
@@ -837,11 +737,11 @@ int font_glyph(struct font* f, int px, unsigned codepoint, struct glyph* out)
         memset(area, 0, (size_t)stride * (size_t)h * sizeof(float));
 
         for (int i = 0; i < edges.count; ++i)
-            deposit(area, w, h, stride,
+            draw_edge_deposit(area, w, h, stride,
                     edges.x0[i] - (float)left, edges.y0[i] - (float)top,
                     edges.x1[i] - (float)left, edges.y1[i] - (float)top);
 
-        accumulate(area, w, h, stride, coverage);
+        draw_area_resolve(area, w, h, stride, coverage);
         free(area);
     }
 
