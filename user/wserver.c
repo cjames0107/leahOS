@@ -206,14 +206,31 @@ static void damage_rect(int x, int y, int w, int h)
     struct rect r;
     r.x = x0; r.y = y0; r.w = x1 - x0; r.h = y1 - y0;
 
+    /* Merged until nothing overlaps anything, not merged once.
+     *
+     * The damage list has to be disjoint, and this used to union a new
+     * rectangle into the first one it touched and return - leaving the grown
+     * rectangle overlapping others further down the list. Two overlapping
+     * regions are not merely composed twice: compose_rect repaints the
+     * wallpaper across each one, so the second pass erases whatever the first
+     * drew in the shared area and only redraws the windows whose frames
+     * overlap *that* rectangle. Any other window is left as background.
+     *
+     * It survived because frame-sized rectangles rarely touched. Growing them
+     * to cover a shadow made it happen constantly, and looked like the shadow
+     * having broken the frames.
+     *
+     * Merging by taking the union out, removing the slot and re-inserting
+     * handles the transitive case for free: the enlarged rectangle goes back
+     * through the same test against everything that is left. */
     for (int i = 0; i < g_damage_count; ++i) {
         if (!rects_overlap(&r, &g_damage[i]))
             continue;
         const int nx = imin(r.x, g_damage[i].x), ny = imin(r.y, g_damage[i].y);
         const int mx = imax(r.x + r.w, g_damage[i].x + g_damage[i].w);
         const int my = imax(r.y + r.h, g_damage[i].y + g_damage[i].h);
-        g_damage[i].x = nx; g_damage[i].y = ny;
-        g_damage[i].w = mx - nx; g_damage[i].h = my - ny;
+        g_damage[i] = g_damage[--g_damage_count];
+        damage_rect(nx, ny, mx - nx, my - ny);
         return;
     }
 
@@ -401,16 +418,11 @@ static struct rect frame_rect(int slot)
 
 static void damage_window(int slot)
 {
-    /* Exactly the frame, which means the shadow is composed and then thrown
-     * away - it falls outside this rectangle and is clipped off.
-     *
-     * Growing it by SHADOW_SPREAD does make the shadow appear, and also makes
-     * neighbouring frames disappear: something else in the composite depends
-     * on a damage rectangle being no larger than the window that raised it,
-     * and I have not found what. Left correct-but-flat rather than pretty-and-
-     * broken; the shadow is one line away once that is understood. */
+    /* The frame, grown to cover the shadow it casts. A damage rectangle that
+     * stops at the window's edge clips the shadow away entirely. */
     const struct rect r = frame_rect(slot);
-    damage_rect(r.x, r.y, r.w, r.h);
+    damage_rect(r.x - SHADOW_SPREAD, r.y - SHADOW_SPREAD + SHADOW_DROP,
+                r.w + SHADOW_SPREAD * 2, r.h + SHADOW_SPREAD * 2);
 }
 
 /* The grow box, bottom-right, inside the grip bar. */
@@ -633,7 +645,14 @@ static void compose_rect(const struct rect* r)
         }
     }
     for (int i = g_count - 1; i >= 0; --i) {
-        const struct rect f = frame_rect(g_order[i]);
+        struct rect f = frame_rect(g_order[i]);
+        /* Grown by the shadow, so a window whose frame is outside this region
+         * but whose shadow falls inside it still gets its turn - otherwise the
+         * shadow appears only when its own window happens to be repainted. */
+        f.x -= SHADOW_SPREAD;
+        f.y -= SHADOW_SPREAD;
+        f.w += SHADOW_SPREAD * 2;
+        f.h += SHADOW_SPREAD * 2;
         if (rects_overlap(&f, r))
             draw_window(g_order[i], i == 0);
     }
