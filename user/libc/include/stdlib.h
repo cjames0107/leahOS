@@ -15,6 +15,10 @@ void* calloc(size_t count, size_t size);
 /* Minimal decimal parse; no sign, no errors. Enough for a command line. */
 int atoi_simple(const char* text);
 
+/* Text to a double. `end`, when not null, receives where the number stopped -
+ * which is how a caller tells "0" from "not a number at all". */
+double strtod(const char* text, char** end);
+
 /* The environment: a vector of "NAME=value", ending in a null pointer.
  *
  * `environ` can move - the first setenv copies the kernel's vector, which is on

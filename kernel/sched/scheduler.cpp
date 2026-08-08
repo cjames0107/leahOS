@@ -839,6 +839,21 @@ void block_on(u64 channel)
     // Reached again once woken and rescheduled.
 }
 
+void block_on_until(u64 channel, u64 ticks)
+{
+    KernelLock lock;
+    Task* self = current();
+    self->wait_channel = channel;
+    if (ticks != 0)
+        self->wake_tick = timer::ticks() + ticks;
+    self->state = State::Blocked;
+    switch_to(pick_next());
+    // Woken by one or the other; which does not matter, because the caller is
+    // going to look at the world again either way.
+    self->wake_tick = 0;
+    self->wait_channel = 0;
+}
+
 void wake(u64 channel)
 {
     KernelLock lock;

@@ -1,0 +1,24 @@
+printf - print, with control over exactly what comes out
+
+SYNOPSIS
+    printf FORMAT [ARGUMENT...]
+
+DESCRIPTION
+    Writes the format, with % conversions replaced by the arguments and
+    backslash escapes expanded. Unlike echo it adds no newline of its
+    own, which is the point: what comes out is what was asked for.
+
+    Escapes: \n \t \r \a \b \f \v \\ \e, \xNN and \0NNN.
+    \e is byte 27, which is how a script emits an escape sequence -
+    `printf '\e[31mred\e[0m\n'`.
+
+    Conversions: %s %d %i %u %x %X %o %c %f %e %g and %%, each taking the
+    next argument, with the usual flags, width and precision. %b is the
+    argument with its own escapes expanded.
+
+    The format is reused until the arguments run out, so
+    `printf '%s\n' a b c` prints three lines. A format with no
+    conversions in it is printed once.
+
+SEE ALSO
+    echo, sh, tee

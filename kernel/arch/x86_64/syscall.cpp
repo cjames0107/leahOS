@@ -941,15 +941,28 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
     }
 
     case Sleep: {
-        // Milliseconds in, rounded up to whole ticks - sleeping for less than a
-        // tick would round to zero and busy-wait, which is the thing this
-        // exists to avoid.
+        // Against the monotonic clock, for the same reason poll is: a tick is
+        // not a unit of elapsed time on an emulated PIT, which hands over the
+        // ticks it owes in a burst after the guest has been idle. Sleeping a
+        // fixed number of them came back early by nearly half.
+        //
+        // Ticks still decide how long each nap is; the loop decides when to
+        // stop, and it asks a clock that measures time.
         const u64 ms = frame->rdi;
-        const u64 per_ms = timer::kFrequencyHz / 1000;
-        u64 ticks = per_ms != 0 ? ms * per_ms : (ms * timer::kFrequencyHz) / 1000;
-        if (ticks == 0 && ms != 0)
-            ticks = 1;
-        scheduler::sleep_ticks(ticks);
+        const u64 started = timer::uptime_ms();
+        while (ms != 0) {
+            const u64 gone = timer::uptime_ms() - started;
+            if (gone >= ms)
+                break;
+            const u64 left = ms - gone;
+            u64 ticks = (left * timer::kFrequencyHz + 999) / 1000;
+            if (ticks == 0)
+                ticks = 1;
+            scheduler::sleep_ticks(ticks);
+            // A signal is a reason to stop waiting, as it is everywhere else.
+            if (scheduler::signal_pending())
+                break;
+        }
         frame->rax = 0;
         break;
     }
@@ -1125,6 +1138,80 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
     case GetPgid: {
         const u32 pgid = scheduler::pgid_of(static_cast<u32>(frame->rdi));
         frame->rax = pgid != 0 ? pgid : static_cast<u64>(-1);
+        break;
+    }
+
+    case Poll: {
+        /* The array is the caller's, and is written back in place - which is
+         * what poll has always done, and is why the struct has a field for the
+         * answer beside the field for the question.
+         *
+         * Only the kernel's own descriptors get here. A file on a disk is
+         * always ready and libc says so without asking, which keeps the common
+         * case - a program polling one pipe - down to the one thing that can
+         * actually block. */
+        struct UserPollFd { i32 fd; i16 events; i16 revents; };
+        const u64 count = frame->rsi;
+        const i64 timeout_ms = static_cast<i64>(frame->rdx);
+        if (count > 64 || !user_range_ok(frame->rdi, count * sizeof(UserPollFd))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        auto* fds = reinterpret_cast<UserPollFd*>(frame->rdi);
+
+        /* The deadline is in milliseconds off the monotonic clock, not in
+         * timer ticks.
+         *
+         * Ticks are not a measure of elapsed time here. The PIT is emulated,
+         * and when the guest has been idle the host delivers the ticks it owes
+         * in a burst - so twelve of them can go by in well under the hundred
+         * and twenty milliseconds twelve ticks is supposed to be. A poll asked
+         * to wait 120 ms came back after 67, which is not a rounding error but
+         * a different clock.
+         *
+         * So the deadline is kept in the same units the caller measures in,
+         * and ticks are used only to decide how long to nap between looks. */
+        const u64 started_ms = timer::uptime_ms();
+
+        i64 ready = 0;
+        for (;;) {
+            ready = 0;
+            for (u64 i = 0; i < count; ++i) {
+                const u32 state = files::readiness(fds[i].fd);
+                /* Errors and hangups are reported whether or not they were
+                 * asked for - a caller waiting to read a pipe whose writer has
+                 * gone needs to hear about it, and did not think to ask. */
+                const u32 asked = static_cast<u32>(fds[i].events) |
+                                  files::kPollErr | files::kPollHup |
+                                  files::kPollBad;
+                const u32 got = state & asked;
+                fds[i].revents = static_cast<i16>(got);
+                if (got != 0)
+                    ++ready;
+            }
+            if (ready > 0 || timeout_ms == 0)
+                break;
+            if (scheduler::signal_pending()) {
+                ready = -2;         // interrupted; libc turns this into EINTR
+                break;
+            }
+            if (timeout_ms > 0) {
+                const u64 gone = timer::uptime_ms() - started_ms;
+                if (gone >= static_cast<u64>(timeout_ms))
+                    break;          // nothing ready, and the time is up
+                const u64 left = static_cast<u64>(timeout_ms) - gone;
+                /* Rounded up, so a nap never ends before the deadline it was
+                 * measured from - and the loop checks the real clock again
+                 * either way. */
+                u64 ticks = (left * timer::kFrequencyHz + 999) / 1000;
+                if (ticks == 0)
+                    ticks = 1;
+                scheduler::block_on_until(scheduler::kPollChannel, ticks);
+            } else {
+                scheduler::block_on_until(scheduler::kPollChannel, 0);
+            }
+        }
+        frame->rax = static_cast<u64>(ready);
         break;
     }
 

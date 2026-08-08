@@ -28,6 +28,7 @@
 #include <string.h>
 #include <thread.h>
 #include <signal.h>
+#include <termios.h>
 #include <unistd.h>
 #include <widget.h>
 #include <window.h>
@@ -47,6 +48,23 @@
 #define FG      0xC0C0C0
 #define CURSOR  0x00A000
 
+/* The sixteen colours every terminal has had since the VT100's descendants,
+ * in the shades the PC text mode used - which is what anything sending these
+ * codes was written against. */
+static const uint32_t kPalette[16] = {
+    0x000000, 0xAA0000, 0x00AA00, 0xAA5500,
+    0x0000AA, 0xAA00AA, 0x00AAAA, 0xAAAAAA,
+    0x555555, 0xFF5555, 0x55FF55, 0xFFFF55,
+    0x5555FF, 0xFF55FF, 0x55FFFF, 0xFFFFFF,
+};
+
+/* An attribute is two palette indices and a bright bit, in one byte, because
+ * there is one per cell and a cell is otherwise a single char. */
+#define ATTR(fg, bg)  ((unsigned char)(((bg) << 4) | (fg)))
+#define ATTR_FG(a)    ((a) & 0x0F)
+#define ATTR_BG(a)    (((a) >> 4) & 0x0F)
+#define ATTR_DEFAULT  ATTR(7, 0)
+
 static uint32_t* g_px;
 static unsigned  g_win_w, g_win_h;
 static unsigned char g_font[256 * 16];
@@ -63,6 +81,8 @@ static unsigned char g_font[256 * 16];
  */
 static mutex_t g_lock = MUTEX_INIT;
 static char g_cells[HISTORY_ROWS][MAX_COLS];
+static unsigned char g_attrs[HISTORY_ROWS][MAX_COLS];
+static unsigned char g_pen = ATTR_DEFAULT;
 static int  g_cols = 80, g_rows = 24;
 static long g_cur_line;         /* the line the cursor is on */
 static long g_first;            /* the oldest line still remembered */
@@ -96,19 +116,26 @@ static const struct control_key kControlKeys[] = {
 
 /* --- the grid ------------------------------------------------------------ */
 
-static char* row_of(long line)
+static long slot_of(long line)
 {
     long slot = line % HISTORY_ROWS;
-    if (slot < 0)
-        slot += HISTORY_ROWS;
-    return g_cells[slot];
+    return slot < 0 ? slot + HISTORY_ROWS : slot;
 }
+
+static char*          row_of(long line)  { return g_cells[slot_of(line)]; }
+static unsigned char* attr_of(long line) { return g_attrs[slot_of(line)]; }
 
 static void clear_line(long line)
 {
     char* row = row_of(line);
-    for (int c = 0; c < MAX_COLS; ++c)
+    unsigned char* attr = attr_of(line);
+    for (int c = 0; c < MAX_COLS; ++c) {
         row[c] = ' ';
+        /* Cleared in the current colours, not the default ones: a program that
+         * sets a background and then clears the screen means that background,
+         * and every terminal does it this way. */
+        attr[c] = g_pen;
+    }
 }
 
 /* How many lines there are to look at, and the furthest down the view can go.
@@ -146,9 +173,192 @@ static void newline(void)
         g_view = g_first;       /* what it was looking at has gone */
 }
 
+/* --- escape sequences -------------------------------------------------------
+ *
+ * `clear` printed [2J[H for as long as this terminal has existed, because it
+ * sends what every terminal since the VT100 understands and this one
+ * understood nothing. The escapes that matter are few: move the cursor, erase
+ * something, change the colour. What is not here - scrolling regions,
+ * alternate screens, character sets - is not here because nothing sends it,
+ * and a half-implemented one is worse than an ignored one.
+ *
+ * Parsed as a small state machine rather than by scanning ahead, because the
+ * bytes arrive from a pipe and a sequence can be split across two reads.
+ */
+enum esc_state { ESC_NONE, ESC_SEEN, ESC_CSI };
+
+static enum esc_state g_esc;
+static int g_params[8];
+static int g_param_count;
+static int g_param_digits;
+
+/* Clear from `from` to `to` on one line, inclusive, in the current colours. */
+static void erase_span(long line, int from, int to)
+{
+    char* row = row_of(line);
+    unsigned char* attr = attr_of(line);
+    if (from < 0) from = 0;
+    if (to >= g_cols) to = g_cols - 1;
+    for (int c = from; c <= to; ++c) {
+        row[c] = ' ';
+        attr[c] = g_pen;
+    }
+}
+
+static int param(int index, int fallback)
+{
+    if (index >= g_param_count)
+        return fallback;
+    return g_params[index] > 0 ? g_params[index] : fallback;
+}
+
+/* SGR - the colour and attribute codes. */
+static void set_graphics(void)
+{
+    if (g_param_count == 0) {
+        g_pen = ATTR_DEFAULT;
+        return;
+    }
+    for (int i = 0; i < g_param_count; ++i) {
+        const int p = g_params[i];
+        if (p == 0)
+            g_pen = ATTR_DEFAULT;
+        else if (p == 1)
+            g_pen = ATTR(ATTR_FG(g_pen) | 8, ATTR_BG(g_pen));   /* bold: bright */
+        else if (p == 22)
+            g_pen = ATTR(ATTR_FG(g_pen) & 7, ATTR_BG(g_pen));
+        else if (p == 7)
+            g_pen = ATTR(ATTR_BG(g_pen), ATTR_FG(g_pen));       /* reversed */
+        else if (p >= 30 && p <= 37)
+            g_pen = ATTR((ATTR_FG(g_pen) & 8) | (p - 30), ATTR_BG(g_pen));
+        else if (p == 39)
+            g_pen = ATTR(7, ATTR_BG(g_pen));
+        else if (p >= 40 && p <= 47)
+            g_pen = ATTR(ATTR_FG(g_pen), p - 40);
+        else if (p == 49)
+            g_pen = ATTR(ATTR_FG(g_pen), 0);
+        else if (p >= 90 && p <= 97)
+            g_pen = ATTR((p - 90) | 8, ATTR_BG(g_pen));
+        else if (p >= 100 && p <= 107)
+            g_pen = ATTR(ATTR_FG(g_pen), (p - 100) | 8);
+    }
+}
+
+/* The top line of the window, which is where a cursor address of 1;1 lands.
+ * Addressing is relative to the window and not to the history: a program that
+ * says "go to the top" means the top of what it can see. */
+static long window_top(void) { return g_view; }
+
+static void csi_final(char ch)
+{
+    switch (ch) {
+    case 'A': g_cur_line -= param(0, 1); break;         /* up */
+    case 'B': g_cur_line += param(0, 1); break;         /* down */
+    case 'C': g_cur_c += param(0, 1); break;            /* right */
+    case 'D': g_cur_c -= param(0, 1); break;            /* left */
+    case 'G': g_cur_c = param(0, 1) - 1; break;         /* to a column */
+    case 'H':
+    case 'f':
+        g_cur_line = window_top() + param(0, 1) - 1;
+        g_cur_c = param(1, 1) - 1;
+        break;
+    case 'J': {                                          /* erase display */
+        const int what = g_param_count > 0 ? g_params[0] : 0;
+        const long top = window_top();
+        if (what == 0) {
+            erase_span(g_cur_line, g_cur_c, g_cols - 1);
+            for (long r = g_cur_line + 1; r < top + g_rows; ++r)
+                erase_span(r, 0, g_cols - 1);
+        } else if (what == 1) {
+            for (long r = top; r < g_cur_line; ++r)
+                erase_span(r, 0, g_cols - 1);
+            erase_span(g_cur_line, 0, g_cur_c);
+        } else {
+            for (long r = top; r < top + g_rows; ++r)
+                erase_span(r, 0, g_cols - 1);
+        }
+        break;
+    }
+    case 'K': {                                          /* erase line */
+        const int what = g_param_count > 0 ? g_params[0] : 0;
+        if (what == 0)      erase_span(g_cur_line, g_cur_c, g_cols - 1);
+        else if (what == 1) erase_span(g_cur_line, 0, g_cur_c);
+        else                erase_span(g_cur_line, 0, g_cols - 1);
+        break;
+    }
+    case 'm': set_graphics(); break;
+    default: break;                     /* anything else is ignored, not shown */
+    }
+
+    if (g_cur_c < 0) g_cur_c = 0;
+    if (g_cur_c >= g_cols) g_cur_c = g_cols - 1;
+    if (g_cur_line < g_first) g_cur_line = g_first;
+    /* Never past the bottom of the window: a cursor address is about the
+     * window, and letting one run off it would scroll by arithmetic. */
+    if (g_cur_line > window_top() + g_rows - 1)
+        g_cur_line = window_top() + g_rows - 1;
+}
+
+/* Feed one byte to the parser. Returns 1 when it was consumed as part of a
+ * sequence and must not be printed. */
+static int escape_byte(char ch)
+{
+    switch (g_esc) {
+    case ESC_NONE:
+        if (ch != 0x1B)
+            return 0;
+        g_esc = ESC_SEEN;
+        return 1;
+
+    case ESC_SEEN:
+        if (ch == '[') {
+            g_esc = ESC_CSI;
+            g_param_count = 0;
+            g_param_digits = 0;
+            g_params[0] = 0;
+        } else {
+            /* A two-character escape. None of them are understood, and
+             * swallowing one is better than printing half of it. */
+            g_esc = ESC_NONE;
+        }
+        return 1;
+
+    case ESC_CSI:
+        if (ch >= '0' && ch <= '9') {
+            if (g_param_count == 0)
+                g_param_count = 1;
+            if (g_param_count <= 8) {
+                g_params[g_param_count - 1] =
+                    g_params[g_param_count - 1] * 10 + (ch - '0');
+                g_param_digits = 1;
+            }
+            return 1;
+        }
+        if (ch == ';') {
+            if (g_param_count < 8)
+                g_params[g_param_count++] = 0;
+            g_param_digits = 0;
+            return 1;
+        }
+        if (ch == '?' || ch == '>' || ch == '!') {
+            /* A private-use introducer. The sequence is still swallowed
+             * whole; it just does nothing. */
+            return 1;
+        }
+        (void)g_param_digits;
+        csi_final(ch);
+        g_esc = ESC_NONE;
+        return 1;
+    }
+    return 0;
+}
+
 /* Call with the lock held. */
 static void term_putc(char ch)
 {
+    if (escape_byte(ch))
+        return;
+
     if (ch == '\n') {
         newline();
         return;
@@ -161,6 +371,7 @@ static void term_putc(char ch)
         if (g_cur_c > 0)
             --g_cur_c;
         row_of(g_cur_line)[g_cur_c] = ' ';
+        attr_of(g_cur_line)[g_cur_c] = g_pen;
         return;
     }
     if (ch == '\t') {
@@ -173,6 +384,7 @@ static void term_putc(char ch)
         return;                         /* nothing else is understood */
 
     row_of(g_cur_line)[g_cur_c] = ch;
+    attr_of(g_cur_line)[g_cur_c] = g_pen;
     if (++g_cur_c >= g_cols)
         newline();
 }
@@ -205,8 +417,11 @@ static void repaint(int id)
     mutex_lock(&g_lock);
     for (int r = 0; r < g_rows; ++r) {
         const char* row = row_of(g_view + r);
+        const unsigned char* attr = attr_of(g_view + r);
         for (int c = 0; c < g_cols; ++c)
-            draw_glyph(c, r, row[c], FG, BG);
+            draw_glyph(c, r, row[c],
+                       kPalette[ATTR_FG(attr[c])],
+                       kPalette[ATTR_BG(attr[c])]);
     }
 
     /* A block cursor, drawn last so it sits over whatever is under it - and
@@ -290,10 +505,24 @@ static void reader_thread(void* arg)
     g_dirty = 1;
 }
 
+/* The line settings, as the program at the other end last left them. Read on
+ * every key rather than cached, because it is another process that changes
+ * them and it does not tell anybody when it does. */
+static unsigned line_flags(void)
+{
+    struct termios t;
+    if (tcgetattr(0, &t) != 0)
+        return ISIG | ICANON | ECHO;    /* no control block: behave normally */
+    return t.c_lflag;
+}
+
 /* Send one to the foreground job, and say so on the screen. True if the key
  * was one of these and has been dealt with. */
 static int control_key(char ch)
 {
+    if ((line_flags() & ISIG) == 0)
+        return 0;                       /* raw mode: it is just a byte */
+
     for (unsigned i = 0; i < sizeof(kControlKeys) / sizeof(kControlKeys[0]); ++i) {
         if (kControlKeys[i].ch != ch)
             continue;
@@ -512,6 +741,24 @@ int main(int argc, char** argv)
                 continue;
             }
 
+            /* Raw mode: the byte goes down as it is, with no line to wait for
+             * and nothing shown unless the program at the other end decides to
+             * show it. This is what an editor asks for, and the whole reason
+             * termios exists. */
+            const unsigned flags = line_flags();
+            if ((flags & ICANON) == 0) {
+                if ((flags & ECHO) != 0) {
+                    mutex_lock(&g_lock);
+                    follow_bottom();
+                    term_putc(ch);
+                    mutex_unlock(&g_lock);
+                    g_dirty = 1;
+                }
+                write(g_to_shell, &ch, 1);
+                len = 0;
+                continue;
+            }
+
             if (ch == '\n' || ch == '\r') {
                 mutex_lock(&g_lock);
                 term_putc('\n');
@@ -530,10 +777,12 @@ int main(int argc, char** argv)
                 }
             } else if ((unsigned char)ch >= 32 && len + 1 < sizeof(line)) {
                 line[len++] = ch;
-                mutex_lock(&g_lock);
-                term_putc(ch);
-                mutex_unlock(&g_lock);
-                g_dirty = 1;
+                if ((flags & ECHO) != 0) {
+                    mutex_lock(&g_lock);
+                    term_putc(ch);
+                    mutex_unlock(&g_lock);
+                    g_dirty = 1;
+                }
             }
         }
 

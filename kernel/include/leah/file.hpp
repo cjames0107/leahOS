@@ -63,6 +63,20 @@ struct [[gnu::packed]] Dirent {
 // convention: a non-negative result, or -1 on error.
 i64 close(int fd);
 i64 read(int fd, void* buffer, usize count);
+
+// --- poll --------------------------------------------------------------------
+//
+// Which of these can be done right now without waiting. Only the kernel's own
+// descriptors are asked about - a file on a disk is always ready, and libc
+// answers for those without a syscall.
+constexpr u32 kPollIn   = 1u << 0;      // a read would not block
+constexpr u32 kPollOut  = 1u << 2;      // a write would not block
+constexpr u32 kPollErr  = 1u << 3;
+constexpr u32 kPollHup  = 1u << 4;      // the other end has gone
+constexpr u32 kPollBad  = 1u << 5;      // not an open descriptor
+
+// What `fd` could do this instant, as a mask of the above.
+u32 readiness(int fd);
 i64 write(int fd, const void* buffer, usize count);
 void set_console_echo(bool on);
 

@@ -11,6 +11,7 @@ namespace {
 
 struct Segment {
     bool     used;
+    u32      generation;    // see the id encoding below
     u32      key;
     u32      owner_uid;
     u32      owner_pid;     // who created it, so it can be reclaimed
@@ -21,6 +22,55 @@ struct Segment {
 };
 
 Segment g_segments[kMaxSegments];
+
+/* An id is a slot and a generation, not a slot.
+ *
+ * The slot on its own is recycled the moment a segment is destroyed, and the
+ * next open hands it straight back out. Anyone still holding the old number is
+ * then talking about somebody else's memory, and nothing anywhere says so -
+ * the id is valid, the segment exists, and the writes land in the wrong place.
+ *
+ * That is not hypothetical. libc kept a file's position in a segment, close()
+ * destroyed it when the last descriptor *in that process* let go, and in
+ * `echo one | wc -l` with the output redirected the echo stage did exactly
+ * that while the shell and wc were still using it. The freed slot went to the
+ * next open, which was vfsd's transfer buffer, and the filesystem server
+ * stopped answering. It took a day to find, because every symptom was
+ * somewhere else.
+ *
+ * The generation counts allocations of the slot, so a stale id fails to
+ * validate instead of naming a stranger. Eight bits of slot and the rest
+ * generation, which wraps after sixteen million opens of one slot - long
+ * enough that the wrap is not the thing to worry about.
+ */
+static_assert(kMaxSegments <= 256, "the id encoding gives the slot eight bits");
+
+constexpr i32 kSlotBits = 8;
+constexpr i32 kSlotMask = (1 << kSlotBits) - 1;
+
+i32 make_id(usize slot, u32 generation)
+{
+    return static_cast<i32>((generation << kSlotBits) |
+                            (static_cast<u32>(slot) & kSlotMask));
+}
+
+/* The slot an id names, or -1 when the id is stale, malformed or free. Every
+ * entry point goes through this; none of them index g_segments directly. */
+i32 slot_of(i32 id)
+{
+    if (id < 0)
+        return -1;
+    const usize slot = static_cast<usize>(id) & kSlotMask;
+    const u32 generation = static_cast<u32>(id) >> kSlotBits;
+    if (slot >= kMaxSegments)
+        return -1;
+    const Segment& segment = g_segments[slot];
+    if (!segment.used || segment.generation != generation)
+        return -1;
+    return static_cast<i32>(slot);
+}
+
+u32 g_next_generation = 1;      // never 0, so a zeroed slot never validates
 
 // Frames are allocated one at a time rather than as one contiguous run. A
 // window's pixels can be a megabyte, and demanding a megabyte of contiguous
@@ -51,11 +101,6 @@ bool allocate(Segment& segment, usize pages)
     return true;
 }
 
-bool valid(i32 id)
-{
-    return id >= 0 && id < static_cast<i32>(kMaxSegments) && g_segments[id].used;
-}
-
 } // namespace
 
 void init()
@@ -65,10 +110,11 @@ void init()
 
 bool accessible(i32 id, u32 uid)
 {
-    if (!valid(id))
+    const i32 slot = slot_of(id);
+    if (slot < 0)
         return false;
-    return uid == 0 || uid == g_segments[id].owner_uid ||
-           (g_segments[id].flags & Public) != 0;
+    return uid == 0 || uid == g_segments[slot].owner_uid ||
+           (g_segments[slot].flags & Public) != 0;
 }
 
 i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
@@ -81,7 +127,7 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
             continue;
         // Same rule as a file: the owner, or root - unless the creator marked
         // it public.
-        if (!accessible(static_cast<i32>(i), uid))
+        if (!accessible(make_id(i, g_segments[i].generation), uid))
             return -1;
         // The slot is claimed before its frames exist, so a segment can be
         // found here while it is still being built. pages is set last and is
@@ -91,7 +137,7 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
             scheduler::yield();
         if (g_segments[i].pages == 0)
             return -1;
-        return static_cast<i32>(i);
+        return make_id(i, g_segments[i].generation);
     }
 
     if (bytes == 0)
@@ -116,7 +162,8 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
         // second, which is to say: whenever two programs opened a window at
         // once.
         memset(&segment, 0, sizeof(segment));
-        segment.used      = true;
+        segment.used       = true;
+        segment.generation = g_next_generation++;
         segment.key       = key;
         segment.owner_uid = uid;
         segment.owner_pid = scheduler::current_tgid();
@@ -126,7 +173,7 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
             segment.used = false;
             return -1;
         }
-        return static_cast<i32>(i);
+        return make_id(i, segment.generation);
     }
     return -1;
 }
@@ -153,9 +200,10 @@ void abandon(u32 pid)
 
 bool destroy(i32 id, u32 uid)
 {
-    if (!valid(id))
+    const i32 slot = slot_of(id);
+    if (slot < 0)
         return false;
-    Segment& segment = g_segments[id];
+    Segment& segment = g_segments[slot];
     if (uid != 0 && uid != segment.owner_uid)
         return false;
 
@@ -168,21 +216,26 @@ bool destroy(i32 id, u32 uid)
 
 paddr_t frame_of(i32 id, usize index)
 {
-    if (!valid(id) || index >= g_segments[id].pages)
+    const i32 slot = slot_of(id);
+    if (slot < 0 || index >= g_segments[slot].pages)
         return 0;
-    return g_segments[id].frames[index];
+    return g_segments[slot].frames[index];
 }
 
-u64   size_of(i32 id)      { return valid(id) ? g_segments[id].bytes : 0; }
-usize page_count(i32 id)   { return valid(id) ? g_segments[id].pages : 0; }
-u32   owner_uid_of(i32 id) { return valid(id) ? g_segments[id].owner_uid : 0; }
-bool  exists(i32 id)       { return valid(id); }
+u64   size_of(i32 id)      { const i32 s = slot_of(id);
+                             return s < 0 ? 0 : g_segments[s].bytes; }
+usize page_count(i32 id)   { const i32 s = slot_of(id);
+                             return s < 0 ? 0 : g_segments[s].pages; }
+u32   owner_uid_of(i32 id) { const i32 s = slot_of(id);
+                             return s < 0 ? 0 : g_segments[s].owner_uid; }
+bool  exists(i32 id)       { return slot_of(id) >= 0; }
 
 bool share_frames(i32 id)
 {
-    if (!valid(id))
+    const i32 slot = slot_of(id);
+    if (slot < 0)
         return false;
-    const Segment& segment = g_segments[id];
+    const Segment& segment = g_segments[slot];
     for (usize i = 0; i < segment.pages; ++i) {
         if (!pmm::share(segment.frames[i])) {
             // Undo, so a failure part-way does not leave counts inflated.

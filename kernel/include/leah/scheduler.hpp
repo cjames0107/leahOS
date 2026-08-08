@@ -48,11 +48,27 @@ u32 spawn(const char* name, Entry entry, void* arg);
 // A channel is an opaque tag a task sleeps on and is woken from. The keyboard
 // has a fixed one; a pipe uses its own address so each has a distinct channel.
 constexpr u64 kKeyboardChannel = 1;
+/* One channel for "something a poller might care about has changed".
+ *
+ * poll waits on several descriptors at once, and block_on waits on one. Rather
+ * than giving a task a list of channels - which means a wait queue per channel
+ * and a task on several of them at once - every pipe that gains data, frees
+ * space or loses its last writer wakes this one, and the poller re-checks.
+ *
+ * Spurious wakeups are the cost, and they are free: a poller's whole job is to
+ * look again. */
+constexpr u64 kPollChannel = 2;
 
 // Sleep the calling task until wake(channel) is called. Must be entered with
 // interrupts disabled (it is only called from syscalls, which mask them), so
 // the check-then-block that precedes it cannot race a wake from an interrupt.
 void block_on(u64 channel);
+
+// Block on a channel, but not for longer than `ticks`. Either a wake or the
+// timer releases it - the tick handler already clears wait_channel when it
+// wakes a sleeper, so the two compose without either knowing about the other.
+// `ticks` of 0 means no deadline, which is block_on again.
+void block_on_until(u64 channel, u64 ticks);
 
 // Make every task sleeping on `channel` runnable. Safe to call from an IRQ.
 void wake(u64 channel);

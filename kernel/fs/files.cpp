@@ -45,6 +45,7 @@ i64 pipe_read(Pipe* p, void* buffer, usize count)
                 --p->count;
             }
             scheduler::wake(write_channel(p));      // freed space
+            scheduler::wake(scheduler::kPollChannel);
             return static_cast<i64>(n);
         }
         if (p->writers == 0)
@@ -84,6 +85,7 @@ i64 pipe_write(Pipe* p, const void* buffer, usize count)
             ++p->count;
         }
         scheduler::wake(read_channel(p));           // data available
+        scheduler::wake(scheduler::kPollChannel);
     }
     return static_cast<i64>(written);
 }
@@ -102,6 +104,10 @@ void release_pipe(Descriptor& d)
         if (--p->writers == 0)
             scheduler::wake(read_channel(p));
     }
+    /* An end closing changes what the other end can do without waiting - a
+     * reader with no writers left is readable, at end of file. A poller that
+     * was not told would sit through the one event it was waiting for. */
+    scheduler::wake(scheduler::kPollChannel);
     if (p->readers == 0 && p->writers == 0)
         kfree(p);
 }
@@ -156,6 +162,41 @@ i64 read_console(void* buffer, usize count)
 }
 
 } // namespace
+
+u32 readiness(int fd)
+{
+    if (fd < 0 || fd >= kMaxFds)
+        return kPollBad;
+    const Descriptor& d = table().fds[fd];
+    switch (d.kind) {
+    case Kind::None:
+        return kPollBad;
+    case Kind::ConsoleIn:
+        return keyboard::has_input() ? kPollIn : 0;
+    case Kind::ConsoleOut:
+        return kPollOut;            // the console never makes anyone wait
+    case Kind::Pipe: {
+        const Pipe* p = static_cast<const Pipe*>(d.pipe);
+        if (p == nullptr)
+            return kPollErr;
+        u32 ready = 0;
+        /* Data to take, or nobody left to send any - both mean a read returns
+         * immediately, which is the only thing kPollIn claims. A reader that
+         * asks and then gets zero bytes has been told the truth. */
+        if (p->count > 0)
+            ready |= kPollIn;
+        if (p->writers == 0)
+            ready |= kPollIn | kPollHup;
+        if (p->count < Pipe::kSize)
+            ready |= kPollOut;
+        if (p->readers == 0)
+            ready |= kPollErr;      // writing would raise SIGPIPE
+        return ready;
+    }
+    }
+    return kPollBad;
+}
+
 
 // Echo is suppressed while a password is being typed. It lives here rather
 // than in the console because it is a property of reading the terminal, not of

@@ -8,7 +8,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <poll.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <shm.h>
 #include <stdio.h>
 #include <string.h>
@@ -1962,6 +1964,156 @@ static void test_open_descriptions(void)
 }
 
 
+/* --- waiting on several things at once -----------------------------------------
+ *
+ * The thing a program needs when it has more than one descriptor and no way to
+ * know which will speak first. Without it the choices are a thread each, or a
+ * spin with a sleep in it.
+ */
+
+static void test_poll(void)
+{
+    struct pollfd watch[3];
+    int fds[2];
+    printf("poll:\n");
+
+    check("a pipe can be made", pipe(fds) == 0);
+
+    /* Nothing in it yet, so nothing to read and no waiting to find that out. */
+    watch[0].fd = fds[0];
+    watch[0].events = POLLIN;
+    watch[0].revents = 0;
+    check("an empty pipe is not readable", poll(watch, 1, 0) == 0);
+    check("and says nothing happened", watch[0].revents == 0);
+
+    /* The writing end is ready, because there is room in it. */
+    watch[0].fd = fds[1];
+    watch[0].events = POLLOUT;
+    watch[0].revents = 0;
+    check("an empty pipe is writable",
+          poll(watch, 1, 0) == 1 && (watch[0].revents & POLLOUT) != 0);
+
+    write(fds[1], "hi", 2);
+    watch[0].fd = fds[0];
+    watch[0].events = POLLIN;
+    watch[0].revents = 0;
+    check("a pipe with something in it is readable",
+          poll(watch, 1, 0) == 1 && (watch[0].revents & POLLIN) != 0);
+
+    char back[8];
+    read(fds[0], back, 2);
+
+    /* A timeout that expires with nothing ready returns zero, and takes
+     * roughly as long as it was told to - the point of the number. */
+    watch[0].revents = 0;
+    const unsigned long before = uptime_ms();
+    check("a timeout expires with nothing ready", poll(watch, 1, 120) == 0);
+    const unsigned long waited = uptime_ms() - before;
+    const int about_right = waited >= 110 && waited < 2000;
+    check("and waited about that long", about_right);
+    if (!about_right)
+        printf("       asked for 120 ms, waited %lu\n", waited);
+
+    /* And the same for a plain sleep, which had the same fault for the same
+     * reason: a tick is not a unit of elapsed time on an emulated timer. */
+    const unsigned long slept_from = uptime_ms();
+    msleep(200);
+    const unsigned long slept = uptime_ms() - slept_from;
+    const int slept_right = slept >= 190 && slept < 2000;
+    check("a sleep sleeps for as long as it was asked", slept_right);
+    if (!slept_right)
+        printf("       asked for 200 ms, slept %lu\n", slept);
+
+    /* The writer going away is news the reader has to hear, whether or not it
+     * thought to ask: a read now returns end-of-file rather than blocking. */
+    close(fds[1]);
+    watch[0].fd = fds[0];
+    watch[0].events = POLLIN;
+    watch[0].revents = 0;
+    check("a pipe whose writer has gone is readable",
+          poll(watch, 1, 0) == 1 && (watch[0].revents & POLLIN) != 0);
+    check("and is reported as hung up", (watch[0].revents & POLLHUP) != 0);
+    close(fds[0]);
+
+    /* A descriptor that is not open at all. */
+    watch[0].fd = 999;
+    watch[0].events = POLLIN;
+    watch[0].revents = 0;
+    check("a closed descriptor is reported, not ignored",
+          poll(watch, 1, 0) == 1 && (watch[0].revents & POLLNVAL) != 0);
+
+    /* A file is always ready, and answering that must not need the kernel or
+     * a wait - which is what mixing one with a pipe checks. */
+    const int file = open("/usr/share/doc/readme.md", O_RDONLY);
+    if (file >= 0 && pipe(fds) == 0) {
+        watch[0].fd = file;    watch[0].events = POLLIN;  watch[0].revents = 0;
+        watch[1].fd = fds[0];  watch[1].events = POLLIN;  watch[1].revents = 0;
+        const int n = poll(watch, 2, 500);
+        check("a file is ready at once even beside an idle pipe",
+              n == 1 && (watch[0].revents & POLLIN) != 0 &&
+              watch[1].revents == 0);
+        close(fds[0]);
+        close(fds[1]);
+    }
+    if (file >= 0)
+        close(file);
+
+    /* And one process waiting while another writes: the wake has to travel
+     * between them, which is the case a timeout would hide. */
+    if (pipe(fds) == 0) {
+        const int pid = fork();
+        if (pid == 0) {
+            close(fds[0]);
+            msleep(80);
+            write(fds[1], "x", 1);
+            exit(0);
+        }
+        close(fds[1]);
+        watch[0].fd = fds[0];
+        watch[0].events = POLLIN;
+        watch[0].revents = 0;
+        check("a poller is woken by another process writing",
+              poll(watch, 1, 3000) == 1 && (watch[0].revents & POLLIN) != 0);
+        close(fds[0]);
+        int status = 0;
+        wait(&status);
+    }
+}
+
+
+/* --- the terminal's line settings ----------------------------------------------- */
+
+static void test_termios(void)
+{
+    struct termios saved, t;
+    printf("terminal settings:\n");
+
+    if (tcgetattr(0, &saved) != 0) {
+        check("there is a terminal to ask about", 0);
+        return;
+    }
+    check("a terminal starts in line mode",
+          (saved.c_lflag & ICANON) != 0 && (saved.c_lflag & ECHO) != 0);
+
+    t = saved;
+    cfmakeraw(&t);
+    check("raw mode turns off all three",
+          (t.c_lflag & (ICANON | ECHO | ISIG)) == 0);
+
+    check("the settings can be changed", tcsetattr(0, TCSANOW, &t) == 0);
+
+    struct termios back;
+    check("and read back as they were set",
+          tcgetattr(0, &back) == 0 && back.c_lflag == t.c_lflag);
+
+    /* Put it back, or the shell that runs after this has no line editing and
+     * no Ctrl-C - which would be a test that broke the machine it ran on. */
+    check("and put back again", tcsetattr(0, TCSANOW, &saved) == 0);
+    check("which restores line mode",
+          tcgetattr(0, &back) == 0 && (back.c_lflag & ICANON) != 0);
+}
+
+
 /* --- symbolic links ------------------------------------------------------------
  *
  * A name whose contents are another name. Everything resolves them on the way
@@ -2464,6 +2616,8 @@ int main(void)
     test_errno();
     test_streams();
     test_open_descriptions();
+    test_poll();
+    test_termios();
     test_symlinks();
     test_procfs();
     test_jobs();

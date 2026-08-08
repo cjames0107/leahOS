@@ -32,7 +32,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <ipc.h>
+#include <poll.h>
 #include <shm.h>
+#include <termios.h>
 #include <string.h>
 #include <stdint.h>
 #include <sys/stat.h>
@@ -257,6 +259,11 @@ static int g_tty = -1;
 struct tty_control {
     unsigned magic;
     int      foreground;        /* the process group, or 0 for none */
+    /* The line settings, for the same reason and by the same route: the
+     * terminal is the thing doing the line discipline, so the settings have to
+     * be somewhere it can read them on every key. */
+    unsigned      lflag;
+    unsigned char cc[NCCS];
 };
 
 #define TTY_MAGIC 0x4C544359u   /* "LTCY" */
@@ -284,6 +291,15 @@ static struct tty_control* tty_control(void)
          * zero, so this is the creating terminal and nobody else. */
         g_tty_ctl->magic = TTY_MAGIC;
         g_tty_ctl->foreground = 0;
+        /* What a terminal is before anybody changes it: lines, echoed, with
+         * the interrupt keys doing what they say. */
+        g_tty_ctl->lflag = ISIG | ICANON | ECHO;
+        g_tty_ctl->cc[VINTR]  = 0x03;   /* Ctrl-C */
+        g_tty_ctl->cc[VQUIT]  = 0x1C;   /* Ctrl-\ */
+        g_tty_ctl->cc[VERASE] = 0x7F;
+        g_tty_ctl->cc[VSUSP]  = 0x1A;   /* Ctrl-Z */
+        g_tty_ctl->cc[VMIN]   = 1;
+        g_tty_ctl->cc[VTIME]  = 0;
     }
     return g_tty_ctl;
 }
@@ -550,6 +566,84 @@ void tty_set(int fd)
  * these left a pager sitting in the foreground of a pipeline whose reader had
  * already finished, holding the terminal against the person trying to type.
  */
+/* Waiting on several descriptors at once.
+ *
+ * Split in two, because only half of this is the kernel's business. A file on
+ * a disk is always ready - there is nothing to wait for and vfsd answers
+ * immediately - so those are settled here without a syscall, and only the
+ * pipes and the keyboard go down. If anything was ready on this side there is
+ * nothing to wait for at all, and the kernel is not asked even about the ones
+ * that could have blocked.
+ */
+int poll(struct pollfd* fds, unsigned long count, int timeout_ms)
+{
+    /* The kernel's own numbers, and which entry each came from. */
+    struct { int fd; short events; short revents; } down[64];
+    int index[64];
+    unsigned long n = 0;
+    int ready = 0;
+
+    start();
+    if (count > 64) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    for (unsigned long i = 0; i < count; ++i) {
+        fds[i].revents = 0;
+        if (!valid(fds[i].fd)) {
+            fds[i].revents = POLLNVAL;
+            ++ready;
+            continue;
+        }
+        switch (g_fds[fds[i].fd].kind) {
+        case K_KERNEL:
+            down[n].fd = g_fds[fds[i].fd].kfd;
+            down[n].events = fds[i].events;
+            down[n].revents = 0;
+            index[n] = (int)i;
+            ++n;
+            break;
+        default:
+            /* A file, or one of the /dev entries. Nothing about either can
+             * make a caller wait, so both directions are ready now. */
+            fds[i].revents = (short)(fds[i].events & (POLLIN | POLLOUT));
+            if (fds[i].revents != 0)
+                ++ready;
+            break;
+        }
+    }
+
+    /* Something is ready already, so nothing may block - not even the ones
+     * that could have. This is what makes a mixed set behave. */
+    if (ready > 0)
+        timeout_ms = 0;
+
+    if (n > 0) {
+        const long r = __syscall(SYS_poll, (long)down, (long)n,
+                                 timeout_ms, 0, 0);
+        if (r == -2) {
+            errno = EINTR;
+            return -1;
+        }
+        if (r < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        for (unsigned long i = 0; i < n; ++i)
+            if (down[i].revents != 0) {
+                fds[index[i]].revents = down[i].revents;
+                ++ready;
+            }
+    } else if (ready == 0 && timeout_ms > 0) {
+        /* Nothing the kernel could watch, and nothing ready: the only honest
+         * thing left is to wait out the clock. */
+        msleep((unsigned long)timeout_ms);
+    }
+
+    return ready;
+}
+
 int isatty(int fd)
 {
     start();
@@ -585,6 +679,47 @@ unsigned tty_control_create(void)
     g_tty_ctl = 0;
     tty_control();
     return g_tty_key;
+}
+
+int tcgetattr(int fd, struct termios* out)
+{
+    struct tty_control* c;
+    (void)fd;
+    start();
+    c = tty_control();
+    if (c == 0) {
+        errno = ENOTTY;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    out->c_lflag = c->lflag;
+    memcpy(out->c_cc, c->cc, NCCS);
+    return 0;
+}
+
+int tcsetattr(int fd, int when, const struct termios* in)
+{
+    struct tty_control* c;
+    (void)fd;
+    (void)when;     /* nothing is buffered on this side to drain or flush */
+    start();
+    c = tty_control();
+    if (c == 0) {
+        errno = ENOTTY;
+        return -1;
+    }
+    c->lflag = in->c_lflag;
+    memcpy(c->cc, in->c_cc, NCCS);
+    return 0;
+}
+
+void cfmakeraw(struct termios* t)
+{
+    t->c_iflag = 0;
+    t->c_oflag = 0;
+    t->c_lflag = 0;     /* no lines, no echo, no signals - all three at once */
+    t->c_cc[VMIN]  = 1;
+    t->c_cc[VTIME] = 0;
 }
 
 pid_t tcgetpgrp(int fd)
