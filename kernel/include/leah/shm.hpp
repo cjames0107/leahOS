@@ -27,7 +27,7 @@ namespace shm {
  * a desktop with a dozen servers, several windows and a handful of short-lived
  * programs runs out during ordinary use - at which point every later open
  * fails and the machine stops being able to read anything. */
-constexpr usize kMaxSegments = 256;
+constexpr usize kMaxSegments = 512;
 
 // The keys the window server and its clients agree on.
 constexpr u32 kWindowServerKey = 1;         // the control block

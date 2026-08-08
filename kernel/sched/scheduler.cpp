@@ -32,7 +32,13 @@ namespace {
  * most of the way there before a program forks anything - and eight children
  * at once, which the suite does deliberately, went over on two CPUs. Running
  * out is not an error anyone sees; fork simply starts failing. */
-constexpr usize kMaxTasks   = 96;
+/* Ninety-six was a number picked when the desktop was three programs. A task
+ * is about a kilobyte and a half - most of it the FPU state and the signal
+ * table - so this costs a third of a megabyte out of five hundred, and the
+ * alternative is a machine that stops being able to start anything. */
+constexpr usize kMaxTasks   = 256;
+static_assert(kMaxTasks <= kMaxTaskInfo,
+              "a snapshot must be allowed to ask for every task there can be");
 // "this CPU has not switched away from anything yet"
 constexpr u32 kNoPrevious   = 0xFFFFFFFFu;
 constexpr u32   kMaxSignals = signals::kMaxSignals;

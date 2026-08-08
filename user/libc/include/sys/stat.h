@@ -10,9 +10,14 @@
  * one: everything else resolves it on the way through, which is the whole
  * point of it. */
 #define S_IFLNK 2
+/* A name for a pipe. The file holds nothing: it exists so the pipe has a name
+ * two unrelated programs can both open, which is the one thing an ordinary
+ * pipe cannot give them. */
+#define S_IFIFO 3
 
 struct stat {
-    uint32_t st_type;       /* S_IFREG, S_IFDIR or S_IFLNK */
+    uint32_t st_type;       /* S_IFREG, S_IFDIR, S_IFLNK or S_IFIFO */
+    uint32_t st_ino;        /* which inode - unique, and how a FIFO is found */
     uint32_t st_mode;       /* permission bits, 0777 */
     uint64_t st_size;
     uint32_t st_uid;
@@ -67,6 +72,17 @@ long readlink(const char* path, char* out, unsigned long max);
 int getdents(const char* path, struct dirent* buffer, int max);
 
 int mkdir(const char* path);
+
+/* Make a name for a pipe.
+ *
+ * Two programs started separately cannot share an ordinary pipe: a pipe is
+ * found by inheritance, and they have no common ancestor to inherit from. A
+ * FIFO is the same pipe with a name on the filesystem, so both can find it.
+ *
+ * Opening one waits for the other end. That is deliberate and is what makes it
+ * a rendezvous - without it `echo hi > fifo` would finish before anything was
+ * there to receive what it wrote. */
+int mkfifo(const char* path, unsigned mode);
 
 /* Change a file's permission bits, or its owner. Only root, or the file's
  * owner, may chmod; only root may chown. -1 leaves a chown field alone. */

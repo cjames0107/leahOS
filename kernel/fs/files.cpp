@@ -33,6 +33,51 @@ struct Pipe {
 u64 read_channel(Pipe* p)  { return reinterpret_cast<u64>(p); }
 u64 write_channel(Pipe* p) { return reinterpret_cast<u64>(p) + 1; }
 
+/* --- named pipes -------------------------------------------------------------
+ *
+ * A FIFO is a pipe two unrelated processes can find. An ordinary pipe is found
+ * by inheritance - fork hands both ends down - which is no use to two programs
+ * started separately from a shell, and that is the whole reason FIFOs exist.
+ *
+ * They find each other by the inode number of the file on disk, which is the
+ * one name for it that is already unique and already agreed. The file itself
+ * holds nothing; it exists so the FIFO has a name, permissions and an owner,
+ * which is exactly what the filesystem is for. Everything that moves goes
+ * through the pipe here, and never touches the disk.
+ *
+ * The table is small on purpose: a FIFO with nobody at either end is not a
+ * FIFO, so entries live only as long as somebody has one open.
+ */
+constexpr usize kMaxNamedPipes = 16;
+
+struct NamedPipe {
+    bool  used;
+    u64   key;          // the inode number of the file that names it
+    Pipe* pipe;
+    /* Whether each end has *ever* been opened, not whether one is open now.
+     *
+     * An open for reading waits for a writer to arrive - and once one has,
+     * the wait is over for good, even if that writer has since finished and
+     * gone. Waiting on the live count instead means a writer that opens,
+     * writes and closes while the reader is between checks is never seen at
+     * all: the count goes up and back down, and the reader waits forever for
+     * something that already happened. The data is sitting in the buffer the
+     * whole time.
+     */
+    bool  seen_reader;
+    bool  seen_writer;
+};
+
+NamedPipe g_named[kMaxNamedPipes];
+
+NamedPipe* find_named(u64 key)
+{
+    for (usize i = 0; i < kMaxNamedPipes; ++i)
+        if (g_named[i].used && g_named[i].key == key)
+            return &g_named[i];
+    return nullptr;
+}
+
 i64 pipe_read(Pipe* p, void* buffer, usize count)
 {
     auto* out = static_cast<u8*>(buffer);
@@ -108,8 +153,17 @@ void release_pipe(Descriptor& d)
      * reader with no writers left is readable, at end of file. A poller that
      * was not told would sit through the one event it was waiting for. */
     scheduler::wake(scheduler::kPollChannel);
-    if (p->readers == 0 && p->writers == 0)
+    if (p->readers == 0 && p->writers == 0) {
+        /* And its name, if it had one. A FIFO with nobody at either end is
+         * not a FIFO; the next open makes a fresh one, which is right - what
+         * was in it belonged to the conversation that just ended. */
+        for (usize i = 0; i < kMaxNamedPipes; ++i)
+            if (g_named[i].used && g_named[i].pipe == p) {
+                g_named[i].used = false;
+                g_named[i].pipe = nullptr;
+            }
         kfree(p);
+    }
 }
 
 int alloc_fd()
@@ -264,6 +318,82 @@ i64 write(int fd, const void* buffer, usize count)
     default:
         return -1;
     }
+}
+
+/* Open one end of the FIFO named by `key`.
+ *
+ * The blocking is the part that surprises people, and it is deliberate: an
+ * open for reading waits for a writer and an open for writing waits for a
+ * reader. Without it `echo hi > fifo` would finish before anything was there
+ * to receive it, and the data would go into a pipe with no reader - which is
+ * to say, nowhere. Waiting is what makes the two ends a rendezvous.
+ */
+i64 open_fifo(u64 key, bool for_writing, bool nonblocking)
+{
+    const int fd = alloc_fd();
+    if (fd < 0)
+        return -1;
+
+    NamedPipe* named = find_named(key);
+    if (named == nullptr) {
+        for (usize i = 0; i < kMaxNamedPipes && named == nullptr; ++i)
+            if (!g_named[i].used)
+                named = &g_named[i];
+        if (named == nullptr)
+            return -1;                  // too many FIFOs open at once
+        auto* p = static_cast<Pipe*>(kmalloc(sizeof(Pipe)));
+        if (p == nullptr)
+            return -1;
+        memset(p, 0, sizeof(Pipe));
+        named->used = true;
+        named->key = key;
+        named->pipe = p;
+    }
+
+    Pipe* p = named->pipe;
+    Descriptor& d = table().fds[fd];
+    d.kind = Kind::Pipe;
+    d.flags = for_writing ? kWrite : kRead;
+    d.pipe = p;
+    if (for_writing) {
+        ++p->writers;
+        named->seen_writer = true;
+    } else {
+        ++p->readers;
+        named->seen_reader = true;
+    }
+
+    /* Now that this end is counted, wake anybody waiting for it and wait for
+     * the other - in that order, or two processes arriving together each miss
+     * the other's arrival and both wait forever. */
+    scheduler::wake(read_channel(p));
+    scheduler::wake(write_channel(p));
+    scheduler::wake(scheduler::kPollChannel);
+
+    if (!nonblocking) {
+        /* Waited for in short naps rather than indefinitely.
+         *
+         * The other end may arrive between the check above and the block
+         * below - two processes opening a FIFO at the same moment is the
+         * normal case, not a rare one - and a wake delivered in that window
+         * goes to a task that is not yet asleep. Blocking outright on a
+         * condition that has already been signalled is a machine that stops,
+         * and it stopped intermittently in exactly this way.
+         *
+         * The channel still does the work: an arrival wakes this immediately.
+         * The deadline only bounds what a missed one costs, which is one tick
+         * rather than the rest of the session. */
+        while (for_writing ? !named->seen_reader : !named->seen_writer) {
+            scheduler::block_on_until(for_writing ? write_channel(p)
+                                                  : read_channel(p), 1);
+            if (scheduler::signal_pending()) {
+                release_pipe(table().fds[fd]);
+                table().fds[fd].kind = Kind::None;
+                return kInterrupted;
+            }
+        }
+    }
+    return fd;
 }
 
 i64 pipe(int* out_fds)

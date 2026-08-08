@@ -15,7 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define MAX_TASKS 128
+#define MAX_TASKS 256
 
 static const char* state_name(unsigned state)
 {

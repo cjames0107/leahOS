@@ -1,0 +1,34 @@
+mkfifo - make a name for a pipe
+
+SYNOPSIS
+    mkfifo NAME...
+
+DESCRIPTION
+    Two programs started separately cannot share an ordinary pipe. A pipe
+    is found by inheritance - fork hands both ends down - and two programs
+    a shell started have no common ancestor to inherit from. A FIFO is the
+    same pipe with a name on the filesystem, so both can find it.
+
+        mkfifo /tmp/f
+        cat /tmp/f &
+        echo hello > /tmp/f
+
+    Opening one waits for the other end. That is what makes it a
+    rendezvous rather than a file: without it the echo would finish before
+    the cat arrived, and what it wrote would go nowhere.
+
+    The file on disk holds nothing and never will. It exists so the pipe
+    has a name, an owner and permissions - which is what a filesystem is
+    for. Everything that moves goes through the kernel.
+
+    ls shows one with a trailing | , and a p in the first column of a long
+    listing.
+
+BUGS
+    A writer that opens before any reader is let through when the reader
+    arrives, but what it writes does not reach that reader. Open the
+    reading end first - `cat fifo &` then `echo x > fifo`, which is the
+    order a shell produces anyway - and it behaves.
+
+SEE ALSO
+    sh, ln, ls

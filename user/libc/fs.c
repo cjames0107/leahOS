@@ -43,7 +43,7 @@
 #include <unistd.h>
 #include <vfsd.h>
 
-#define FD_MAX    32
+#define FD_MAX    64
 #define PATH_MAX  256
 
 #define K_NONE   0
@@ -783,6 +783,42 @@ int open(const char* path, int flags)
         is_dir = a.word[1] == VFS_KIND_DIR;
     }
 
+    /* A FIFO is not read from the disk at all. The file on disk is a name, a
+     * mode and an owner; what flows between the two ends is a kernel pipe,
+     * and both ends find it by the inode number - the one identifier for this
+     * file that is unique and that both sides already agree on.
+     *
+     * The open blocks until the other end arrives, which is the whole point:
+     * without it a writer would finish before there was anybody to write to. */
+    if (exists && a.word[1] == VFS_KIND_FIFO) {
+        unsigned ino = 0;
+        if (a.bytes >= 16)
+            memcpy(&ino, a.data + 12, sizeof(ino));
+        if (ino == 0) {
+            errno = EIO;
+            return -1;
+        }
+        fd = alloc_fd();
+        if (fd < 0) {
+            errno = EMFILE;
+            return -1;
+        }
+        const long kfd = __syscall(SYS_openfifo, (long)ino,
+                                   (flags & O_WRONLY) != 0,
+                                   (flags & O_NONBLOCK) != 0, 0, 0);
+        if (kfd < 0) {
+            errno = kfd == -4 ? EINTR : EIO;
+            return -1;
+        }
+        g_fds[fd].kind   = K_KERNEL;
+        g_fds[fd].kfd    = (int)kfd;
+        g_fds[fd].flags  = (unsigned)flags;
+        g_fds[fd].pos_id = -1;
+        g_fds[fd].pos    = 0;
+        g_fds[fd].offset = 0;
+        return fd;
+    }
+
     if (!exists) {
         if ((flags & O_CREAT) == 0) {
             errno = ENOENT;
@@ -1010,6 +1046,7 @@ static int stat_either(const char* path, struct stat* out, unsigned tag)
     out->st_size = (uint64_t)a.word[0];
     out->st_type = a.word[1] == VFS_KIND_DIR  ? S_IFDIR
                  : a.word[1] == VFS_KIND_LINK ? S_IFLNK
+                 : a.word[1] == VFS_KIND_FIFO ? S_IFIFO
                                               : S_IFREG;
     out->st_mode = (uint32_t)a.word[2];
     out->st_uid  = (uint32_t)((a.word[3] >> 16) & 0xFFFF);
@@ -1018,12 +1055,18 @@ static int stat_either(const char* path, struct stat* out, unsigned tag)
      * An older vfsd that sends none leaves them at zero, which reads as 1970 -
      * wrong in a way that is obvious rather than plausible. */
     out->st_mtime = out->st_ctime = out->st_atime = 0;
+    out->st_ino = 0;
     if (a.bytes >= 12) {
         unsigned stamps[3];
         memcpy(stamps, a.data, sizeof(stamps));
         out->st_mtime = (int64_t)stamps[0];
         out->st_ctime = (int64_t)stamps[1];
         out->st_atime = (int64_t)stamps[2];
+    }
+    if (a.bytes >= 16) {
+        unsigned ino;
+        memcpy(&ino, a.data + 12, sizeof(ino));
+        out->st_ino = ino;
     }
     return 0;
 }
@@ -1076,6 +1119,21 @@ int symlink(const char* target, const char* path)
     /* The target is not resolved: it is stored exactly as written, and may be
      * relative, or name something that does not exist yet or ever. */
     return vfs_pair(VFS_SYMLINK, target, resolved);
+}
+
+int mkfifo(const char* path, unsigned mode)
+{
+    char resolved[PATH_MAX];
+    struct ipc_message a;
+    (void)mode;     /* one mode for now: 0644, as create uses */
+
+    start();
+    __fd_resolve(path, resolved);
+    if (vfs_call(VFS_MKFIFO, resolved, 0, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    return from_vfs(a.word[0]) < 0 ? -1 : 0;
 }
 
 int link(const char* existing, const char* path)
@@ -1149,6 +1207,7 @@ int getdents(const char* path, struct dirent* buffer, int max)
             break;
         buffer[n].d_type = a.word[0] == VFS_KIND_DIR  ? S_IFDIR
                          : a.word[0] == VFS_KIND_LINK ? S_IFLNK
+                         : a.word[0] == VFS_KIND_FIFO ? S_IFIFO
                                                       : S_IFREG;
         buffer[n].d_size = (uint64_t)a.word[1];
         buffer[n].d_mode = (unsigned)a.word[2];

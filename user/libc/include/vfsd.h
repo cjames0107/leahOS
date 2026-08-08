@@ -39,6 +39,7 @@ struct vfs_shared {
 #define VFS_LSTAT   16  /* stat, but of the link itself rather than its target */
 #define VFS_STATFS  17  /* -> w0 = block size, w1 = blocks, w2 = free blocks  */
 #define VFS_LINK    18  /* data = target\0path\0 -> a second name, one inode  */
+#define VFS_MKFIFO  19  /* data = path -> a name for a pipe, holding nothing  */
 
 #define VFS_KIND_FILE 0
 #define VFS_KIND_DIR  1
@@ -46,5 +47,9 @@ struct vfs_shared {
  * through, so a caller only ever sees this kind from LIST and LSTAT - the two
  * that are asking about the entry rather than about what it leads to. */
 #define VFS_KIND_LINK 2
+/* A name for a pipe. The file holds nothing and never will: it exists so the
+ * pipe has a name, an owner and permissions, which is what a filesystem is
+ * for. Everything that moves goes through the kernel, not the disk. */
+#define VFS_KIND_FIFO 3
 
 #endif

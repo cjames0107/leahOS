@@ -495,10 +495,14 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
 
     case ProcList: {
         // The count is capped by the caller's buffer, which is validated
-        // against the whole array rather than per entry.
+        // against the whole array rather than per entry. The ceiling is the
+        // task limit itself: a smaller one silently refuses a caller that
+        // asked for the whole table, which is what every caller wants and
+        // what ps and /proc both did the moment the limit went up.
         const u32 max = static_cast<u32>(frame->rsi);
         const u64 bytes = static_cast<u64>(max) * sizeof(scheduler::TaskInfo);
-        if (max == 0 || max > 128 || !user_range_ok(frame->rdi, bytes)) {
+        if (max == 0 || max > scheduler::kMaxTaskInfo ||
+            !user_range_ok(frame->rdi, bytes)) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
@@ -1214,6 +1218,11 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         frame->rax = static_cast<u64>(ready);
         break;
     }
+
+    case OpenFifo:
+        frame->rax = static_cast<u64>(
+            files::open_fifo(frame->rdi, frame->rsi != 0, frame->rdx != 0));
+        break;
 
     case LoadAvg: {
         if (!user_range_ok(frame->rdi, sizeof(u64) * 3)) {

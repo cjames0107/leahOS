@@ -449,6 +449,7 @@ static unsigned dir_search(const struct inode* dir, const char* name,
                     if (kind_out != 0)
                         *kind_out = (type == 2) ? VFS_KIND_DIR
                                   : (type == 7) ? VFS_KIND_LINK
+                                  : (type == 5) ? VFS_KIND_FIFO
                                                 : VFS_KIND_FILE;
                     return ino;
                 }
@@ -464,6 +465,7 @@ static unsigned dir_search(const struct inode* dir, const char* name,
 #define MODE_DIR      0x4000u
 #define MODE_LINK     0xA000u
 #define MODE_FILE     0x8000u
+#define MODE_FIFO     0x1000u
 
 /* Where a symbolic link points.
  *
@@ -493,7 +495,7 @@ static int read_link(const struct inode* in, char* out, unsigned max)
  * has this limit and they are all small; a chain longer than a handful is a
  * loop somebody made by accident, and following it forever is how a
  * filesystem server stops answering. */
-#define MAX_LINK_DEPTH 8
+#define MAX_LINK_DEPTH 16
 
 /* Walk a path to the inode it names.
  *
@@ -770,6 +772,10 @@ static int split_path(const char* path, char* parent, char* last)
  * a directory, which is a third kind of thing to create and otherwise exactly
  * the same job - the same parent lookup, the same allocation, the same entry
  * added at the end. */
+#define MAKE_FILE 0
+#define MAKE_DIR  1
+#define MAKE_FIFO 2
+
 static int create_node(const char* path, int is_dir, const char* link_to)
 {
     char parent[256], name[64];
@@ -784,13 +790,16 @@ static int create_node(const char* path, int is_dir, const char* link_to)
     if (dir_search(&dir, name, 0, 0, 0) != 0)
         return -EEXIST;
 
-    const unsigned ino = alloc_inode(is_dir);
+    const unsigned ino = alloc_inode(is_dir == MAKE_DIR);
     if (ino == 0)
         return -ENOSPC;                 /* the inode table is full */
 
     struct inode fresh;
     memset(&fresh, 0, sizeof(fresh));
-    fresh.mode = is_dir ? (0040755) : link_to != 0 ? (0120777) : (0100644);
+    fresh.mode = is_dir == MAKE_DIR  ? 0040755
+               : is_dir == MAKE_FIFO ? 0010644
+               : link_to != 0        ? 0120777
+                                     : 0100644;
     fresh.size = 0;
     touch_inode(&fresh, 1);
     /* An empty extent root: the magic, no entries, and room for four. */
@@ -827,10 +836,18 @@ static int create_node(const char* path, int is_dir, const char* link_to)
         return 0;
     }
 
-    if (write_inode(ino, &fresh, is_dir ? 2u : 1u) != 0)
+    if (write_inode(ino, &fresh, is_dir == MAKE_DIR ? 2u : 1u) != 0)
         return -EIO;
 
-    if (is_dir) {
+    if (is_dir == MAKE_FIFO) {
+        /* Nothing else to make. The inode is the whole file: a FIFO holds no
+         * data and never grows, so there is no extent tree to build. */
+        if (dir_add(&dir, dir_ino, name, ino, 5) != 0)
+            return -EIO;
+        return 0;
+    }
+
+    if (is_dir == MAKE_DIR) {
         /* A directory is not empty on disk: it holds itself and its parent. */
         const unsigned long phys = extend(&fresh, ino);
         if (phys == 0)
@@ -848,9 +865,9 @@ static int create_node(const char* path, int is_dir, const char* link_to)
             return -EIO;
     }
 
-    if (dir_add(&dir, dir_ino, name, ino, is_dir ? 2 : 1) != 0)
+    if (dir_add(&dir, dir_ino, name, ino, is_dir == MAKE_DIR ? 2 : 1) != 0)
         return -EIO;
-    if (is_dir) {
+    if (is_dir == MAKE_DIR) {
         /* The parent gained a ".." pointing at it. */
         unsigned long block; unsigned at;
         if (inode_location(dir_ino, &block, &at) == 0 &&
@@ -864,7 +881,7 @@ static int create_node(const char* path, int is_dir, const char* link_to)
 
 static int create(const char* path, int is_dir)
 {
-    return create_node(path, is_dir, 0);
+    return create_node(path, is_dir ? MAKE_DIR : MAKE_FILE, 0);
 }
 
 /* A second name for a file that already exists.
@@ -968,6 +985,15 @@ static const struct mount_entry kMounts[] = {
 
 #define PROC_MAX 4096
 
+/* One task list, not one per function.
+ *
+ * Two hundred and fifty-six of these is eighteen kilobytes, and three of the
+ * routines below wanted their own copy on the stack - which is how raising the
+ * task limit turned every question about /proc/<pid> into a stack overflow in
+ * this server while the fixed files carried on working. A server that answers
+ * one request at a time can share one buffer. */
+static struct proc_info g_tasks[256]; 
+
 static int is_proc(const char* path)
 {
     return strncmp(path, "/proc", 5) == 0 &&
@@ -1014,10 +1040,10 @@ static int proc_contents(const char* path, char* out, unsigned max)
     const unsigned pid = proc_pid_of(path, &rest);
 
     if (pid != 0) {
-        struct proc_info tasks[96];
-        const int n = proc_list(tasks, 96);
+        
+        const int n = proc_list(g_tasks, 256);
         for (int i = 0; i < n; ++i) {
-            if (tasks[i].pid != pid)
+            if (g_tasks[i].pid != pid)
                 continue;
             if (strcmp(rest, "status") != 0)
                 return -1;
@@ -1031,11 +1057,11 @@ static int proc_contents(const char* path, char* out, unsigned max)
                             "state\t%s\n"
                             "ticks\t%lu\n"
                             "memory\t%lu kB\n",
-                            tasks[i].name, tasks[i].pid, tasks[i].parent,
-                            tasks[i].pgid, tasks[i].sid, tasks[i].uid,
-                            state_word(tasks[i].state),
-                            (unsigned long)tasks[i].ticks,
-                            (unsigned long)(tasks[i].bytes / 1024));
+                            g_tasks[i].name, g_tasks[i].pid, g_tasks[i].parent,
+                            g_tasks[i].pgid, g_tasks[i].sid, g_tasks[i].uid,
+                            state_word(g_tasks[i].state),
+                            (unsigned long)g_tasks[i].ticks,
+                            (unsigned long)(g_tasks[i].bytes / 1024));
         }
         return -1;
     }
@@ -1108,10 +1134,10 @@ static int proc_kind(const char* path, unsigned* kind, unsigned long* size)
         const unsigned pid = proc_pid_of(path, &rest);
         if (pid != 0 && rest[0] == '\0') {
             /* A process's own directory exists exactly while it does. */
-            struct proc_info tasks[96];
-            const int n = proc_list(tasks, 96);
+            
+            const int n = proc_list(g_tasks, 256);
             for (int i = 0; i < n; ++i)
-                if (tasks[i].pid == pid) {
+                if (g_tasks[i].pid == pid) {
                     *kind = VFS_KIND_DIR;
                     *size = 0;
                     return 0;
@@ -1146,18 +1172,18 @@ static int proc_entry(const char* path, unsigned index, char* name,
             *size = len < 0 ? 0 : (unsigned long)len;
             return 0;
         }
-        struct proc_info tasks[96];
-        const int n = proc_list(tasks, 96);
+        
+        const int n = proc_list(g_tasks, 256);
         const unsigned want = index - PROC_FILE_COUNT;
         unsigned seen = 0;
         for (int i = 0; i < n; ++i) {
             /* Processes, not threads: /proc/N is a process, and a thread is
              * not one however much it looks like a task from in here. */
-            if (tasks[i].pid != tasks[i].tgid)
+            if (g_tasks[i].pid != g_tasks[i].tgid)
                 continue;
             if (seen++ != want)
                 continue;
-            snprintf(name, 64, "%u", tasks[i].pid);
+            snprintf(name, 64, "%u", g_tasks[i].pid);
             *kind = VFS_KIND_DIR;
             *size = 0;
             return 0;
@@ -1461,6 +1487,8 @@ int main(void)
                     r.word[0] = (long)n;
                 }
             }
+        } else if (m.tag == VFS_MKFIFO) {
+            r.word[0] = create_node((const char*)m.data, MAKE_FIFO, 0);
         } else if (m.tag == VFS_LINK) {
             /* Two strings in the data, the existing name first - the same
              * shape as SYMLINK, and for the same reason. */
@@ -1478,11 +1506,14 @@ int main(void)
             struct inode in;
             const int follow = m.tag == VFS_STAT;
             r.word[0] = -ENOENT;
-            if ((follow ? lookup((const char*)m.data, &in)
-                        : lookup_nofollow((const char*)m.data, &in)) != 0) {
+            const unsigned lookup_ino =
+                follow ? lookup((const char*)m.data, &in)
+                       : lookup_nofollow((const char*)m.data, &in);
+            if (lookup_ino != 0) {
                 r.word[0] = (long)in.size;
                 r.word[1] = MODE_KIND(in.mode) == MODE_DIR  ? VFS_KIND_DIR
                           : MODE_KIND(in.mode) == MODE_LINK ? VFS_KIND_LINK
+                          : MODE_KIND(in.mode) == MODE_FIFO ? VFS_KIND_FIFO
                                                             : VFS_KIND_FILE;
                 r.word[2] = in.mode & 0777;
                 /* Both owners in one word: they are always wanted together
@@ -1491,9 +1522,14 @@ int main(void)
                 /* The timestamps go in the data, which stat has no other use
                  * for - the four words are spent. */
                 {
-                    unsigned stamps[3] = { in.mtime, in.ctime, in.atime };
-                    memcpy(r.data, stamps, sizeof(stamps));
-                    r.bytes = sizeof(stamps);
+                    /* And the inode number after them: it is the one name for
+                     * a file that is unique and already agreed by both sides,
+                     * which is what the two ends of a FIFO need to find each
+                     * other - the pipe is in the kernel and has no name. */
+                    unsigned extra[4] = { in.mtime, in.ctime, in.atime,
+                                          lookup_ino };
+                    memcpy(r.data, extra, sizeof(extra));
+                    r.bytes = sizeof(extra);
                 }
             }
         } else if (m.tag == VFS_LIST) {

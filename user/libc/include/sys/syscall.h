@@ -79,6 +79,7 @@
 #define SYS_uptime      87
 #define SYS_poll        88
 #define SYS_loadavg     89
+#define SYS_openfifo    90
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

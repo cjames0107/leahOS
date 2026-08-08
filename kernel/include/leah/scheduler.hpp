@@ -266,6 +266,10 @@ u32 alive_count();
 // A snapshot of the task table, for a task manager to show. Copied out under
 // the kernel lock rather than handed out by reference: the table is live, and a
 // reader walking it while a task exits would see a slot change underneath it.
+// The most a snapshot may be asked for. Tracks the task limit, so a caller
+// sizing its buffer to "as many as there can be" is never refused.
+constexpr u32 kMaxTaskInfo = 256;
+
 struct TaskInfo {
     u32 pid;
     u32 tgid;

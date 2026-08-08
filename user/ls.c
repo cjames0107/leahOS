@@ -7,7 +7,10 @@
 static void mode_string(unsigned mode, unsigned type, char* out)
 {
     static const char* kBits = "rwx";
-    out[0] = type == S_IFDIR ? 'd' : type == S_IFLNK ? 'l' : '-';
+    out[0] = type == S_IFDIR  ? 'd'
+           : type == S_IFLNK  ? 'l'
+           : type == S_IFIFO  ? 'p'
+                              : '-';
     for (int i = 0; i < 9; ++i)
         out[1 + i] = (mode & (0400 >> i)) ? kBits[i % 3] : '-';
     out[10] = '\0';
@@ -49,6 +52,8 @@ int main(int argc, char** argv)
                 printf("%s/\n", entries[i].d_name);
             else if (is_link)
                 printf("%s@\n", entries[i].d_name);
+            else if (entries[i].d_type == S_IFIFO)
+                printf("%s|\n", entries[i].d_name);
             else
                 printf("%s\t%lu\n", entries[i].d_name,
                        (unsigned long)entries[i].d_size);

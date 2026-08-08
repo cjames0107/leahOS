@@ -8,7 +8,10 @@
 
 namespace files {
 
-constexpr int   kMaxFds   = 16;
+/* Sixteen was enough while a process had three descriptors and a file. A
+ * shell running a long pipeline, or a server holding a client each, wants
+ * more, and the table is per-task so the cost is paid by every task. */
+constexpr int   kMaxFds   = 32;
 constexpr usize kPathMax  = 128;
 
 // A read or a write that a signal cut short, as a negated errno - the same
@@ -77,6 +80,12 @@ constexpr u32 kPollBad  = 1u << 5;      // not an open descriptor
 
 // What `fd` could do this instant, as a mask of the above.
 u32 readiness(int fd);
+
+// Open one end of the FIFO named by `key`, which is the inode number of the
+// file that names it. Blocks until the other end is opened, unless
+// `nonblocking` - an open for reading with no writer is not an empty pipe, it
+// is a conversation that has not started.
+i64 open_fifo(u64 key, bool for_writing, bool nonblocking);
 i64 write(int fd, const void* buffer, usize count);
 void set_console_echo(bool on);
 

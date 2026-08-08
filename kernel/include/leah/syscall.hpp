@@ -111,6 +111,7 @@ enum Number : u64 {
     Uptime      = 87,  // milliseconds since the machine started
     Poll        = 88,  // which of these descriptors are ready
     LoadAvg     = 89,  // how many tasks wanted to run, smoothed
+    OpenFifo    = 90,  // one end of a named pipe, by the inode that names it
 };
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.

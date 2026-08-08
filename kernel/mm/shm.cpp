@@ -40,12 +40,12 @@ Segment g_segments[kMaxSegments];
  *
  * The generation counts allocations of the slot, so a stale id fails to
  * validate instead of naming a stranger. Eight bits of slot and the rest
- * generation, which wraps after sixteen million opens of one slot - long
- * enough that the wrap is not the thing to worry about.
+ * generation, which wraps after two million opens of one slot - long enough
+ * that the wrap is not the thing to worry about.
  */
-static_assert(kMaxSegments <= 256, "the id encoding gives the slot eight bits");
+static_assert(kMaxSegments <= 1024, "the id encoding gives the slot ten bits");
 
-constexpr i32 kSlotBits = 8;
+constexpr i32 kSlotBits = 10;
 constexpr i32 kSlotMask = (1 << kSlotBits) - 1;
 
 i32 make_id(usize slot, u32 generation)

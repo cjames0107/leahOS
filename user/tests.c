@@ -32,6 +32,28 @@
 
 static int g_failures;
 
+/* Each section announces itself on the serial console as well as the screen.
+ *
+ * A run that stops leaves the screen showing whatever it had got to, which is
+ * only useful if somebody is watching at that moment - and a hang is exactly
+ * the case where the screenshot comes far too late. The console is readable
+ * from outside the machine and survives the guest ceasing to answer, so a run
+ * that never finishes still says which section it never finished.
+ */
+static int g_console = -1;
+
+static void section(const char* name)
+{
+    printf("%s:\n", name);
+    if (g_console < 0)
+        g_console = open("/dev/console", O_WRONLY);
+    if (g_console >= 0) {
+        char line[96];
+        const int n = snprintf(line, sizeof(line), "tests: %s\n", name);
+        write(g_console, line, (unsigned long)n);
+    }
+}
+
 /* The names that failed, kept so the summary can list them rather than only
  * count them - a number tells you to go looking, a name tells you where. */
 #define MAX_FAILED 24
@@ -63,7 +85,7 @@ static void check_says(const char* what, const char* got, const char* want)
 
 static void test_mmap(void)
 {
-    printf("mmap:\n");
+    section("mmap");
 
     /* A plain anonymous mapping, big enough to span several pages. */
     const size_t len = 3 * 4096 + 100;
@@ -121,7 +143,7 @@ static void worker(void* arg)
 
 static void test_threads(void)
 {
-    printf("threads:\n");
+    section("threads");
 
     const int self = gettid();
     check("gettid and getpid agree on the main thread", self == getpid());
@@ -191,7 +213,7 @@ static void racer(void* arg)
 
 static void test_mutex(void)
 {
-    printf("thread synchronisation:\n");
+    section("thread synchronisation");
 
     check("an uncontended lock is taken", mutex_trylock(&g_lock) == 0);
     check("a held lock refuses trylock", mutex_trylock(&g_lock) == -1);
@@ -218,7 +240,7 @@ static void test_mutex(void)
 
 static void test_cow(void)
 {
-    printf("copy-on-write fork:\n");
+    section("copy-on-write fork");
 
     /* A big writable region, filled with a known pattern. After fork both sides
      * see it, but neither must see the other's writes. */
@@ -282,7 +304,7 @@ static void catcher(int signo)
 
 static void test_shm(void)
 {
-    printf("shared memory:\n");
+    section("shared memory");
 
     const int id = shm_open(4242, 4096, 0);
     check("a segment can be created", id >= 0);
@@ -323,7 +345,7 @@ static void test_shm(void)
 
 static void test_signals(void)
 {
-    printf("signals:\n");
+    section("signals");
 
     g_caught = 0;
     g_caught_signo = 0;
@@ -431,7 +453,7 @@ static void test_signals(void)
 
 static void test_permissions(void)
 {
-    printf("users and permissions:\n");
+    section("users and permissions");
 
     check("we start as root", getuid() == 0);
 
@@ -502,7 +524,7 @@ static void test_permissions(void)
 
 static void test_accounts(void)
 {
-    printf("accounts and authentication:\n");
+    section("accounts and authentication");
 
     char name[32] = {};
     check("uid 0 resolves to root",
@@ -602,7 +624,7 @@ static void test_accounts(void)
 
 static void test_tcp(void)
 {
-    printf("tcp:\n");
+    section("tcp");
 
     /* The failure path first, and without needing anything to be reachable:
      * a port nothing listens on must be refused rather than hang or succeed. */
@@ -700,7 +722,7 @@ static void ipc_server(void)
 
 static void test_ipc(void)
 {
-    printf("message passing:\n");
+    section("message passing");
 
     const int pid = fork();
     if (pid == 0)
@@ -770,7 +792,7 @@ static unsigned pci_read(unsigned bus, unsigned slot, unsigned fn, unsigned off)
 
 static void test_driver_abi(void)
 {
-    printf("driver privileges:\n");
+    section("driver privileges");
 
     /* Before the grant, touching a port must fault. Done in a child, because
      * the point of the test is that it dies. */
@@ -837,7 +859,7 @@ static void test_driver_abi(void)
  */
 static void test_exit_churn(void)
 {
-    printf("exit and reap:\n");
+    section("exit and reap");
 
     int reaped = 0;
     for (int i = 0; i < 200; ++i) {
@@ -885,7 +907,7 @@ static uint32_t pixel_hash(const uint32_t* px, unsigned long n)
 
 static void test_png(void)
 {
-    printf("png decoding:\n");
+    section("png decoding");
 
     /* Every icon in the set, which between them use both fixed and dynamic
      * Huffman codes and all of the row filters. */
@@ -1029,7 +1051,7 @@ static void fp_signal_handler(int signo)
 
 static void test_float(void)
 {
-    printf("floating point:\n");
+    section("floating point");
 
     volatile double a = 1.0, b = 3.0;
     check("division produces a fraction", a / b > 0.3333 && a / b < 0.3334);
@@ -1119,7 +1141,7 @@ static int close_to(double got, double want, double tolerance)
 
 static void test_math(void)
 {
-    printf("maths:\n");
+    section("maths");
 
     /* Square root is the hardware's, so it is exact where the answer is. */
     check("sqrt is exact on squares",
@@ -1374,7 +1396,7 @@ static int mentions(const char* haystack, const char* needle)
 
 static void test_sound(void)
 {
-    printf("sound files:\n");
+    section("sound files");
 
     /* A second of a square wave at 48 kHz stereo: what comes out should be
      * exactly what went in, because no conversion is needed. */
@@ -1512,7 +1534,7 @@ static int is_directory(const char* path)
 
 static void test_layout(void)
 {
-    printf("filesystem layout:\n");
+    section("filesystem layout");
 
     /* Every directory the FHS calls for, including the ones nothing puts
      * anything in yet: an empty /srv is somewhere for the next person to put
@@ -1581,7 +1603,7 @@ static void test_layout(void)
 
 static void test_devices(void)
 {
-    printf("device files:\n");
+    section("device files");
 
     char buffer[64];
 
@@ -1633,7 +1655,7 @@ static void test_devices(void)
 
 static void test_time(void)
 {
-    printf("time:\n");
+    section("time");
 
     const time_t now = time(0);
     /* Any date this system could plausibly be running on. 1.7e9 is 2023;
@@ -1731,7 +1753,7 @@ static void test_time(void)
 
 static void test_file_times(void)
 {
-    printf("file timestamps:\n");
+    section("file timestamps");
 
     const time_t before = time(0);
     const int fd = open("/tmp/stamped", O_WRONLY | O_CREAT | O_TRUNC);
@@ -1778,7 +1800,7 @@ static void test_file_times(void)
 
 static void test_errno(void)
 {
-    printf("error reporting:\n");
+    section("error reporting");
 
     /* The four failures that "cannot open" used to cover, told apart. */
     errno = 0;
@@ -1840,7 +1862,7 @@ static void test_errno(void)
 
 static void test_streams(void)
 {
-    printf("buffered streams:\n");
+    section("buffered streams");
 
     FILE* out = fopen("/tmp/stream.txt", "w");
     check("a stream opens for writing", out != 0);
@@ -1932,7 +1954,7 @@ static void test_open_descriptions(void)
     char back[64];
     int fd, status = 0;
 
-    printf("open file descriptions:\n");
+    section("open file descriptions");
 
     fd = open("/tmp/ofd.txt", O_WRONLY | O_CREAT | O_TRUNC);
     check("a file opens for writing", fd >= 0);
@@ -2011,7 +2033,7 @@ static void check_re(const char* pattern, const char* text, int want)
 
 static void test_regex(void)
 {
-    printf("regular expressions:\n");
+    section("regular expressions");
 
     check_re("abc", "xxabcxx", 1);
     check_re("^abc", "xabc", 0);
@@ -2070,7 +2092,7 @@ static void test_regex(void)
 
 static void test_sscanf(void)
 {
-    printf("sscanf:\n");
+    section("sscanf");
 
     int a = 0, b = 0;
     check("two numbers", sscanf("12 34", "%d %d", &a, &b) == 2 &&
@@ -2119,7 +2141,7 @@ static void test_poll(void)
 {
     struct pollfd watch[3];
     int fds[2];
-    printf("poll:\n");
+    section("poll");
 
     check("a pipe can be made", pipe(fds) == 0);
 
@@ -2230,7 +2252,7 @@ static void test_poll(void)
 static void test_termios(void)
 {
     struct termios saved, t;
-    printf("terminal settings:\n");
+    section("terminal settings");
 
     if (tcgetattr(0, &saved) != 0) {
         check("there is a terminal to ask about", 0);
@@ -2269,7 +2291,7 @@ static void test_symlinks(void)
 {
     char target[256];
     struct stat st;
-    printf("symbolic links:\n");
+    section("symbolic links");
 
     unlink("/tmp/link");
     unlink("/tmp/real.txt");
@@ -2365,7 +2387,7 @@ static void test_symlinks(void)
 static void test_hard_links(void)
 {
     struct stat a, b;
-    printf("hard links:\n");
+    section("hard links");
 
     unlink("/tmp/one");
     unlink("/tmp/two");
@@ -2421,6 +2443,74 @@ static void test_hard_links(void)
           link("/tmp/hldir", "/tmp/hldir2") != 0);
     unlink("/tmp/hldir2");
     unlink("/tmp/hldir");
+}
+
+
+/* --- named pipes ----------------------------------------------------------------
+ *
+ * A pipe two unrelated programs can find. An ordinary pipe is found by
+ * inheritance, which is no use to two programs started separately - and that
+ * is the whole reason FIFOs exist.
+ */
+
+static void test_fifos(void)
+{
+    struct stat st;
+    section("named pipes");
+
+    unlink("/tmp/fifo");
+    check("a fifo can be made", mkfifo("/tmp/fifo", 0644) == 0);
+    check("and is a fifo, not a file",
+          stat("/tmp/fifo", &st) == 0 && st.st_type == S_IFIFO);
+    check("holding nothing", st.st_size == 0);
+    check("with an inode number to find it by", st.st_ino != 0);
+
+    /* Opening one end waits for the other, which is what makes it a
+     * rendezvous. The child opens for writing while this side opens for
+     * reading; neither returns until both have arrived. */
+    const int pid = fork();
+    if (pid == 0) {
+        const int w = open("/tmp/fifo", O_WRONLY);
+        if (w >= 0) {
+            write(w, "through the fifo\n", 17);
+            close(w);
+        }
+        exit(w >= 0 ? 0 : 1);
+    }
+
+    char back[64];
+    back[0] = '\0';
+    const int r = open("/tmp/fifo", O_RDONLY);
+    check("the reading end opens once a writer arrives", r >= 0);
+    if (r >= 0) {
+        long n = read(r, back, sizeof(back) - 1);
+        if (n < 0)
+            n = 0;
+        back[n] = '\0';
+        close(r);
+    }
+    check_says("and carries what was written", back, "through the fifo\n");
+
+    int status = 0;
+    wait(&status);
+    check("the writer finished cleanly",
+          WIFEXITED(status) && WEXITSTATUS(status) == 0);
+
+    /* Nothing was written to the disk: the file is a name, and the data went
+     * through the kernel. */
+    check("the fifo on disk is still empty",
+          stat("/tmp/fifo", &st) == 0 && st.st_size == 0);
+
+    /* The other ordering - a writer that opens first and waits for a reader -
+     * is not covered here yet. It opens and it is let through, but what it
+     * writes does not reach the reader, and that is an open defect rather
+     * than a thing this test has decided not to check. The ordering the shell
+     * actually produces, `cat fifo &` before `echo > fifo`, is the one above
+     * and it works.
+     */
+
+    check("and it can be removed", unlink("/tmp/fifo") == 0);
+    check("after which it is gone", stat("/tmp/fifo", &st) != 0);
 }
 
 
@@ -2514,7 +2604,7 @@ static void test_procfs(void)
 
 static void test_jobs(void)
 {
-    printf("job control:\n");
+    section("job control");
 
     const int mine = (int)getpgrp();
     check("a process is in some process group", mine > 0);
@@ -2618,7 +2708,7 @@ static void test_jobs(void)
 
 static void test_environment(void)
 {
-    printf("environment:\n");
+    section("environment");
 
     /* What login set. A session with no PATH is one where nothing can be
      * found by name, so this is not decoration. */
@@ -2692,6 +2782,18 @@ static int shell_says(const char* command, char* out, int max)
      * terminal and two in the file - and a command ending in a comment
      * swallows it entirely. Redirecting the shell itself catches everything it
      * writes, which is what is being measured. */
+    /* Each one announced before it runs. The shell section forks a shell per
+     * check and is where a hang is most likely to hide; the console says which
+     * command was in flight when everything stopped. */
+    if (g_console < 0)
+        g_console = open("/dev/console", O_WRONLY);
+    if (g_console >= 0) {
+        char note[160];
+        const int k = snprintf(note, sizeof(note), "tests:   sh -c %s\n",
+                               command);
+        write(g_console, note, (unsigned long)k);
+    }
+
     const int pid = fork();
     if (pid == 0) {
         const int out_fd = open("/tmp/shout", O_WRONLY | O_CREAT | O_TRUNC);
@@ -2724,7 +2826,7 @@ static int shell_says(const char* command, char* out, int max)
 
 static void test_shell(void)
 {
-    printf("shell:\n");
+    section("shell");
     char out[512];
 
     shell_says("echo hello", out, sizeof(out));
@@ -2835,6 +2937,7 @@ int main(void)
     test_termios();
     test_symlinks();
     test_hard_links();
+    test_fifos();
     test_procfs();
     test_jobs();
     test_environment();
