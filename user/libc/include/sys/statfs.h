@@ -20,4 +20,16 @@ struct statfs {
  * size to report and should not be made to invent one. */
 int statfs(const char* path, struct statfs* out);
 
+
+/* Check the mounted filesystem, and optionally put right what can be put
+ * right. Returns the number of problems found, or -1 if the check could not
+ * run; `report` is filled with the findings as lines of text and `fixed` with
+ * how many of the problems were repaired.
+ *
+ * The check runs inside the filesystem server, which is the only thing that
+ * knows the layout. That means it cannot examine a filesystem that failed to
+ * mount - the case a checker is most wanted for - and it sees the disk as the
+ * server currently believes it to be. */
+long fsck(int repair, char* report, unsigned long max, unsigned* fixed);
+
 #endif /* _SYS_STATFS_H */

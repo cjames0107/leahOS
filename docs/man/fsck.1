@@ -1,0 +1,54 @@
+fsck - check the filesystem
+
+SYNOPSIS
+    fsck [-y]
+
+DESCRIPTION
+    Two things on the disk describe which blocks are spoken for: the files
+    themselves, by way of the extents that say where their contents live,
+    and the block bitmaps, which the allocator reads when it needs
+    somewhere to put something new. They should agree. Every place they do
+    not is either a block that will be handed out to a second file while
+    the first is still using it, or a block that is lost until the disk is
+    emptied.
+
+    fsck walks the tree, works out which blocks and inodes are genuinely
+    in use, and compares that against the bitmaps and against the free
+    counts the superblock carries.
+
+        fsck        # look, and say
+        fsck -y     # look, and correct what can be corrected
+
+    Without -y nothing is written. With it, blocks that belong to a file
+    but are marked free are marked used, and the superblock's free count
+    is recomputed. Repairing needs root; looking does not.
+
+    A block marked used that nothing refers to is reported but not freed.
+    It wastes space and cannot cause loss, and reclaiming it on the
+    strength of a walk this simple is a worse risk than leaving it.
+
+    The exit status is 0 when clean, 1 when problems were found and
+    repaired, and 4 when problems were found and left alone - the
+    convention a boot script expects.
+
+BUGS
+    The check runs inside the filesystem server, because that is the only
+    thing that knows the layout, and a second implementation of the ext4
+    reader that disagreed with the first would be a worse problem than the
+    one this is for. The cost is real: this cannot examine a filesystem
+    that failed to mount, which is the case a checker is most wanted for,
+    and it sees the disk as the server currently believes it to be rather
+    than as it is.
+
+    Blocks are found by walking the extent mapping, not the structure
+    that holds it. Two things follow. A file large enough to need a
+    second level of extent tree has that index block reported as lost -
+    no file on an image this size is. And the resize inode, which keeps
+    its reserved blocks in the older indirect format rather than in
+    extents, is not walked at all; the one block this reports as
+    reachable from nothing on a freshly made image is its.
+
+    Link counts, duplicate entries and orphaned inodes are not checked.
+
+SEE ALSO
+    df, mount, stat

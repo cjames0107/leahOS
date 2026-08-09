@@ -1536,6 +1536,266 @@ static int mount(void)
 }
 
 
+/* --- checking the filesystem --------------------------------------------------
+ *
+ * The check lives here rather than in a program of its own because everything
+ * it needs is here: the extent walk, the bitmaps, the group descriptors, the
+ * block cache. A separate fsck would be a second implementation of the ext4
+ * reader, and two readers that disagree is a worse problem than the one the
+ * checker is for.
+ *
+ * What it costs is that this cannot check a filesystem that failed to mount -
+ * the case a real fsck exists for. That is a genuine limit and is written down
+ * in the manual page rather than papered over.
+ *
+ * The question a checker answers is whether two accounts of the same thing
+ * agree: the tree says which blocks are spoken for, the bitmaps say which are
+ * taken, and every disagreement is either a block that will be handed out
+ * twice or one that is lost until the disk is emptied.
+ */
+
+#define FSCK_MAX_BLOCKS 262144u         /* a 1 GiB disk at 4 KiB blocks */
+#define FSCK_MAX_INODES 65536u
+
+static unsigned char g_seen_block[FSCK_MAX_BLOCKS / 8];
+static unsigned char g_seen_inode[FSCK_MAX_INODES / 8];
+
+static void fsck_mark(unsigned char* map, unsigned long n, unsigned long max)
+{
+    if (n < max)
+        map[n >> 3] |= (unsigned char)(1u << (n & 7));
+}
+
+static int fsck_test(const unsigned char* map, unsigned long n, unsigned long max)
+{
+    return n < max && (map[n >> 3] & (1u << (n & 7))) != 0;
+}
+
+/* Every block an inode's data occupies. The extent tree's own index blocks are
+ * not counted: this walks the mapping, not the structure that holds it, so a
+ * file large enough to need a second level will show its index block as unused
+ * rather than as missing. Noted in the manual page. */
+static void fsck_claim_inode(const struct inode* in, unsigned long total)
+{
+    const unsigned long blocks =
+        (in->size + g_block_size - 1) / g_block_size;
+    for (unsigned long i = 0; i < blocks; ++i) {
+        const unsigned long phys = map_block(in, i);
+        if (phys != 0)
+            fsck_mark(g_seen_block, phys, total);
+    }
+}
+
+/* Walk from a directory, claiming everything below it. Depth is bounded
+ * because a corrupt tree is exactly where a cycle would be, and a checker that
+ * loops forever on a broken disk is not a checker. */
+static void fsck_walk(unsigned ino, int depth, unsigned long total,
+                      unsigned long inodes, unsigned* files, unsigned* dirs)
+{
+    if (depth > 24)
+        return;
+    struct inode in;
+    if (read_inode(ino, &in) != 0)
+        return;
+    fsck_mark(g_seen_inode, ino, inodes);
+    fsck_claim_inode(&in, total);
+
+    if (MODE_KIND(in.mode) != MODE_DIR) {
+        ++*files;
+        return;
+    }
+    ++*dirs;
+
+    for (unsigned want = 0; ; ++want) {
+        char name[64];
+        unsigned kind = VFS_KIND_FILE;
+        struct inode dir;
+        if (read_inode(ino, &dir) != 0)
+            return;
+        const unsigned child = dir_search(&dir, 0, want, name, &kind);
+        if (child == 0)
+            return;
+        if (fsck_test(g_seen_inode, child, inodes)) {
+            /* A second name for one file is normal; a second visit is not a
+             * reason to walk it twice. */
+            continue;
+        }
+        fsck_walk(child, depth + 1, total, inodes, files, dirs);
+    }
+}
+
+/* Append to the report, which rides back in the reply's data. */
+static void fsck_say(char* out, unsigned max, unsigned* at, const char* text)
+{
+    while (*text != '\0' && *at + 1 < max)
+        out[(*at)++] = *text++;
+    if (*at + 1 < max)
+        out[(*at)++] = '\n';
+    out[*at] = '\0';
+}
+
+static void fsck_say_num(char* out, unsigned max, unsigned* at,
+                         const char* before, unsigned long n, const char* after)
+{
+    char line[128];
+    snprintf(line, sizeof(line), "%s%lu%s", before, n, after);
+    fsck_say(out, max, at, line);
+}
+
+/* Returns the number of problems found; `fixed` counts those put right. */
+static long fsck_run(int repair, char* out, unsigned max, unsigned* used,
+                     unsigned* fixed)
+{
+    unsigned at = 0;
+    long problems = 0;
+    *fixed = 0;
+    out[0] = '\0';
+
+    const unsigned long total  = rd32(g_sb, 4);
+    const unsigned long inodes = rd32(g_sb, 0);
+    if (total > FSCK_MAX_BLOCKS || inodes > FSCK_MAX_INODES) {
+        fsck_say(out, max, &at, "fsck: this filesystem is larger than the "
+                                "checker can hold a map of");
+        *used = at;
+        return -1;
+    }
+
+    memset(g_seen_block, 0, sizeof(g_seen_block));
+    memset(g_seen_inode, 0, sizeof(g_seen_inode));
+
+    /* The metadata first: none of it is reachable from the tree, and all of it
+     * is legitimately marked in the bitmaps. Leaving it out would report every
+     * bitmap and inode table as a lost block. */
+    const unsigned long gd_blocks =
+        ((unsigned long)g_group_count * g_desc_size + g_block_size - 1)
+        / g_block_size;
+    const unsigned long reserved_gdt = rd16(g_sb, 206);
+    for (unsigned long b = 0; b < g_gd_block + gd_blocks + reserved_gdt; ++b)
+        fsck_mark(g_seen_block, b, total);
+
+    /* And the backup copies. sparse_super keeps one in group 0, group 1, and
+     * every group that is a power of three, five or seven; each is a copy of
+     * the superblock followed by the descriptors and the room left for them to
+     * grow. Nothing points at any of it, which is exactly why it survives the
+     * thing that would have destroyed the original. */
+    for (unsigned g = 1; g < g_group_count; ++g) {
+        unsigned n = g;
+        int backup = (g == 1);
+        for (unsigned base = 3; base <= 7 && !backup; base += 2) {
+            n = base;
+            while (n < g)
+                n *= base;
+            if (n == g)
+                backup = 1;
+        }
+        if (!backup)
+            continue;
+        const unsigned long at =
+            g_first_data_block + (unsigned long)g * g_blocks_per_group;
+        for (unsigned long b = 0; b <= gd_blocks + reserved_gdt; ++b)
+            fsck_mark(g_seen_block, at + b, total);
+    }
+    const unsigned long itable_blocks =
+        ((unsigned long)g_inodes_per_group * g_inode_size + g_block_size - 1)
+        / g_block_size;
+    for (unsigned g = 0; g < g_group_count; ++g) {
+        unsigned char desc[64];
+        if (read_group_desc(g, desc) != 0)
+            continue;
+        fsck_mark(g_seen_block, rd32(desc, 0), total);   /* block bitmap */
+        fsck_mark(g_seen_block, rd32(desc, 4), total);   /* inode bitmap */
+        const unsigned long table = rd32(desc, 8);
+        for (unsigned long i = 0; i < itable_blocks; ++i)
+            fsck_mark(g_seen_block, table + i, total);
+    }
+
+    /* The reserved inodes, which the tree does not lead to. The journal is one
+     * of them and is thirty-two megabytes; forgetting it would report the
+     * whole journal as lost. */
+    for (unsigned ino = 1; ino <= 11 && ino <= inodes; ++ino) {
+        struct inode in;
+        if (read_inode(ino, &in) != 0)
+            continue;
+        fsck_mark(g_seen_inode, ino, inodes);
+        if (ino != 2)                   /* root is walked properly below */
+            fsck_claim_inode(&in, total);
+    }
+
+    unsigned files = 0, dirs = 0;
+    fsck_walk(2, 0, total, inodes, &files, &dirs);
+    fsck_say_num(out, max, &at, "reachable: ", dirs, " directories");
+    fsck_say_num(out, max, &at, "reachable: ", files, " files");
+
+    /* Now the two accounts, block by block. */
+    unsigned long in_use = 0, unmarked = 0, lost = 0;
+    for (unsigned g = 0; g < g_group_count; ++g) {
+        unsigned char desc[64];
+        if (read_group_desc(g, desc) != 0)
+            continue;
+        if (read_block(rd32(desc, 0), g_block) != 0)
+            continue;
+        int dirty = 0;
+        for (unsigned i = 0; i < g_blocks_per_group; ++i) {
+            const unsigned long b =
+                g_first_data_block + (unsigned long)g * g_blocks_per_group + i;
+            if (b >= total)
+                break;
+            const int marked = (g_block[i >> 3] & (1u << (i & 7))) != 0;
+            const int wanted = fsck_test(g_seen_block, b, total);
+            if (marked)
+                ++in_use;
+            if (wanted && !marked) {
+                /* The dangerous direction: this block is part of a file and
+                 * the allocator believes it is free, so it will be handed out
+                 * again and two files will share it. */
+                ++unmarked;
+                if (repair) {
+                    g_block[i >> 3] |= (unsigned char)(1u << (i & 7));
+                    dirty = 1;
+                    ++*fixed;
+                    ++in_use;
+                }
+            } else if (marked && !wanted) {
+                ++lost;                 /* merely wasted, not unsafe */
+            }
+        }
+        if (dirty)
+            write_block(rd32(desc, 0), g_block);
+    }
+
+    if (unmarked != 0) {
+        fsck_say_num(out, max, &at, "PROBLEM: ", unmarked,
+                     repair ? " blocks were in a file but marked free (fixed)"
+                            : " blocks are in a file but marked free");
+        problems += (long)unmarked;
+    }
+    if (lost != 0) {
+        fsck_say_num(out, max, &at, "note: ", lost,
+                     " blocks are marked used but reachable from nothing");
+    }
+
+    /* And the superblock's own idea of how much is left. */
+    const unsigned long free_now = total - in_use;
+    const unsigned long free_said = rd32(g_sb, 12);
+    if (free_now != free_said) {
+        fsck_say_num(out, max, &at, "PROBLEM: the superblock says ", free_said,
+                     " free blocks");
+        fsck_say_num(out, max, &at, "         the bitmaps say ", free_now, "");
+        ++problems;
+        if (repair) {
+            wr32w(g_sb, 12, (unsigned)free_now);
+            ++*fixed;
+            fsck_say(out, max, &at, "         corrected");
+        }
+    }
+
+    if (problems == 0)
+        fsck_say(out, max, &at, "clean");
+
+    *used = at;
+    return problems;
+}
+
 /* --- the caller's own transfer buffer ----------------------------------------
  *
  * There used to be one shared segment, and one was enough because there used to
@@ -1788,6 +2048,18 @@ int main(void)
             }
         } else if (m.tag == VFS_MKFIFO) {
             r.word[0] = create_node((const char*)m.data, MAKE_FIFO, 0, 0);
+        } else if (m.tag == VFS_FSCK) {
+            /* Repairing is root's business; looking is anybody's. */
+            const int repair = m.word[1] != 0;
+            if (repair && caller_uid(from) != 0) {
+                r.word[0] = -EPERM;
+            } else {
+                unsigned used = 0, fixed = 0;
+                r.word[0] = fsck_run(repair, (char*)r.data, sizeof(r.data),
+                                     &used, &fixed);
+                r.word[1] = (long)fixed;
+                r.bytes = used;
+            }
         } else if (m.tag == VFS_MKNOD) {
             /* Root only. The four bytes are harmless; the claim they make
              * about which driver answers is not. */

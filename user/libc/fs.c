@@ -1222,6 +1222,33 @@ long readlink(const char* path, char* out, unsigned long max)
     return (long)n;
 }
 
+long fsck(int repair, char* report, unsigned long max, unsigned* fixed)
+{
+    struct ipc_message a;
+
+    start();
+    if (report != 0 && max > 0)
+        report[0] = '\0';
+    if (fixed != 0)
+        *fixed = 0;
+    if (vfs_call(VFS_FSCK, "", repair != 0, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    if (report != 0 && max > 0) {
+        unsigned long n = a.bytes;
+        if (n > max - 1)
+            n = max - 1;
+        memcpy(report, a.data, n);
+        report[n] = '\0';
+    }
+    if (fixed != 0)
+        *fixed = (unsigned)a.word[1];
+    if (from_vfs(a.word[0]) < 0)
+        return -1;
+    return a.word[0];
+}
+
 int statfs(const char* path, struct statfs* out)
 {
     char resolved[PATH_MAX];
