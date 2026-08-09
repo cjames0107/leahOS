@@ -22,15 +22,21 @@ uint32_t draw_over(uint32_t under, uint32_t over)
         return over | 0xFF000000u;
 
     const unsigned inverse = 255 - a;
-    /* +127 before the divide rather than truncating: dropping the remainder
-     * on every channel of every pixel is a visible darkening once anything is
-     * blended more than once, and this is the compositor. */
-    const unsigned r = (((over >> 16) & 0xFF) * a +
-                        ((under >> 16) & 0xFF) * inverse + 127) / 255;
-    const unsigned g = (((over >> 8) & 0xFF) * a +
-                        ((under >> 8) & 0xFF) * inverse + 127) / 255;
-    const unsigned b = ((over & 0xFF) * a +
-                        (under & 0xFF) * inverse + 127) / 255;
+    /* Divided by 255 without dividing.
+     *
+     * Rounding matters - truncating the remainder on every channel of every
+     * pixel is a visible darkening once anything is blended twice, and this is
+     * the compositor - but an integer divide per channel per pixel is three
+     * divides on every pixel of every window. `(v + (v >> 8) + 128) >> 8` is
+     * the standard identity for it: exact for every value a byte pair can
+     * produce, and three shifts instead of a divide. */
+    #define OVER255(v) (((v) + ((v) >> 8) + 128) >> 8)
+    const unsigned r = OVER255(((over >> 16) & 0xFF) * a +
+                               ((under >> 16) & 0xFF) * inverse);
+    const unsigned g = OVER255(((over >> 8) & 0xFF) * a +
+                               ((under >> 8) & 0xFF) * inverse);
+    const unsigned b = OVER255((over & 0xFF) * a + (under & 0xFF) * inverse);
+    #undef OVER255
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
@@ -116,6 +122,19 @@ int draw_round_coverage(int px, int py, int x, int y, int w, int h, int radius)
     if (radius > limit) radius = limit;
     if (radius < 0) radius = 0;
 
+    /* Only the corners are curved, and only a pixel either side of the edge is
+     * partial. Everything else is a rectangle test, which answers without the
+     * square root the distance needs - and almost every pixel of almost every
+     * shape is everything else. */
+    if (px < x - 1 || py < y - 1 || px > x + w || py > y + h)
+        return 0;
+    if (px >= x + radius && px < x + w - radius &&
+        py >= y + 1 && py < y + h - 1)
+        return 255;
+    if (py >= y + radius && py < y + h - radius &&
+        px >= x + 1 && px < x + w - 1)
+        return 255;
+
     const float d = round_distance((float)px + 0.5f, (float)py + 0.5f,
                                    (float)x, (float)y, (float)w, (float)h,
                                    (float)radius);
@@ -197,7 +216,20 @@ void draw_round_rect_outline(const struct surface* s, int x, int y,
 
     for (int py = y0; py < y1; ++py) {
         uint32_t* row = &s->pixels[(long)py * s->w];
+
+        /* Rows down the straight sides only touch the ring at their two ends.
+         * Walking the whole width of them was scanning the entire interior of
+         * every panel to draw a one pixel border round it - the single most
+         * expensive thing the old chrome did per frame, for pixels that were
+         * never going to change. */
+        const int straight = py >= y + radius + thickness &&
+                             py < y + h - radius - thickness;
         for (int px = x0; px < x1; ++px) {
+            if (straight && px >= x + thickness + 1 &&
+                px < x + w - thickness - 1) {
+                px = x + w - thickness - 2;     /* skip to the far edge */
+                continue;
+            }
             /* Inside the outer shape and outside the inner one: the ring
              * between them, with both edges antialiased. */
             const int outer = draw_round_coverage(px, py, x, y, w, h, radius);
@@ -232,7 +264,7 @@ void draw_round_rect_outline(const struct surface* s, int x, int y,
  * looks rather than for what it costs.
  */
 
-#define BLUR_SHRINK 4
+#define BLUR_SHRINK 8
 
 static void box_pass(unsigned* src, unsigned* dst, int w, int h, int radius,
                      int horizontal)
@@ -287,6 +319,35 @@ void draw_blur(const struct surface* s, int x, int y, int w, int h,
     if (y + h > s->h) h = s->h - y;
     if (w <= 0 || h <= 0)
         return;
+
+    /* The shape being blurred *through*, which is not the region being
+     * blurred once the clip has narrowed the second one. */
+    const int ox = x, oy = y, ow = w, oh = h;
+
+    /* Only as much as can actually be written, plus the distance the blur
+     * reaches for.
+     *
+     * Nothing here looked at the clip, so nudging the mouse over a window -
+     * a sixteen pixel damage rectangle - downsampled, blurred three times and
+     * stretched back the entire window. That was the whole of the lag: a
+     * one-pixel change cost exactly what a full repaint cost.
+     *
+     * Three box passes of radius r spread about 3r, so a sub-region grown by
+     * that much and then written back only inside the clip is
+     * indistinguishable from blurring the lot. */
+    if (s->cw > 0 && s->ch > 0) {
+        const int reach = radius * 3 + BLUR_SHRINK;
+        int x0 = s->cx - reach, y0 = s->cy - reach;
+        int x1 = s->cx + s->cw + reach, y1 = s->cy + s->ch + reach;
+        if (x0 < x) x0 = x;
+        if (y0 < y) y0 = y;
+        if (x1 > x + w) x1 = x + w;
+        if (y1 > y + h) y1 = y + h;
+        if (x1 <= x0 || y1 <= y0)
+            return;                     /* nothing of it is visible */
+        x = x0; y = y0;
+        w = x1 - x0; h = y1 - y0;
+    }
 
     const int sw = (w + BLUR_SHRINK - 1) / BLUR_SHRINK;
     const int sh = (h + BLUR_SHRINK - 1) / BLUR_SHRINK;
@@ -393,7 +454,7 @@ void draw_blur(const struct surface* s, int x, int y, int w, int h,
              * write-back by the same coverage the fill uses puts the blur
              * exactly where the panel is and nowhere else. */
             const int inside = draw_round_coverage(x + px, y + py,
-                                                   x, y, w, h, corner);
+                                                   ox, oy, ow, oh, corner);
             if (inside == 0)
                 continue;
             out[px] = inside == 255
@@ -623,13 +684,26 @@ void draw_shadow_cast(const struct surface* target, const struct shadow* s,
     const int ox = x - s->margin;
     const int oy = y - s->margin + drop;
 
-    for (int sy = 0; sy < s->h; ++sy) {
+    /* Bounded by the clip up front rather than tested per pixel. A shadow mask
+     * is larger than the window it belongs to, and walking all of it to write
+     * sixteen pixels is the same waste the blur had. */
+    int sy0 = 0, sy1 = s->h, sx0 = 0, sx1 = s->w;
+    if (target->cw > 0 && target->ch > 0) {
+        if (target->cy - oy > sy0) sy0 = target->cy - oy;
+        if (target->cx - ox > sx0) sx0 = target->cx - ox;
+        if (target->cy + target->ch - oy < sy1) sy1 = target->cy + target->ch - oy;
+        if (target->cx + target->cw - ox < sx1) sx1 = target->cx + target->cw - ox;
+    }
+    if (sy0 < 0) sy0 = 0;
+    if (sx0 < 0) sx0 = 0;
+
+    for (int sy = sy0; sy < sy1; ++sy) {
         const int py = oy + sy;
         if (py < 0 || py >= target->h)
             continue;
         uint32_t* row = &target->pixels[(long)py * target->w];
         const unsigned char* line = &s->alpha[(long)sy * s->w];
-        for (int sx = 0; sx < s->w; ++sx) {
+        for (int sx = sx0; sx < sx1; ++sx) {
             const unsigned a = line[sx];
             if (a == 0)
                 continue;
