@@ -1247,6 +1247,257 @@ static int proc_entry(const char* path, unsigned index, char* name,
     return -1;
 }
 
+/* --- the journal -------------------------------------------------------------
+ *
+ * ext4 keeps a journal so that a crash in the middle of changing the tree
+ * leaves the disk recoverable rather than merely broken. The idea is older
+ * than the filesystem: write what you are about to do somewhere safe, then do
+ * it, and on the way back up either the record is complete and the work can be
+ * finished, or it is not and none of it ever happened. What must never happen
+ * is half.
+ *
+ * The image has carried `has_journal` since it was first made, and until now
+ * this server ignored it - which is worse than not having one, because the
+ * flag tells every other system that the disk is safe to trust.
+ *
+ * This is the recovery half: at mount, any transaction that reached its commit
+ * block is written out to where it belongs, and the journal is then reset. A
+ * transaction without a commit block is discarded, which is the whole point of
+ * the commit block.
+ *
+ * Everything in here is big-endian. The journal came from a machine that was,
+ * and the format did not change when the filesystem moved.
+ */
+
+#define JBD2_MAGIC        0xC03B3998u
+#define JBD2_DESCRIPTOR   1
+#define JBD2_COMMIT       2
+#define JBD2_REVOKE       5
+
+#define JBD2_FLAG_ESCAPE    1
+#define JBD2_FLAG_SAME_UUID 2
+#define JBD2_FLAG_LAST_TAG  8
+
+/* Set when the superblock says there is one and its inode could be read. */
+static struct inode g_journal;
+static int      g_has_journal;
+/* Static, not automatic. Three of these nested inside each other is sixteen
+ * kilobytes of stack in a ring-3 server that has nothing like that to spare -
+ * which showed up as the boot stopping dead after the replay, with no fault
+ * reported and every process that wanted a file waiting on one that was gone. */
+static unsigned char g_jbuf[sizeof(g_block)];   /* descriptors and the sb   */
+static unsigned char g_jdata[sizeof(g_block)];  /* one journalled block     */
+static unsigned g_jrnl_first;    /* first block that can hold a transaction */
+static unsigned g_jrnl_maxlen;   /* how many blocks the journal has         */
+static unsigned g_jrnl_seq;      /* the sequence recovery should start at   */
+static unsigned g_jrnl_start;    /* where it should start, 0 when clean     */
+
+static unsigned rd32be(const unsigned char* p, unsigned at)
+{
+    return ((unsigned)p[at] << 24) | ((unsigned)p[at + 1] << 16)
+         | ((unsigned)p[at + 2] << 8) | (unsigned)p[at + 3];
+}
+
+static void wr32be(unsigned char* p, unsigned at, unsigned v)
+{
+    p[at]     = (unsigned char)(v >> 24);
+    p[at + 1] = (unsigned char)(v >> 16);
+    p[at + 2] = (unsigned char)(v >> 8);
+    p[at + 3] = (unsigned char)v;
+}
+
+/* One block of the journal file, by its index within that file. */
+static int jrnl_read(unsigned index, unsigned char* out)
+{
+    const unsigned long phys = map_block(&g_journal, index);
+    if (phys == 0)
+        return -1;
+    return read_block(phys, out);
+}
+
+static int jrnl_write(unsigned index, const unsigned char* in)
+{
+    const unsigned long phys = map_block(&g_journal, index);
+    if (phys == 0)
+        return -1;
+    return write_block(phys, in);
+}
+
+/* The journal is a ring. */
+static unsigned jrnl_next(unsigned at)
+{
+    ++at;
+    return at >= g_jrnl_maxlen ? g_jrnl_first : at;
+}
+
+/* How many block tags fit in a descriptor, and how wide one is. Without
+ * checksum-v3 a tag is the block number and the flags, plus a UUID on the
+ * first tag of a transaction unless it says otherwise. */
+static unsigned tag_width(unsigned flags, int sixty_four)
+{
+    unsigned n = sixty_four ? 12u : 8u;
+    if (!(flags & JBD2_FLAG_SAME_UUID))
+        n += 16;
+    return n;
+}
+
+/* Walk one transaction's descriptor, calling back for each block it carries.
+ * Returns the journal index just past the last data block, or 0 on a
+ * malformed descriptor. `apply` writes; when it is zero this only counts. */
+static unsigned jrnl_walk(const unsigned char* desc, unsigned at, int apply,
+                          int sixty_four)
+{
+    unsigned off = 12;                  /* past the header */
+    unsigned where = jrnl_next(at);     /* data follows the descriptor */
+
+    for (;;) {
+        if (off + 8 > g_block_size)
+            return 0;
+        const unsigned target = rd32be(desc, off);
+        const unsigned flags  = rd32be(desc, off + 4);
+        off += tag_width(flags, sixty_four);
+        if (off > g_block_size)
+            return 0;
+
+        if (apply) {
+            if (jrnl_read(where, g_jdata) != 0)
+                return 0;
+            /* An escaped block held the journal's own magic where its first
+             * word goes, so it was stored with that word zeroed. Put it back
+             * before the block reaches the disk it belongs on. */
+            if (flags & JBD2_FLAG_ESCAPE)
+                wr32be(g_jdata, 0, JBD2_MAGIC);
+            if (target != 0 && write_block(target, g_jdata) != 0)
+                return 0;
+        }
+        where = jrnl_next(where);
+        if (flags & JBD2_FLAG_LAST_TAG)
+            break;
+    }
+    return where;
+}
+
+/* Replay everything that committed, then declare the journal empty.
+ *
+ * Two passes, as every implementation of this does it: the first finds how far
+ * the committed transactions reach, and only then does the second write
+ * anything. A single pass would apply the blocks of a transaction whose commit
+ * block turns out not to be there - which is exactly the torn write the
+ * journal exists to prevent, performed deliberately by the recovery code.
+ */
+static int journal_replay(void)
+{
+    if (!g_has_journal || g_jrnl_start == 0)
+        return 0;
+
+    const int sixty_four = 0;   /* no 64-bit journal on an image this size */
+
+    /* Pass one: how many transactions committed. */
+    unsigned at = g_jrnl_start, seq = g_jrnl_seq, committed = 0;
+    for (;;) {
+        if (jrnl_read(at, g_jbuf) != 0 || rd32be(g_jbuf, 0) != JBD2_MAGIC)
+            break;
+        if (rd32be(g_jbuf, 8) != seq)
+            break;
+        const unsigned type = rd32be(g_jbuf, 4);
+        if (type == JBD2_COMMIT) {
+            ++committed;
+            ++seq;
+            at = jrnl_next(at);
+            continue;
+        }
+        if (type == JBD2_DESCRIPTOR) {
+            const unsigned past = jrnl_walk(g_jbuf, at, 0, sixty_four);
+            if (past == 0)
+                break;
+            at = past;
+            continue;
+        }
+        if (type == JBD2_REVOKE) {      /* nothing here ever writes one */
+            at = jrnl_next(at);
+            continue;
+        }
+        break;
+    }
+
+    if (committed == 0) {
+        printf("vfsd: journal has no complete transaction; discarding it\n");
+    } else {
+        /* Pass two: apply exactly that many. */
+        at = g_jrnl_start;
+        seq = g_jrnl_seq;
+        unsigned done = 0;
+        while (done < committed) {
+            if (jrnl_read(at, g_jbuf) != 0 || rd32be(g_jbuf, 0) != JBD2_MAGIC)
+                break;
+            const unsigned type = rd32be(g_jbuf, 4);
+            if (type == JBD2_COMMIT) {
+                ++done;
+                ++seq;
+                at = jrnl_next(at);
+                continue;
+            }
+            if (type == JBD2_DESCRIPTOR) {
+                const unsigned past = jrnl_walk(g_jbuf, at, 1, sixty_four);
+                if (past == 0)
+                    break;
+                at = past;
+                continue;
+            }
+            at = jrnl_next(at);
+        }
+        printf("vfsd: journal replayed %u transaction%s\n",
+               done, done == 1 ? "" : "s");
+    }
+
+    /* The journal is now empty: s_start of zero says so, and the sequence
+     * moves on so that anything still on disk from before reads as stale.
+     * Written last, because until it is written the replay can be repeated
+     * safely and after it is written it must not be. */
+    if (jrnl_read(0, g_jbuf) == 0 && rd32be(g_jbuf, 0) == JBD2_MAGIC) {
+        wr32be(g_jbuf, 24, seq);          /* s_sequence */
+        wr32be(g_jbuf, 28, 0);            /* s_start                          */
+        if (jrnl_write(0, g_jbuf) != 0)
+            return -1;
+    }
+    g_jrnl_start = 0;
+    return 0;
+}
+
+/* Find the journal and read its superblock. Failure here is not fatal: a
+ * filesystem without one still mounts, it is just no safer than it was. */
+static void journal_open(const unsigned char* sb)
+{
+    g_has_journal = 0;
+    if (!(rd32(sb, 92) & 0x0004))       /* COMPAT_HAS_JOURNAL */
+        return;
+    const unsigned inum = rd32(sb, 224);
+    if (inum == 0 || read_inode(inum, &g_journal) != 0)
+        return;
+
+    const unsigned long phys = map_block(&g_journal, 0);
+    if (phys == 0 || read_block(phys, g_jbuf) != 0)
+        return;
+    if (rd32be(g_jbuf, 0) != JBD2_MAGIC)
+        return;
+
+    /* The journal keeps its own block size, and a journal whose blocks are a
+     * different size from the filesystem's is one this cannot walk. */
+    if (rd32be(g_jbuf, 12) != g_block_size)
+        return;
+
+    g_jrnl_maxlen = rd32be(g_jbuf, 16);
+    g_jrnl_first  = rd32be(g_jbuf, 20);
+    g_jrnl_seq    = rd32be(g_jbuf, 24);
+    g_jrnl_start  = rd32be(g_jbuf, 28);
+    if (g_jrnl_maxlen == 0 || g_jrnl_first == 0)
+        return;
+    g_has_journal = 1;
+    printf("vfsd: journal, %u blocks from %u, sequence %u%s\n",
+           g_jrnl_maxlen, g_jrnl_first, g_jrnl_seq,
+           g_jrnl_start != 0 ? ", needs recovery" : "");
+}
+
 static int mount(void)
 {
     if (disk_read(0, 8) != 0)
@@ -1271,6 +1522,15 @@ static int mount(void)
         (inodes + g_inodes_per_group - 1) / g_inodes_per_group : 0;
     g_gd_block = g_first_data_block + 1;
     memcpy(g_sb, sb, 1024);
+
+    /* Before anything else reads the tree: a transaction that committed but
+     * was not yet written out is part of this filesystem, and every lookup
+     * from here on would otherwise be reading a version of it that the last
+     * machine to touch it had already moved past. */
+    journal_open(g_sb);
+    if (journal_replay() != 0)
+        printf("vfsd: the journal could not be replayed\n");
+
     g_mounted = 1;
     return 0;
 }
