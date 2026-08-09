@@ -173,6 +173,14 @@ void draw_round_rect(const struct surface* s, int x, int y, int w, int h,
         /* The middle band has no curvature, so the whole row between the
          * corners is a straight fill and needs no distance at all. */
         const int in_band = py >= y + radius && py < y + h - radius;
+        /* And an opaque fill of that band is a store rather than a blend.
+         * This is the whole of a window's panel when the glass is off, which
+         * makes it the most-executed loop in the compositor. */
+        if (in_band && alpha == 255) {
+            for (int px = x0; px < x1; ++px)
+                row[px] = 0xFF000000u | rgb;
+            continue;
+        }
         for (int px = x0; px < x1; ++px) {
             unsigned a;
             if (in_band) {

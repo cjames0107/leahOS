@@ -23,6 +23,7 @@
 #include <draw.h>
 #include <font.h>
 #include <image.h>
+#include <time.h>
 #include <paths.h>
 #include <shm.h>
 #include <sys/mman.h>
@@ -580,6 +581,47 @@ static void paint_backdrop(int slot, const struct surface* c)
     g_blur_valid[slot] = 1;
 }
 
+/* The panel colour when there is no glass: the face with the wash already
+ * folded into it. Blending a translucent wash over an opaque fill gives an
+ * opaque result, so doing it once here saves painting every pixel of every
+ * window a second time to reach the same colour. */
+static uint32_t opaque_panel(int focused)
+{
+    const uint32_t face = 0xFF000000u | (g_control->theme.face & 0x00FFFFFFu);
+    return draw_over(face, focused ? 0x66FFFFFFu : 0x4DF2F2F2u);
+}
+
+/* One band of the frame, clipped to what is already being repainted. The
+ * window's full geometry is still passed to draw_round_rect so that a band
+ * containing a corner still gets the curve right. */
+static void fill_band(struct surface c, int bx, int by, int bw, int bh,
+                      int wx, int wy, int fw, int fh, uint32_t colour)
+{
+    if (bw <= 0 || bh <= 0)
+        return;
+    const int x0 = imax(bx, c.cx), y0 = imax(by, c.cy);
+    const int x1 = imin(bx + bw, c.cx + c.cw), y1 = imin(by + bh, c.cy + c.ch);
+    if (x1 <= x0 || y1 <= y0)
+        return;
+    c.cx = x0; c.cy = y0; c.cw = x1 - x0; c.ch = y1 - y0;
+    draw_round_rect(&c, wx, wy, fw, fh, CORNER, colour);
+}
+
+/* One band of the margin a shadow falls in, clipped to what is being
+ * repainted. The shadow's own origin is unchanged so the shape stays right. */
+static void cast_band(struct surface c, struct shadow* shade,
+                      int bx, int by, int bw, int bh, int wx, int wy)
+{
+    if (bw <= 0 || bh <= 0)
+        return;
+    const int x0 = imax(bx, c.cx), y0 = imax(by, c.cy);
+    const int x1 = imin(bx + bw, c.cx + c.cw), y1 = imin(by + bh, c.cy + c.ch);
+    if (x1 <= x0 || y1 <= y0)
+        return;
+    c.cx = x0; c.cy = y0; c.cw = x1 - x0; c.ch = y1 - y0;
+    draw_shadow_cast(&c, shade, wx, wy, SHADOW_DROP);
+}
+
 static void draw_window(int slot, int focused)
 {
     struct ws_window* w = &g_control->windows[slot];
@@ -595,9 +637,8 @@ static void draw_window(int slot, int focused)
         const int y1 = imin(w->y + (int)g_height[slot], g_clip.y + g_clip.h);
         for (int y = y0; y < y1; ++y) {
             const uint32_t* row = &dp[(unsigned long)(y - w->y) * g_width[slot]];
-            uint32_t* dst = &g_back[(unsigned)y * g_fb.width + (unsigned)x0];
-            for (int x = x0; x < x1; ++x)
-                *dst++ = row[x - w->x];
+            memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x0],
+                   &row[x0 - w->x], (size_t)(x1 - x0) * sizeof(uint32_t));
         }
         return;
     }
@@ -607,19 +648,76 @@ static void draw_window(int slot, int focused)
      * over that, and a hairline to catch the edge. */
     const struct surface c = canvas();
 
-    struct shadow* shade = shadow_for((int)fw, (int)fh);
-    if (shade != 0)
-        draw_shadow_cast(&c, shade, w->x, w->y, SHADOW_DROP);
+    /* A shadow falls outside the window, so when the damage lies entirely
+     * within the frame every pixel of it would be painted over by the panel
+     * before anyone saw it. Typing in a terminal is that case. */
+    const int clip_inside = g_clip.x >= w->x && g_clip.y >= w->y &&
+                            g_clip.x + g_clip.w <= w->x + (int)fw &&
+                            g_clip.y + g_clip.h <= w->y + (int)fh;
+    if (!clip_inside) {
+        struct shadow* shade = shadow_for((int)fw, (int)fh);
+        if (shade != 0) {
+            /* Only the margin. Everything the shadow puts inside the frame is
+             * painted over by the panel and then by the client, so casting it
+             * there is work nobody ever sees - and a shadow is a per-pixel
+             * blend over an area larger than the window, which made it the
+             * most expensive thing left in an opaque frame. */
+            const int m = SHADOW_SPREAD;
+            const int ox = w->x - m, oy = w->y - m;
+            const int ow = (int)fw + m * 2, oh = (int)fh + m * 2;
+            cast_band(c, shade, ox, oy, ow, w->y - oy, w->x, w->y);
+            cast_band(c, shade, ox, w->y + (int)fh, ow,
+                      oy + oh - (w->y + (int)fh), w->x, w->y);
+            cast_band(c, shade, ox, w->y, w->x - ox, (int)fh, w->x, w->y);
+            cast_band(c, shade, w->x + (int)fw, w->y,
+                      ox + ow - (w->x + (int)fw), (int)fh, w->x, w->y);
+        }
+    }
 
-    paint_backdrop(slot, &c);
+    const uint32_t* px = g_pixels[slot];
 
-    /* The focused window is a shade brighter and a shade more opaque. That is
-     * the whole focus signal now - the pinstripes it replaces were a way of
-     * saying this in one colour, which is a constraint that has gone. */
-    draw_round_rect(&c, w->x, w->y, (int)fw, (int)fh, CORNER,
-                    focused ? 0x66FFFFFFu : 0x4DF2F2F2u);
+    if (g_control->theme.blur == 0) {
+        /* No backdrop to sample, so the panel is one flat colour - and the
+         * client is about to cover everything inside the frame, so only the
+         * frame itself is worth painting. That turns a window-sized fill into
+         * a title bar and three hairlines. */
+        const uint32_t panel = opaque_panel(focused);
+        if (px != 0) {
+            const int cx0 = w->x + BORDER;
+            const int cy0 = w->y + BORDER + TITLE_HEIGHT;
+            const int cw = (int)g_width[slot], ch = (int)g_height[slot];
+            fill_band(c, w->x, w->y, (int)fw, cy0 - w->y,
+                      w->x, w->y, (int)fw, (int)fh, panel);
+            fill_band(c, w->x, cy0 + ch, (int)fw,
+                      w->y + (int)fh - (cy0 + ch),
+                      w->x, w->y, (int)fw, (int)fh, panel);
+            fill_band(c, w->x, cy0, cx0 - w->x, ch,
+                      w->x, w->y, (int)fw, (int)fh, panel);
+            fill_band(c, cx0 + cw, cy0, w->x + (int)fw - (cx0 + cw), ch,
+                      w->x, w->y, (int)fw, (int)fh, panel);
+        } else {
+            draw_round_rect(&c, w->x, w->y, (int)fw, (int)fh, CORNER, panel);
+        }
+        if (g_blur[slot] != 0)
+            blur_cache_drop(slot);
+    } else {
+        paint_backdrop(slot, &c);
+        /* The focused window is a shade brighter and a shade more opaque.
+         * That is the whole focus signal now - the pinstripes it replaces
+         * were a way of saying this in one colour, which is a constraint that
+         * has gone. */
+        draw_round_rect(&c, w->x, w->y, (int)fw, (int)fh, CORNER,
+                        focused ? 0x66FFFFFFu : 0x4DF2F2F2u);
+    }
     draw_round_rect_outline(&c, w->x, w->y, (int)fw, (int)fh, CORNER, 1,
                             focused ? 0x59FFFFFFu : 0x33FFFFFFu);
+
+    /* The controls and the title both live in the title bar; when the damage
+     * does not reach it, drawing them - and measuring and shaping the text -
+     * is pure loss. Terminal output never touches it. */
+    const int bar_bottom = w->y + BORDER + TITLE_HEIGHT;
+    if (g_clip.y >= bar_bottom || g_clip.y + g_clip.h <= w->y)
+        goto contents;
 
     /* The three controls, left to right. Only the close box has a vector
      * glyph; a minimise is a bar and a maximise is a square outline, both of
@@ -668,6 +766,7 @@ static void draw_window(int slot, int focused)
                         focused ? 0xF0101810u : 0x90101810u);
     }
 
+contents:
     /* No grip bar and no grow box. The band is still there in the geometry,
      * because that is what a pointer grabs to resize, but the panel covers it
      * and nothing is drawn in it. */
@@ -679,7 +778,6 @@ static void draw_window(int slot, int focused)
      * straight down. A client draws a rectangle - it has no idea its window
      * has corners - and copying that over the bottom two would square them off
      * and leave the shadow showing through a notch. */
-    const uint32_t* px = g_pixels[slot];
     if (px == 0)
         return;
     const int content_x = w->x + BORDER;
@@ -695,9 +793,8 @@ static void draw_window(int slot, int focused)
     for (int y = y0; y < y1; ++y) {
         const uint32_t* row = &px[(unsigned long)(y - content_y) * g_width[slot]];
         if (y < curved_from) {
-            uint32_t* dst = &g_back[(unsigned)y * g_fb.width + (unsigned)x0];
-            for (int x = x0; x < x1; ++x)
-                *dst++ = row[x - content_x];
+            memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x0],
+                   &row[x0 - content_x], (size_t)(x1 - x0) * sizeof(uint32_t));
             continue;
         }
         for (int x = x0; x < x1; ++x) {
@@ -742,8 +839,19 @@ static struct rect drag_rect(void);
 
 /* Desktop, then windows back to front so the topmost is drawn last and wins -
  * within one rectangle, and skipping the windows that do not touch it. */
+/* Whether some window already covers every pixel of this rectangle with
+ * something opaque. If one does, the wallpaper underneath is painted and then
+ * immediately painted over, which is a whole damage rectangle of work for
+ * pixels nobody was ever going to see.
+ *
+ * Frosted glass is not opaque, so with the glass on nothing qualifies. And a
+ * window's own corners are rounded and antialiased, so the wallpaper does show
+ * through there - which is why a normal window only counts for the rectangle
+ * inside its corners.
+ */
 static void compose_rect(const struct rect* r)
 {
+
     g_clip = *r;
     for (int y = r->y; y < r->y + r->h; ++y) {
         uint32_t* row = &g_back[(unsigned)y * g_fb.width + (unsigned)r->x];
