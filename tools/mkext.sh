@@ -79,14 +79,9 @@ mkdir -p "$STAGING/bin" "$STAGING/sbin" "$STAGING/etc" "$STAGING/dev" \
 # without touching the disk - the directory here is the mount point and nothing
 # else, which is why it stays empty. /sys is still only a name.
 
-# /dev. The entries are empty files: what they do lives in libc, which is
-# already where path resolution and the descriptor table are, and which is the
-# only thing that can know which terminal a process belongs to. They are on
-# disk so that ls /dev lists them and a path naming one is not a fiction.
-for node in null zero full tty console; do
-    : > "$STAGING/dev/$node"
-    chmod 666 "$STAGING/dev/$node"
-done
+# /dev is made further down, with debugfs: a device node cannot be staged as a
+# file, and mknod(2) on the build host needs root. The numbers are the ones
+# Linux uses, so a node means the same thing on either system.
 
 # Application bundles. A .app is a directory that carries its own description,
 # so nothing else needs a built-in table of which program opens what - see
@@ -354,6 +349,26 @@ if [ -x "$DEBUGFS" ]; then
         echo "sif /home/guest/Apps mode 040700"
         echo "sif /home/guest/Public mode 040755"
         echo "sif /home/guest/Desktop mode 040700"
+
+        # The device nodes. Character devices all: nothing here is a disk.
+        #
+        # cd first, and bare names after it. Given an absolute path debugfs
+        # allocates the inode and then does not link it to anything, which
+        # leaves /dev empty and the inode lost - it reports success either way,
+        # so this is worth stating rather than discovering twice.
+        echo "cd /dev"
+        echo "mknod null c 1 3"
+        echo "mknod zero c 1 5"
+        echo "mknod full c 1 7"
+        echo "mknod tty c 5 0"
+        echo "mknod console c 5 1"
+        # mknod leaves the mode at the type bits alone, so every one of these
+        # would be unreadable and unwritable by anybody without this.
+        for node in null zero full tty; do
+            echo "sif $node mode 020666"
+        done
+        # The console is the machine's own, not a terminal a user was given.
+        echo "sif console mode 020600"
     } | "$DEBUGFS" -w "$OUT" >/dev/null 2>&1
 fi
 

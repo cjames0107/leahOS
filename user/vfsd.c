@@ -450,6 +450,8 @@ static unsigned dir_search(const struct inode* dir, const char* name,
                         *kind_out = (type == 2) ? VFS_KIND_DIR
                                   : (type == 7) ? VFS_KIND_LINK
                                   : (type == 5) ? VFS_KIND_FIFO
+                                  : (type == 3) ? VFS_KIND_CHR
+                                  : (type == 4) ? VFS_KIND_BLK
                                                 : VFS_KIND_FILE;
                     return ino;
                 }
@@ -466,6 +468,19 @@ static unsigned dir_search(const struct inode* dir, const char* name,
 #define MODE_LINK     0xA000u
 #define MODE_FILE     0x8000u
 #define MODE_FIFO     0x1000u
+#define MODE_CHR      0x2000u
+#define MODE_BLK      0x6000u
+
+/* The device number a node carries. ext4 puts a small one in the first four
+ * bytes of the block pointers, which a device has no other use for - the same
+ * trick as a short symlink, and for the same reason. */
+static unsigned node_rdev(const struct inode* in)
+{
+    if (MODE_KIND(in->mode) != MODE_CHR && MODE_KIND(in->mode) != MODE_BLK)
+        return 0;
+    return (unsigned)in->block[0] | ((unsigned)in->block[1] << 8)
+         | ((unsigned)in->block[2] << 16) | ((unsigned)in->block[3] << 24);
+}
 
 /* Where a symbolic link points.
  *
@@ -775,8 +790,13 @@ static int split_path(const char* path, char* parent, char* last)
 #define MAKE_FILE 0
 #define MAKE_DIR  1
 #define MAKE_FIFO 2
+#define MAKE_CHR  3
+#define MAKE_BLK  4
 
-static int create_node(const char* path, int is_dir, const char* link_to)
+/* `rdev` is read only for MAKE_CHR and MAKE_BLK, where it is the whole of the
+ * file's contents; every other kind ignores it. */
+static int create_node(const char* path, int is_dir, const char* link_to,
+                       unsigned rdev)
 {
     char parent[256], name[64];
     if (split_path(path, parent, name) != 0)
@@ -798,6 +818,8 @@ static int create_node(const char* path, int is_dir, const char* link_to)
     memset(&fresh, 0, sizeof(fresh));
     fresh.mode = is_dir == MAKE_DIR  ? 0040755
                : is_dir == MAKE_FIFO ? 0010644
+               : is_dir == MAKE_CHR  ? (MODE_CHR | 0666u)
+               : is_dir == MAKE_BLK  ? (MODE_BLK | 0660u)
                : link_to != 0        ? 0120777
                                      : 0100644;
     fresh.size = 0;
@@ -847,6 +869,23 @@ static int create_node(const char* path, int is_dir, const char* link_to)
         return 0;
     }
 
+    if (is_dir == MAKE_CHR || is_dir == MAKE_BLK) {
+        /* The device number replaces the extent root written above: a device
+         * has no blocks, so the space where they would be addressed holds the
+         * one number that says which driver answers for it. */
+        memset(fresh.block, 0, sizeof(fresh.block));
+        fresh.block[0] = (unsigned char)(rdev & 0xFF);
+        fresh.block[1] = (unsigned char)((rdev >> 8) & 0xFF);
+        fresh.block[2] = (unsigned char)((rdev >> 16) & 0xFF);
+        fresh.block[3] = (unsigned char)((rdev >> 24) & 0xFF);
+        if (write_inode(ino, &fresh, 1u) != 0)
+            return -EIO;
+        if (dir_add(&dir, dir_ino, name, ino,
+                    is_dir == MAKE_CHR ? 3 : 4) != 0)
+            return -EIO;
+        return 0;
+    }
+
     if (is_dir == MAKE_DIR) {
         /* A directory is not empty on disk: it holds itself and its parent. */
         const unsigned long phys = extend(&fresh, ino);
@@ -881,7 +920,7 @@ static int create_node(const char* path, int is_dir, const char* link_to)
 
 static int create(const char* path, int is_dir)
 {
-    return create_node(path, is_dir ? MAKE_DIR : MAKE_FILE, 0);
+    return create_node(path, is_dir ? MAKE_DIR : MAKE_FILE, 0, 0);
 }
 
 /* A second name for a file that already exists.
@@ -1488,7 +1527,15 @@ int main(void)
                 }
             }
         } else if (m.tag == VFS_MKFIFO) {
-            r.word[0] = create_node((const char*)m.data, MAKE_FIFO, 0);
+            r.word[0] = create_node((const char*)m.data, MAKE_FIFO, 0, 0);
+        } else if (m.tag == VFS_MKNOD) {
+            /* Root only. The four bytes are harmless; the claim they make
+             * about which driver answers is not. */
+            r.word[0] = caller_uid(from) != 0 ? -EPERM
+                      : create_node((const char*)m.data,
+                                    m.word[1] == VFS_KIND_BLK ? MAKE_BLK
+                                                              : MAKE_CHR,
+                                    0, (unsigned)m.word[2]);
         } else if (m.tag == VFS_LINK) {
             /* Two strings in the data, the existing name first - the same
              * shape as SYMLINK, and for the same reason. */
@@ -1501,7 +1548,7 @@ int main(void)
              * that must not be parsed. */
             const char* target = (const char*)m.data;
             const char* where  = target + strlen(target) + 1;
-            r.word[0] = create_node(where, 0, target);
+            r.word[0] = create_node(where, 0, target, 0);
         } else if (m.tag == VFS_STAT || m.tag == VFS_LSTAT) {
             struct inode in;
             const int follow = m.tag == VFS_STAT;
@@ -1514,6 +1561,8 @@ int main(void)
                 r.word[1] = MODE_KIND(in.mode) == MODE_DIR  ? VFS_KIND_DIR
                           : MODE_KIND(in.mode) == MODE_LINK ? VFS_KIND_LINK
                           : MODE_KIND(in.mode) == MODE_FIFO ? VFS_KIND_FIFO
+                          : MODE_KIND(in.mode) == MODE_CHR  ? VFS_KIND_CHR
+                          : MODE_KIND(in.mode) == MODE_BLK  ? VFS_KIND_BLK
                                                             : VFS_KIND_FILE;
                 r.word[2] = in.mode & 0777;
                 /* Both owners in one word: they are always wanted together
@@ -1526,8 +1575,8 @@ int main(void)
                      * a file that is unique and already agreed by both sides,
                      * which is what the two ends of a FIFO need to find each
                      * other - the pipe is in the kernel and has no name. */
-                    unsigned extra[4] = { in.mtime, in.ctime, in.atime,
-                                          lookup_ino };
+                    unsigned extra[5] = { in.mtime, in.ctime, in.atime,
+                                          lookup_ino, node_rdev(&in) };
                     memcpy(r.data, extra, sizeof(extra));
                     r.bytes = sizeof(extra);
                 }

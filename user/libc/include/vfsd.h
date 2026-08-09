@@ -40,6 +40,7 @@ struct vfs_shared {
 #define VFS_STATFS  17  /* -> w0 = block size, w1 = blocks, w2 = free blocks  */
 #define VFS_LINK    18  /* data = target\0path\0 -> a second name, one inode  */
 #define VFS_MKFIFO  19  /* data = path -> a name for a pipe, holding nothing  */
+#define VFS_MKNOD   20  /* data = path, w1 = kind, w2 = rdev -> a device node */
 
 #define VFS_KIND_FILE 0
 #define VFS_KIND_DIR  1
@@ -51,5 +52,25 @@ struct vfs_shared {
  * pipe has a name, an owner and permissions, which is what a filesystem is
  * for. Everything that moves goes through the kernel, not the disk. */
 #define VFS_KIND_FIFO 3
+
+/* A name for a driver.
+ *
+ * The file holds nothing here either, but unlike a FIFO it is not empty: the
+ * inode carries a device number, and that number is the whole content. Until
+ * now libc decided what /dev/null was by comparing the path against a string,
+ * which meant the device was a fact about the C library rather than about the
+ * filesystem - a second name for it did nothing, and a file called /dev/null
+ * on a mounted stranger's disk would have been swallowed by the rule.
+ *
+ * With the number on disk the identity travels with the inode, which is what
+ * lets `ln /dev/null /tmp/sink` behave, and what makes `mknod` possible at all.
+ */
+#define VFS_KIND_CHR  4
+#define VFS_KIND_BLK  5
+
+/* Major and minor packed the way ext4 stores a small device in i_block[0]. */
+#define VFS_MKDEV(maj, min) ((unsigned)(((maj) << 8) | ((min) & 0xFF)))
+#define VFS_MAJOR(rdev)     (((rdev) >> 8) & 0xFF)
+#define VFS_MINOR(rdev)     ((rdev) & 0xFF)
 
 #endif

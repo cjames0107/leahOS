@@ -139,6 +139,7 @@ static void theme_changed(void)
     prefs_set_u32("theme.scale", g_ws->theme.text_scale);
     prefs_set_u32("theme.contrast", (unsigned)(g_ws->theme.contrast + 100));
     prefs_set_u32("theme.pattern", g_ws->theme.pattern);
+    prefs_set_u32("theme.blur", g_ws->theme.blur);
     prefs_set_str("theme.wallpaper", (const char*)g_ws->theme.wallpaper);
     if (prefs_save() != 0)
         snprintf(g_note, sizeof(g_note), "changed, but could not be saved");
@@ -174,6 +175,8 @@ static void apply_saved_theme(void)
     g_ws->theme.text_scale = prefs_get_u32("theme.scale", 1);
     g_ws->theme.contrast   = (int32_t)prefs_get_u32("theme.contrast", 100) - 100;
     g_ws->theme.pattern    = prefs_get_u32("theme.pattern", WS_PATTERN_DITHER);
+    /* Off unless this user has asked for it: see the note in wproto.h. */
+    g_ws->theme.blur       = prefs_get_u32("theme.blur", 0);
     const char* paper = prefs_get_str("theme.wallpaper", "");
     int n = 0;
     while (paper[n] != '\0' && n < 126) { g_ws->theme.wallpaper[n] = paper[n]; ++n; }
@@ -444,16 +447,25 @@ static void draw_appearance(void)
     wg_fill(px + 15, py + 13, 104, 12, g_ws ? g_ws->theme.title_active : 0x000080);
     wg_bevel(px, py, 150, 60, 0);
 
-    wg_text(SIDEBAR + 14, 280, "wallpaper", WG_DIM);
-    wg_button(SIDEBAR + 90, 276, 130, 24, "Choose a PNG...", 0);
-    wg_button(SIDEBAR + 228, 276, 96, 24, "Remove", 0);
+    /* Not a matter of taste, which is why it is not part of a preset: on a
+     * machine without graphics acceleration the glass is what makes the
+     * desktop feel slow, and this is the switch that gets it back. */
+    wg_text(SIDEBAR + 14, 280, "window backdrop", WG_DIM);
+    wg_button(SIDEBAR + 156, 276, 74, 22, "opaque",
+              g_ws && g_ws->theme.blur == 0);
+    wg_button(SIDEBAR + 234, 276, 74, 22, "blurred",
+              g_ws && g_ws->theme.blur != 0);
+
+    wg_text(SIDEBAR + 14, 310, "wallpaper", WG_DIM);
+    wg_button(SIDEBAR + 90, 306, 130, 24, "Choose a PNG...", 0);
+    wg_button(SIDEBAR + 228, 306, 96, 24, "Remove", 0);
     if (g_ws != 0 && g_ws->theme.wallpaper[0] != '\0')
-        wg_text_clipped(SIDEBAR + 90, 304, (const char*)g_ws->theme.wallpaper,
+        wg_text_clipped(SIDEBAR + 90, 334, (const char*)g_ws->theme.wallpaper,
                         WG_INK, (int)g_w - SIDEBAR - 105);
     else
-        wg_text(SIDEBAR + 90, 304, "none - the pattern shows", WG_DIM);
+        wg_text(SIDEBAR + 90, 334, "none - the pattern shows", WG_DIM);
 
-    wg_text_clipped(SIDEBAR + 14, 328,
+    wg_text_clipped(SIDEBAR + 14, 358,
                     "saved to ~/.leahrc and restored when settings next starts",
                     WG_DIM, (int)g_w - SIDEBAR - 28);
 }
@@ -781,11 +793,17 @@ int main(int argc, char** argv)
                                 { g_ws->theme.pattern = (uint32_t)i;
                                   theme_changed(); }
                     }
+                    if (g_ws != 0 && e.y >= 276 && e.y < 298) {
+                        if (e.x >= SIDEBAR + 156 && e.x < SIDEBAR + 230)
+                            { g_ws->theme.blur = 0; theme_changed(); }
+                        else if (e.x >= SIDEBAR + 234 && e.x < SIDEBAR + 308)
+                            { g_ws->theme.blur = 1; theme_changed(); }
+                    }
                     if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 220 &&
-                        e.y >= 276 && e.y < 300)
+                        e.y >= 306 && e.y < 330)
                         dlg_save(PATH_WALLPAPERS, "");  /* a picker, reused */
                     else if (e.x >= SIDEBAR + 228 && e.x < SIDEBAR + 324 &&
-                             e.y >= 276 && e.y < 300)
+                             e.y >= 306 && e.y < 330)
                         set_wallpaper("");
                 } else if (g_page == PAGE_USERS) {
                     if (inside(&g_f_name, e.x, e.y))      g_ufield = 1;

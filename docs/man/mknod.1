@@ -1,0 +1,40 @@
+mknod - make a device node
+
+SYNOPSIS
+    mknod NAME TYPE MAJOR MINOR
+
+DESCRIPTION
+    A device node is a file whose contents are a number. The number says
+    which driver answers for it - a major, which names the driver, and a
+    minor, which says which of the things that driver handles.
+
+        mknod /tmp/nowhere c 1 3
+        echo hello > /tmp/nowhere
+
+    That second file behaves exactly as /dev/null does, because it is
+    /dev/null: the identity is the pair 1,3 on the inode, not the path.
+    The C library used to decide by comparing the path against a list of
+    five strings, which meant a second name for a device did nothing and
+    this command could not have existed.
+
+    TYPE is c for a character device - one that moves bytes, like a
+    terminal - or b for a block device, one that moves fixed-size blocks
+    and can be seeked, like a disk.
+
+    Nothing checks that a driver with that major number exists. A node is
+    made before its driver is loaded as often as after, and a system that
+    refused to name a device it could not currently reach could not
+    describe its own disks while repairing them.
+
+    Root only. The four bytes are harmless; the claim they make about
+    which driver answers is not.
+
+    The numbers are the ones Linux uses, so a node means the same thing on
+    either system: 1,3 is null, 1,5 is zero, 1,7 is full, 5,0 is the
+    controlling terminal and 5,1 is the console.
+
+    ls shows one with c or b in the first column of a long listing, and
+    prints the two numbers where a file would have its size.
+
+SEE ALSO
+    ls, mkfifo, stat

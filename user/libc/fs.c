@@ -534,14 +534,51 @@ static int permitted_stat(unsigned mode, unsigned uid, unsigned gid, int want_wr
 
 /* --- the calls ---------------------------------------------------------------- */
 
-/* Which device a resolved path names, or 0 for none. */
-static int device_of(const char* resolved)
+/* Which device a resolved path names, or 0 for none.
+ *
+ * The answer comes from the inode rather than from the path. It used to come
+ * from a list of five strings here, which meant /dev/null was a rule in the C
+ * library instead of a file: a second name for it did nothing, `mknod` could
+ * not have worked, and a file that happened to be called /dev/null on someone
+ * else's disk would have been swallowed by the rule.
+ *
+ * Now the node carries a number, this is a lookup of that number - the same
+ * major:minor pairs Linux uses, so a device node copied from one of these
+ * systems to the other means the same thing.
+ */
+static int device_of(unsigned rdev)
 {
-    if (strcmp(resolved, "/dev/null") == 0)    return DEV_NULL;
-    if (strcmp(resolved, "/dev/zero") == 0)    return DEV_ZERO;
-    if (strcmp(resolved, "/dev/full") == 0)    return DEV_FULL;
-    if (strcmp(resolved, "/dev/tty") == 0)     return DEV_TTY;
-    if (strcmp(resolved, "/dev/console") == 0) return DEV_CONSOLE;
+    switch (rdev) {
+    case makedev(1, 3): return DEV_NULL;
+    case makedev(1, 5): return DEV_ZERO;
+    case makedev(1, 7): return DEV_FULL;
+    case makedev(5, 0): return DEV_TTY;
+    case makedev(5, 1): return DEV_CONSOLE;
+    default:            return 0;
+    }
+}
+
+int mknod(const char* path, unsigned type, unsigned mode, unsigned rdev)
+{
+    char resolved[PATH_MAX];
+    struct ipc_message a;
+
+    start();
+    if (type != S_IFCHR && type != S_IFBLK) {
+        errno = EINVAL;
+        return -1;
+    }
+    __fd_resolve(path, resolved);
+    if (vfs_call(VFS_MKNOD, resolved,
+                 type == S_IFBLK ? VFS_KIND_BLK : VFS_KIND_CHR,
+                 (long)rdev, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    if (from_vfs(a.word[0]) < 0)
+        return -1;
+    if (mode != 0)
+        chmod(resolved, mode);
     return 0;
 }
 
@@ -759,7 +796,21 @@ int open(const char* path, int flags)
     start();
     __fd_resolve(path, resolved);
 
-    device = device_of(resolved);
+    exists = vfs_call(VFS_STAT, resolved, 0, 0, &a) == 0 && a.word[0] >= 0;
+    if (exists) {
+        size   = a.word[0];
+        is_dir = a.word[1] == VFS_KIND_DIR;
+    }
+
+    /* A character device, and one this library knows how to be. The stat above
+     * is the only lookup: the device number rides back in it, so recognising
+     * /dev/null costs nothing that opening any other file did not already. */
+    device = 0;
+    if (exists && a.word[1] == VFS_KIND_CHR && a.bytes >= 20) {
+        unsigned rdev;
+        memcpy(&rdev, a.data + 16, sizeof(rdev));
+        device = device_of(rdev);
+    }
     if (device != 0) {
         /* /dev/tty is the one that can fail: a process with no terminal has
          * none to open, and saying so lets the caller do something else. */
@@ -775,12 +826,6 @@ int open(const char* path, int flags)
         g_fds[fd].pos    = 0;
         g_fds[fd].offset = 0;
         return fd;
-    }
-
-    exists = vfs_call(VFS_STAT, resolved, 0, 0, &a) == 0 && a.word[0] >= 0;
-    if (exists) {
-        size   = a.word[0];
-        is_dir = a.word[1] == VFS_KIND_DIR;
     }
 
     /* A FIFO is not read from the disk at all. The file on disk is a name, a
@@ -1047,6 +1092,8 @@ static int stat_either(const char* path, struct stat* out, unsigned tag)
     out->st_type = a.word[1] == VFS_KIND_DIR  ? S_IFDIR
                  : a.word[1] == VFS_KIND_LINK ? S_IFLNK
                  : a.word[1] == VFS_KIND_FIFO ? S_IFIFO
+                 : a.word[1] == VFS_KIND_CHR  ? S_IFCHR
+                 : a.word[1] == VFS_KIND_BLK  ? S_IFBLK
                                               : S_IFREG;
     out->st_mode = (uint32_t)a.word[2];
     out->st_uid  = (uint32_t)((a.word[3] >> 16) & 0xFFFF);
@@ -1067,6 +1114,12 @@ static int stat_either(const char* path, struct stat* out, unsigned tag)
         unsigned ino;
         memcpy(&ino, a.data + 12, sizeof(ino));
         out->st_ino = ino;
+    }
+    out->st_rdev = 0;
+    if (a.bytes >= 20) {
+        unsigned rdev;
+        memcpy(&rdev, a.data + 16, sizeof(rdev));
+        out->st_rdev = rdev;
     }
     return 0;
 }
@@ -1208,6 +1261,8 @@ int getdents(const char* path, struct dirent* buffer, int max)
         buffer[n].d_type = a.word[0] == VFS_KIND_DIR  ? S_IFDIR
                          : a.word[0] == VFS_KIND_LINK ? S_IFLNK
                          : a.word[0] == VFS_KIND_FIFO ? S_IFIFO
+                         : a.word[0] == VFS_KIND_CHR  ? S_IFCHR
+                         : a.word[0] == VFS_KIND_BLK  ? S_IFBLK
                                                       : S_IFREG;
         buffer[n].d_size = (uint64_t)a.word[1];
         buffer[n].d_mode = (unsigned)a.word[2];

@@ -513,6 +513,73 @@ static void close_box(struct ws_window* w, int* x, int* y)
     *y = w->y + BORDER + 3;
 }
 
+/* What sits behind a window's own contents: frosted glass, or a flat panel.
+ *
+ * The blurred form is copied if it is still good and blurred if it is not. It
+ * can only be *captured* when the damage rectangle covers the whole window,
+ * because outside that rectangle the back buffer still holds the previous
+ * frame - including this window's own panel from last time, which blurred back
+ * into itself would smear a little more with every repaint. So a partial
+ * repaint with a stale stamp falls back to blurring what it can see, and the
+ * cache is filled the next time the whole window is painted.
+ */
+static void paint_backdrop(int slot, const struct surface* c)
+{
+    const struct ws_window* w = &g_control->windows[slot];
+    const unsigned fw = frame_width(slot), fh = frame_height(slot);
+
+    if (g_control->theme.blur == 0) {
+        /* Nothing behind to sample, so nothing to cache either. The wash and
+         * the hairline the caller draws still apply, which is what keeps the
+         * focused window distinguishable once the glass is gone. */
+        draw_round_rect(c, w->x, w->y, (int)fw, (int)fh, CORNER,
+                        0xFF000000u | (g_control->theme.face & 0x00FFFFFFu));
+        if (g_blur[slot] != 0)
+            blur_cache_drop(slot);
+        return;
+    }
+
+    const unsigned stamp = backdrop_stamp(slot);
+    const int covers_all = g_clip.x <= w->x && g_clip.y <= w->y &&
+                           g_clip.x + g_clip.w >= w->x + (int)fw &&
+                           g_clip.y + g_clip.h >= w->y + (int)fh;
+
+    if (g_blur_valid[slot] && g_blur_stamp[slot] == stamp &&
+        g_blur_w[slot] == (int)fw && g_blur_h[slot] == (int)fh) {
+        /* A hit: copy back only the rows the clip actually wants. */
+        const int x0 = imax(w->x, g_clip.x), y0 = imax(w->y, g_clip.y);
+        const int x1 = imin(w->x + (int)fw, g_clip.x + g_clip.w);
+        const int y1 = imin(w->y + (int)fh, g_clip.y + g_clip.h);
+        for (int y = y0; y < y1; ++y)
+            memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x0],
+                   &g_blur[slot][(long)(y - w->y) * fw + (x0 - w->x)],
+                   (size_t)(x1 - x0) * sizeof(uint32_t));
+        return;
+    }
+
+    draw_blur(c, w->x, w->y, (int)fw, (int)fh, 22, CORNER);
+
+    if (!covers_all) {
+        g_blur_valid[slot] = 0;
+        return;
+    }
+    if (g_blur[slot] != 0 &&
+        (g_blur_w[slot] != (int)fw || g_blur_h[slot] != (int)fh))
+        blur_cache_drop(slot);
+    if (g_blur[slot] == 0)
+        g_blur[slot] = (uint32_t*)malloc((size_t)fw * fh * sizeof(uint32_t));
+    if (g_blur[slot] == 0)
+        return;
+    for (unsigned y = 0; y < fh; ++y)
+        memcpy(&g_blur[slot][(long)y * fw],
+               &g_back[(unsigned)(w->y + (int)y) * g_fb.width + (unsigned)w->x],
+               (size_t)fw * sizeof(uint32_t));
+    g_blur_w[slot] = (int)fw;
+    g_blur_h[slot] = (int)fh;
+    g_blur_stamp[slot] = stamp;
+    g_blur_valid[slot] = 1;
+}
+
 static void draw_window(int slot, int focused)
 {
     struct ws_window* w = &g_control->windows[slot];
@@ -544,55 +611,7 @@ static void draw_window(int slot, int focused)
     if (shade != 0)
         draw_shadow_cast(&c, shade, w->x, w->y, SHADOW_DROP);
 
-    /* The backdrop: copied if it is still good, blurred if it is not.
-     *
-     * It can only be *captured* when the damage rectangle covers the whole
-     * window, because outside that rectangle the back buffer still holds the
-     * previous frame - including this window's own panel from last time, which
-     * blurred back into itself would smear a little more with every repaint.
-     * So a partial repaint with a stale stamp falls back to blurring what it
-     * can see, exactly as before, and the cache is filled the next time the
-     * whole window is painted. */
-    const unsigned stamp = backdrop_stamp(slot);
-    const int covers_all = g_clip.x <= w->x && g_clip.y <= w->y &&
-                           g_clip.x + g_clip.w >= w->x + (int)fw &&
-                           g_clip.y + g_clip.h >= w->y + (int)fh;
-
-    if (g_blur_valid[slot] && g_blur_stamp[slot] == stamp &&
-        g_blur_w[slot] == (int)fw && g_blur_h[slot] == (int)fh) {
-        /* A hit: copy back only the rows the clip actually wants. */
-        const int x0 = imax(w->x, g_clip.x), y0 = imax(w->y, g_clip.y);
-        const int x1 = imin(w->x + (int)fw, g_clip.x + g_clip.w);
-        const int y1 = imin(w->y + (int)fh, g_clip.y + g_clip.h);
-        for (int y = y0; y < y1; ++y)
-            memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x0],
-                   &g_blur[slot][(long)(y - w->y) * fw + (x0 - w->x)],
-                   (size_t)(x1 - x0) * sizeof(uint32_t));
-    } else {
-        draw_blur(&c, w->x, w->y, (int)fw, (int)fh, 22, CORNER);
-
-        if (covers_all) {
-            if (g_blur[slot] != 0 &&
-                (g_blur_w[slot] != (int)fw || g_blur_h[slot] != (int)fh))
-                blur_cache_drop(slot);
-            if (g_blur[slot] == 0)
-                g_blur[slot] = (uint32_t*)malloc((size_t)fw * fh *
-                                                 sizeof(uint32_t));
-            if (g_blur[slot] != 0) {
-                for (unsigned y = 0; y < fh; ++y)
-                    memcpy(&g_blur[slot][(long)y * fw],
-                           &g_back[(unsigned)(w->y + (int)y) * g_fb.width
-                                   + (unsigned)w->x],
-                           (size_t)fw * sizeof(uint32_t));
-                g_blur_w[slot] = (int)fw;
-                g_blur_h[slot] = (int)fh;
-                g_blur_stamp[slot] = stamp;
-                g_blur_valid[slot] = 1;
-            }
-        } else {
-            g_blur_valid[slot] = 0;
-        }
-    }
+    paint_backdrop(slot, &c);
 
     /* The focused window is a shade brighter and a shade more opaque. That is
      * the whole focus signal now - the pinstripes it replaces were a way of
@@ -1449,6 +1468,7 @@ int main(void)
     g_control->theme.text_scale   = 1;
     g_control->theme.contrast     = 0;
     g_control->theme.pattern      = WS_PATTERN_DITHER;
+    g_control->theme.blur         = 0;
 
     /* No wallpaper. The desktop is the dither above, which is what this
      * interface looked like - a photograph behind it belongs to a later era

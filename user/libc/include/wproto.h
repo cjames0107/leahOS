@@ -227,6 +227,15 @@ struct ws_theme {
     volatile uint32_t text_scale;   /* 1 or 2 - the font is a bitmap          */
     volatile int32_t  contrast;     /* -100..100, applied to the bevels       */
     volatile uint32_t pattern;      /* WS_PATTERN_*, drawn when no wallpaper  */
+
+    /* Whether a window's backdrop is frosted glass or a flat opaque panel.
+     *
+     * Blurring is by a wide margin the most expensive thing the compositor
+     * does - about a thousand milliseconds per megapixel in the guest against
+     * ten for a copy - so on a machine without acceleration it is the first
+     * thing worth turning off. Off is the default for that reason: the glass
+     * is what the interface wants to be, not what it has to be. */
+    volatile uint32_t blur;         /* 1 frosted, 0 opaque                    */
 };
 
 /* Backdrop patterns. Drawn from the desktop colour rather than a second one, so

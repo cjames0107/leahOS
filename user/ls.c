@@ -10,6 +10,8 @@ static void mode_string(unsigned mode, unsigned type, char* out)
     out[0] = type == S_IFDIR  ? 'd'
            : type == S_IFLNK  ? 'l'
            : type == S_IFIFO  ? 'p'
+           : type == S_IFCHR  ? 'c'
+           : type == S_IFBLK  ? 'b'
                               : '-';
     for (int i = 0; i < 9; ++i)
         out[1 + i] = (mode & (0400 >> i)) ? kBits[i % 3] : '-';
@@ -54,6 +56,9 @@ int main(int argc, char** argv)
                 printf("%s@\n", entries[i].d_name);
             else if (entries[i].d_type == S_IFIFO)
                 printf("%s|\n", entries[i].d_name);
+            else if (entries[i].d_type == S_IFCHR ||
+                     entries[i].d_type == S_IFBLK)
+                printf("%s\n", entries[i].d_name);
             else
                 printf("%s\t%lu\n", entries[i].d_name,
                        (unsigned long)entries[i].d_size);
@@ -109,8 +114,18 @@ int main(int argc, char** argv)
             }
         }
 
-        printf("%s %-8s %8lu %s %s%s%s\n", mode, owner,
-               (unsigned long)st.st_size, when, entries[i].d_name,
+        /* A device has no size, so the column holds what it does have: the
+         * pair of numbers that says which driver answers for it. Every ls
+         * that has ever existed does this, for the same reason. */
+        char size[24];
+        if (st.st_type == S_IFCHR || st.st_type == S_IFBLK)
+            snprintf(size, sizeof(size), "%3u, %3u",
+                     major(st.st_rdev), minor(st.st_rdev));
+        else
+            snprintf(size, sizeof(size), "%lu", (unsigned long)st.st_size);
+
+        printf("%s %-8s %8s %s %s%s%s\n", mode, owner,
+               size, when, entries[i].d_name,
                is_dir ? "/" : "", points_at);
     }
     return 0;

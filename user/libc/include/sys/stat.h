@@ -14,11 +14,18 @@
  * two unrelated programs can both open, which is the one thing an ordinary
  * pipe cannot give them. */
 #define S_IFIFO 3
+/* A name for a driver. The inode holds a device number and nothing else, and
+ * that number - not the path - is what says which driver. See the note beside
+ * VFS_KIND_CHR in vfsd.h for why that distinction is worth having. */
+#define S_IFCHR 4
+#define S_IFBLK 5
 
 struct stat {
-    uint32_t st_type;       /* S_IFREG, S_IFDIR, S_IFLNK or S_IFIFO */
+    uint32_t st_type;       /* S_IFREG, S_IFDIR, S_IFLNK, S_IFIFO, S_IFCHR,
+                               S_IFBLK */
     uint32_t st_ino;        /* which inode - unique, and how a FIFO is found */
     uint32_t st_mode;       /* permission bits, 0777 */
+    uint32_t st_rdev;       /* which device, when st_type says it is one */
     uint64_t st_size;
     uint32_t st_uid;
     uint32_t st_gid;
@@ -83,6 +90,18 @@ int mkdir(const char* path);
  * a rendezvous - without it `echo hi > fifo` would finish before anything was
  * there to receive what it wrote. */
 int mkfifo(const char* path, unsigned mode);
+
+/* Make a device node: a name whose inode carries a device number instead of
+ * any contents. `type` is S_IFCHR or S_IFBLK, `rdev` is makedev(major, minor).
+ *
+ * Root only, and not because the inode is dangerous to write - it is four
+ * bytes - but because the number in it is a claim about which driver answers.
+ * A user who may mknod may make a file that reads as the disk. */
+int mknod(const char* path, unsigned type, unsigned mode, unsigned rdev);
+
+#define makedev(maj, min) ((unsigned)(((maj) << 8) | ((min) & 0xFF)))
+#define major(rdev)       (((rdev) >> 8) & 0xFF)
+#define minor(rdev)       ((rdev) & 0xFF)
 
 /* Change a file's permission bits, or its owner. Only root, or the file's
  * owner, may chmod; only root may chown. -1 leaves a chown field alone. */
