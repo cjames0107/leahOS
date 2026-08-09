@@ -551,6 +551,8 @@ static void paint_backdrop(int slot, const struct surface* c)
         const int x0 = imax(w->x, g_clip.x), y0 = imax(w->y, g_clip.y);
         const int x1 = imin(w->x + (int)fw, g_clip.x + g_clip.w);
         const int y1 = imin(w->y + (int)fh, g_clip.y + g_clip.h);
+        if (x1 <= x0)
+            return;
         for (int y = y0; y < y1; ++y)
             memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x0],
                    &g_blur[slot][(long)(y - w->y) * fw + (x0 - w->x)],
@@ -635,6 +637,10 @@ static void draw_window(int slot, int focused)
         const int x0 = imax(w->x, g_clip.x), y0 = imax(w->y, g_clip.y);
         const int x1 = imin(w->x + (int)g_width[slot], g_clip.x + g_clip.w);
         const int y1 = imin(w->y + (int)g_height[slot], g_clip.y + g_clip.h);
+        /* Both axes, not just the rows. A run of zero or fewer pixels is a
+         * negative length, and the byte count memcpy takes is unsigned. */
+        if (x1 <= x0)
+            return;
         for (int y = y0; y < y1; ++y) {
             const uint32_t* row = &dp[(unsigned long)(y - w->y) * g_width[slot]];
             memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x0],
@@ -785,6 +791,8 @@ contents:
     const int x0 = imax(content_x, g_clip.x), y0 = imax(content_y, g_clip.y);
     const int x1 = imin(content_x + (int)g_width[slot], g_clip.x + g_clip.w);
     const int y1 = imin(content_y + (int)g_height[slot], g_clip.y + g_clip.h);
+    if (x1 <= x0)
+        return;
 
     /* Only the last few rows can meet a corner; everything above them is a
      * straight copy and stays as fast as it was. */
