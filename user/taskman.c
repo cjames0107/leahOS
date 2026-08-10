@@ -136,7 +136,7 @@ static void meter(int x, int y, int w, int h, uint64_t part, uint64_t whole,
 static void draw(void)
 {
     wg_theme();
-    wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
+    wg_glass_clear();
 
     char line[96];
     snprintf(line, sizeof(line), "%d tasks", g_n);
@@ -236,6 +236,9 @@ int main(int argc, char** argv)
     if (wg_font() != 0)
         return 1;
     const int id = win_create(wx, wy, g_w, g_h, "Tasks");
+    /* Its pixels carry alpha, so the glass reaches into it. */
+    if (id >= 0)
+        win_set_alpha(id);
     if (id < 0) {
         printf("taskman: no window server\n");
         return 1;

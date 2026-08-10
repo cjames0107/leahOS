@@ -206,7 +206,7 @@ static void press(const char* k)
 
 static void draw(void)
 {
-    wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
+    wg_glass_clear();
 
     wg_fill(PAD, PAD, (int)g_w - PAD * 2, 34, WG_PAPER);
     wg_bevel(PAD, PAD, (int)g_w - PAD * 2, 34, 0);
@@ -253,6 +253,9 @@ int main(int argc, char** argv)
     if (wg_font() != 0)
         return 1;
     const int id = win_create(wx, wy, g_w, g_h, "Calculator");
+    /* Its pixels carry alpha, so the glass reaches into it. */
+    if (id >= 0)
+        win_set_alpha(id);
     if (id < 0) {
         printf("calc: no window server\n");
         return 1;

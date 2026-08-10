@@ -157,7 +157,7 @@ static void draw_time(char* out, int max, unsigned long frames)
 
 static void draw(void)
 {
-    wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
+    wg_glass_clear();
 
     wg_text_clipped(16, 14, g_name[0] ? g_name : "no file", WG_INK, (int)g_w - 32);
     wg_text_clipped(16, 36, g_note, WG_DIM, (int)g_w - 32);
@@ -226,6 +226,12 @@ int main(int argc, char** argv)
     const int have_audio = (audio_info(&info) == 0 && info.present);
 
     const int id = win_create(240, 140, g_w, g_h, "Music");
+
+    /* Its pixels carry alpha, so the glass reaches into it. */
+
+    if (id >= 0)
+
+        win_set_alpha(id);
     if (id < 0) {
         printf("player: no window server\n");
         return 1;

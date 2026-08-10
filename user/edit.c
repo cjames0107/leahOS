@@ -255,7 +255,7 @@ static void follow_caret(void)
 static void draw(void)
 {
     wg_theme();
-    wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
+    wg_glass_clear();
     wg_button(g_save.x, g_save.y, g_save.w, g_save.h, "Save", 0);
     wg_button(g_up.x, g_up.y, g_up.w, g_up.h, "^", 0);
     wg_button(g_down.x, g_down.y, g_down.w, g_down.h, "v", 0);
@@ -341,6 +341,9 @@ int main(int argc, char** argv)
         return 1;
     }
     const int id = win_create(150, 120, g_w, g_h, "Edit");
+    /* Its pixels carry alpha, so the glass reaches into it. */
+    if (id >= 0)
+        win_set_alpha(id);
     if (id < 0) {
         printf("edit: no window server\n");
         return 1;

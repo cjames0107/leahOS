@@ -66,6 +66,8 @@ static struct font* face(void)
 
 /* The surface draw.c wants, over whatever wg_target was pointed at. No clip:
  * a client owns every pixel of its own window. */
+static void blend_px(int x, int y, uint32_t over);
+
 static struct surface canvas(void)
 {
     struct surface s;
@@ -310,7 +312,6 @@ void wg_text(int x, int y, const char* s, uint32_t colour)
 
     const int size = wg_text_size();
     const int baseline = y + font_ascent(f, size);
-    const struct surface c = canvas();
     const unsigned alpha = (colour >> 24) != 0 ? (colour >> 24) & 0xFF : 255;
     const uint32_t rgb = colour & 0x00FFFFFFu;
 
@@ -327,8 +328,8 @@ void wg_text(int x, int y, const char* s, uint32_t colour)
                 const unsigned cov = g.coverage[(long)gy * g.w + gx];
                 if (cov == 0)
                     continue;
-                draw_pixel(&c, x + g.left + gx, baseline - g.top + gy,
-                           (((alpha * cov + 127) / 255) << 24) | rgb);
+                blend_px(x + g.left + gx, baseline - g.top + gy,
+                         (((alpha * cov + 127) / 255) << 24) | rgb);
             }
         x += g.advance;
     }
@@ -422,6 +423,49 @@ static void inner_glow(int x, int y, int w, int h, int radius)
     draw_round_rect_outline(&c, x, y, w, h, radius, 1, 0x24FFFFFFu);
 }
 
+/* Source-over onto a buffer that may itself be see-through.
+ *
+ * draw_over assumes what is underneath is opaque and hands back something
+ * opaque, which is right for painting onto a surface and wrong for painting
+ * *into* one. On a window whose background is a wash with the alpha left in,
+ * every antialiased edge came out solid and blended toward the wash instead of
+ * toward whatever the server would later put behind it - which is why text on
+ * the glass had a halo and looked heavier than it was.
+ *
+ * This keeps the alpha: an edge pixel stays partly transparent and the server
+ * finishes the blend against the real backdrop, which is the only place the
+ * right answer is known. */
+static void blend_px(int x, int y, uint32_t over)
+{
+    if (g_px == 0 || x < 0 || y < 0 ||
+        (unsigned)x >= g_w || (unsigned)y >= g_h)
+        return;
+    const unsigned ca = (over >> 24) & 0xFF;
+    if (ca == 0)
+        return;
+    const unsigned long at = (unsigned long)y * g_w + (unsigned)x;
+    const uint32_t under = g_px[at];
+    const unsigned ua = (under >> 24) & 0xFF;
+    if (ca == 255 || ua == 0) {
+        g_px[at] = (ca << 24) | (over & 0x00FFFFFFu);
+        return;
+    }
+    /* What the pixel underneath still contributes once this is over it. */
+    const unsigned rest = ua * (255 - ca) / 255;
+    const unsigned oa = ca + rest;
+    if (oa == 0) {
+        g_px[at] = 0;
+        return;
+    }
+    const unsigned r = ((((over >> 16) & 0xFF) * ca) +
+                        (((under >> 16) & 0xFF) * rest)) / oa;
+    const unsigned g = ((((over >> 8) & 0xFF) * ca) +
+                        (((under >> 8) & 0xFF) * rest)) / oa;
+    const unsigned b = (((over & 0xFF) * ca) + ((under & 0xFF) * rest)) / oa;
+    g_px[at] = (oa << 24) | ((r > 255 ? 255 : r) << 16) |
+               ((g > 255 ? 255 : g) << 8) | (b > 255 ? 255 : b);
+}
+
 /* Fill a rounded shape with a chosen alpha, written rather than blended.
  *
  * The difference matters: blending would fold the colour into whatever the
@@ -485,8 +529,6 @@ void wg_container(int x, int y, int w, int h, int pad)
         glass_fill(x, y, w, h, r, 0x7AFFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 14));
-    draw_round_rect_outline(&c, x, y, w, h, r, 1,
-                            glass_on() ? 0x2BFFFFFFu : 0x1A000000u);
     inner_glow(x, y, w, h, r);
 }
 
@@ -502,9 +544,8 @@ void wg_sidebar(int x, int y, int w, int h)
         glass_fill(x, y, w, h, 0, 0x8CFFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, 0, darken(wg_base_colour(), 18));
-    /* One hairline down the inside edge, where it meets the content. */
-    draw_rect(&c, x + w - 1, y, 1, h,
-              glass_on() ? 0x22FFFFFFu : 0x14000000u);
+    /* No line down the inside edge. The change of tone is the edge, and a
+     * hairline on top of it is the drawn border this design does without. */
 }
 
 /* A row of controls sharing one pill.

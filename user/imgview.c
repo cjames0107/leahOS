@@ -158,7 +158,7 @@ static int inside(const struct box* b, int x, int y)
 
 static void draw(void)
 {
-    wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
+    wg_glass_clear();
 
     wg_button(g_b_out.x, g_b_out.y, g_b_out.w, g_b_out.h, "-", 0);
     wg_button(g_b_in.x, g_b_in.y, g_b_in.w, g_b_in.h, "+", 0);
@@ -220,6 +220,9 @@ int main(int argc, char** argv)
     if (wg_font() != 0)
         return 1;
     const int id = win_create(200, 90, g_w, g_h, "Image");
+    /* Its pixels carry alpha, so the glass reaches into it. */
+    if (id >= 0)
+        win_set_alpha(id);
     if (id < 0) {
         printf("imgview: no window server\n");
         return 1;
