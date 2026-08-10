@@ -43,10 +43,59 @@ static int disk_read(unsigned long lba, unsigned count)
 
 /* --- ext4, as much of it as reading needs --------------------------------- */
 
-static unsigned g_block_size = 1024;
-static unsigned g_inodes_per_group, g_inode_size = 128, g_desc_size = 32;
-static unsigned g_first_data_block;
-static int g_mounted;
+/* --- one filesystem, of which there may be several ---------------------------
+ *
+ * Everything below used to be a global, which said there was one filesystem
+ * and there always would be. The block size, the inode size, the group
+ * descriptors, where the journal is - all of it is a property of a particular
+ * disk, and a second disk means a second set rather than a second guess.
+ *
+ * They are gathered here and reached through a pointer to whichever mount the
+ * path being resolved belongs to. The names are kept, as macros, so that the
+ * two hundred places that read them did not all have to be edited into
+ * something that says the same thing at greater length - and so that the
+ * change that matters is visible instead of buried in the noise of that.
+ */
+struct fs {
+    int      used;
+    char     at[64];            /* where it is mounted */
+    unsigned dev;               /* which disk, once the driver can say */
+
+    unsigned block_size;
+    unsigned inodes_per_group, inode_size, desc_size;
+    unsigned first_data_block;
+    unsigned blocks_per_group, group_count;
+    unsigned long gd_block;
+    unsigned char sb[1024];     /* the superblock, kept in memory */
+    int      mounted;
+
+    /* The journal is the disk's too. Its inode sits in a parallel array
+     * because struct inode is not declared until further down, and the block
+     * reader above here needs the block size from this struct. */
+    int      has_journal;
+    unsigned jrnl_first, jrnl_maxlen, jrnl_seq, jrnl_start;
+};
+
+#define FS_MAX 4
+static struct fs  g_fs[FS_MAX];
+static struct fs* g_cur = &g_fs[0];
+
+#define g_block_size       (g_cur->block_size)
+#define g_inodes_per_group (g_cur->inodes_per_group)
+#define g_inode_size       (g_cur->inode_size)
+#define g_desc_size        (g_cur->desc_size)
+#define g_first_data_block (g_cur->first_data_block)
+#define g_blocks_per_group (g_cur->blocks_per_group)
+#define g_group_count      (g_cur->group_count)
+#define g_gd_block         (g_cur->gd_block)
+#define g_sb               (g_cur->sb)
+#define g_mounted          (g_cur->mounted)
+#define g_journal          (g_journal_inode[(unsigned)(g_cur - g_fs)])
+#define g_has_journal      (g_cur->has_journal)
+#define g_jrnl_first       (g_cur->jrnl_first)
+#define g_jrnl_maxlen      (g_cur->jrnl_maxlen)
+#define g_jrnl_seq         (g_cur->jrnl_seq)
+#define g_jrnl_start       (g_cur->jrnl_start)
 
 static unsigned rd16(const unsigned char* p, unsigned at)
 {
@@ -86,6 +135,8 @@ struct inode {
     unsigned atime, ctime, mtime;
     unsigned char block[60];
 };
+
+static struct inode g_journal_inode[FS_MAX];
 
 static int read_inode(unsigned number, struct inode* out)
 {
@@ -178,9 +229,7 @@ static unsigned long map_block(const struct inode* in, unsigned long file_block)
  * are written in is the only thing standing between the two.
  */
 
-static unsigned char g_sb[1024];        /* the superblock, kept in memory */
-static unsigned g_blocks_per_group, g_group_count;
-static unsigned long g_gd_block;
+
 
 static void wr16w(unsigned char* p, unsigned at, unsigned v)
 {
@@ -596,10 +645,15 @@ static int read_link(const struct inode* in, char* out, unsigned max)
  * the file inside whatever the link leads to, and there is no reading of that
  * which does not follow it.
  */
+static const char* route(const char* path);
+
 static unsigned lookup_deep(const char* path, struct inode* out,
                             int follow_last, int depth)
 {
     char work[512];
+    /* Which disk this name is on, and what it is called there. Every lookup
+     * starts at the root inode - of that filesystem, not of the first one. */
+    path = route(path);
     unsigned ino = ROOT_INODE;
 
     if (depth > MAX_LINK_DEPTH)
@@ -1070,13 +1124,7 @@ struct mount_entry {
     const char* how;
 };
 
-static const struct mount_entry kMounts[] = {
-    { "/",     "/dev/sda2", "ext4", "rw"        },
-    { "/dev",  "devfs",     "devfs", "rw"       },
-    { "/proc", "procfs",    "procfs", "ro"      },
-};
 
-#define MOUNT_COUNT (sizeof(kMounts) / sizeof(kMounts[0]))
 
 /* --- /proc --------------------------------------------------------------------
  *
@@ -1195,10 +1243,19 @@ static int proc_contents(const char* path, char* out, unsigned max)
     }
     if (strcmp(path, "/proc/mounts") == 0) {
         int at = 0;
-        for (unsigned i = 0; i < MOUNT_COUNT && at < (int)max; ++i)
-            at += snprintf(out + at, max - (unsigned)at, "%s %s %s %s\n",
-                           kMounts[i].what, kMounts[i].at, kMounts[i].kind,
-                           kMounts[i].how);
+        /* The filesystems actually mounted, read from the table rather than
+         * from a list written down at build time and hoped to still be true. */
+        for (int i = 0; i < FS_MAX && at < (int)max; ++i) {
+            if (!g_fs[i].used)
+                continue;
+            at += snprintf(out + at, max - (unsigned)at, "/dev/sda%u %s ext4 rw\n",
+                           g_fs[i].dev + 2, g_fs[i].at);
+        }
+        /* And the one that is not a disk at all. /dev used to be listed here
+         * too, as a devfs; it is ordinary inodes on the root filesystem now. */
+        if (at < (int)max)
+            at += snprintf(out + at, max - (unsigned)at,
+                           "procfs /proc procfs ro\n");
         return at;
     }
     if (strcmp(path, "/proc/cpuinfo") == 0) {
@@ -1353,18 +1410,14 @@ static int proc_entry(const char* path, unsigned index, char* name,
 #define JBD2_FLAG_LAST_TAG  8
 
 /* Set when the superblock says there is one and its inode could be read. */
-static struct inode g_journal;
-static int      g_has_journal;
+
 /* Static, not automatic. Three of these nested inside each other is sixteen
  * kilobytes of stack in a ring-3 server that has nothing like that to spare -
  * which showed up as the boot stopping dead after the replay, with no fault
  * reported and every process that wanted a file waiting on one that was gone. */
 static unsigned char g_jbuf[sizeof(g_block)];   /* descriptors and the sb   */
 static unsigned char g_jdata[sizeof(g_block)];  /* one journalled block     */
-static unsigned g_jrnl_first;    /* first block that can hold a transaction */
-static unsigned g_jrnl_maxlen;   /* how many blocks the journal has         */
-static unsigned g_jrnl_seq;      /* the sequence recovery should start at   */
-static unsigned g_jrnl_start;    /* where it should start, 0 when clean     */
+
 
 static unsigned rd32be(const unsigned char* p, unsigned at)
 {
@@ -1717,8 +1770,52 @@ static void journal_open(const unsigned char* sb)
            g_jrnl_start != 0 ? ", needs recovery" : "");
 }
 
+/* Which mount a path belongs to, and what it is called inside that mount.
+ *
+ * The longest mount point that is a prefix of the path wins, which is what
+ * makes /mnt/x belong to /mnt rather than to /. Today there is one mount and
+ * this always answers the same, but the answer is now looked up rather than
+ * assumed, which is the part that had to change.
+ */
+static const char* route(const char* path)
+{
+    struct fs* best = &g_fs[0];
+    unsigned best_len = 0;
+
+    for (int i = 0; i < FS_MAX; ++i) {
+        if (!g_fs[i].used)
+            continue;
+        const unsigned n = (unsigned)strlen(g_fs[i].at);
+        if (n == 1)                     /* "/" matches everything, weakly */
+            continue;
+        if (strncmp(path, g_fs[i].at, n) != 0)
+            continue;
+        if (path[n] != '\0' && path[n] != '/')
+            continue;                   /* /mnternal is not under /mnt */
+        if (n > best_len) {
+            best = &g_fs[i];
+            best_len = n;
+        }
+    }
+
+    /* A batch belongs to the disk it was collected for: the block numbers in
+     * it mean nothing on another one. Crossing mounts commits what is held. */
+    if (best != g_cur && g_txn_open) {
+        txn_flush();
+        g_txn_started = uptime_ms();
+    }
+    g_cur = best;
+    return best_len == 0 ? path
+                         : (path[best_len] == '\0' ? "/" : path + best_len);
+}
+
 static int mount(void)
 {
+    g_cur = &g_fs[0];
+    g_cur->block_size = 1024;
+    g_cur->inode_size = 128;
+    g_cur->desc_size = 32;
+
     if (disk_read(0, 8) != 0)
         return -1;
     const unsigned char* sb = g_sectors->data + 1024;
@@ -1751,6 +1848,10 @@ static int mount(void)
         printf("vfsd: the journal could not be replayed\n");
 
     g_mounted = 1;
+    g_cur->used = 1;
+    g_cur->dev = 0;
+    g_cur->at[0] = '/';
+    g_cur->at[1] = '\0';
     return 0;
 }
 
