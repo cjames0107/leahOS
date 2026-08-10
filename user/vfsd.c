@@ -62,8 +62,12 @@ static unsigned rd32(const unsigned char* p, unsigned at)
  * which the transfer buffer has room for many times over. */
 static unsigned char g_block[8192];
 
+static int txn_peek(unsigned long block, unsigned char* out);
+
 static int read_block(unsigned long block, unsigned char* out)
 {
+    if (txn_peek(block, out))
+        return 0;
     const unsigned sectors = g_block_size / BLK_SECTOR;
     if (disk_read(block * sectors, sectors) != 0)
         return -1;
@@ -201,11 +205,71 @@ static int disk_write(unsigned long lba, unsigned count)
     return 0;
 }
 
+/* --- transactions ------------------------------------------------------------
+ *
+ * A change to the tree is never one block. Creating a file touches the inode
+ * bitmap, the inode table, the directory that names it, the group descriptor
+ * and the superblock's free counts, and a crash between any two of those
+ * leaves a filesystem that is not merely out of date but wrong: an inode
+ * marked used that nothing names, or a name pointing at an inode that was
+ * never written.
+ *
+ * So metadata writes are collected instead of issued. At the end of the
+ * request they are written to the journal, then a commit block is written
+ * after them, and only then are they written where they belong. A crash
+ * before the commit block leaves a transaction recovery discards; a crash
+ * after it leaves one recovery finishes. There is no third case, which is the
+ * entire point.
+ *
+ * Reads have to see the collection too. Half of these writes are read back
+ * within the same request - set a bit in the bitmap, then read the bitmap
+ * again to find the next free one - and a read that went to the disk would
+ * get the version from before the change.
+ */
+#define TXN_MAX 16
+
+static int           g_txn_open;
+static int           g_txn_bypass;   /* the journal's own writes */
+static unsigned      g_txn_count;
+static unsigned long g_txn_target[TXN_MAX];
+static unsigned char g_txn_buf[TXN_MAX][8192];
+
+static int txn_flush(void);
+
 static int write_block(unsigned long block, const unsigned char* in)
 {
+    if (g_txn_open && !g_txn_bypass) {
+        for (unsigned i = 0; i < g_txn_count; ++i)
+            if (g_txn_target[i] == block) {
+                memcpy(g_txn_buf[i], in, g_block_size);
+                return 0;
+            }
+        /* A transaction that will not fit is split rather than dropped. The
+         * halves are each atomic, which is weaker than one atomic whole but
+         * is not the same as losing the guarantee. */
+        if (g_txn_count == TXN_MAX && txn_flush() != 0)
+            return -1;
+        g_txn_target[g_txn_count] = block;
+        memcpy(g_txn_buf[g_txn_count], in, g_block_size);
+        ++g_txn_count;
+        return 0;
+    }
     const unsigned sectors = g_block_size / BLK_SECTOR;
     memcpy(g_sectors->data, in, g_block_size);
     return disk_write(block * sectors, sectors);
+}
+
+/* Whatever the transaction is holding for this block, if it holds one. */
+static int txn_peek(unsigned long block, unsigned char* out)
+{
+    if (!g_txn_open || g_txn_bypass)
+        return 0;
+    for (unsigned i = 0; i < g_txn_count; ++i)
+        if (g_txn_target[i] == block) {
+            memcpy(out, g_txn_buf[i], g_block_size);
+            return 1;
+        }
+    return 0;
 }
 
 /* The superblock lives 1024 bytes into the volume, which for every block size
@@ -1312,15 +1376,23 @@ static int jrnl_read(unsigned index, unsigned char* out)
     const unsigned long phys = map_block(&g_journal, index);
     if (phys == 0)
         return -1;
-    return read_block(phys, out);
+    g_txn_bypass = 1;
+    const int r = read_block(phys, out);
+    g_txn_bypass = 0;
+    return r;
 }
 
+/* Straight to the disk, always. Collecting the journal's own blocks into the
+ * transaction they are the record of would be a circle. */
 static int jrnl_write(unsigned index, const unsigned char* in)
 {
     const unsigned long phys = map_block(&g_journal, index);
     if (phys == 0)
         return -1;
-    return write_block(phys, in);
+    g_txn_bypass = 1;
+    const int r = write_block(phys, in);
+    g_txn_bypass = 0;
+    return r;
 }
 
 /* The journal is a ring. */
@@ -1462,6 +1534,119 @@ static int journal_replay(void)
     }
     g_jrnl_start = 0;
     return 0;
+}
+
+/* Write the collected blocks to the journal, commit them, and only then put
+ * them where they belong.
+ *
+ * The order is the whole guarantee, so it is worth stating: descriptor, then
+ * the blocks, then the commit block, then the journal superblock pointing at
+ * the lot. A crash anywhere before that last write leaves a journal whose
+ * s_start is still zero and a disk that never heard about any of this. After
+ * it, recovery finds a complete transaction and finishes the job.
+ *
+ * One transaction is in flight at a time and it is checkpointed immediately,
+ * so it always starts at the first block. A real journal batches many and
+ * lets the ring fill, which is faster and much harder to be sure of.
+ */
+static int txn_flush(void)
+{
+    if (g_txn_count == 0)
+        return 0;
+    if (!g_has_journal) {
+        /* No journal to write to. The writes still have to happen. */
+        for (unsigned i = 0; i < g_txn_count; ++i) {
+            g_txn_bypass = 1;
+            const int r = write_block(g_txn_target[i], g_txn_buf[i]);
+            g_txn_bypass = 0;
+            if (r != 0)
+                return -1;
+        }
+        g_txn_count = 0;
+        return 0;
+    }
+    /* It has to fit between the first block and the end, with room for the
+     * descriptor and the commit block. */
+    if (g_txn_count + 2 > g_jrnl_maxlen - g_jrnl_first)
+        return -1;
+
+    const unsigned seq = g_jrnl_seq;
+
+    memset(g_jbuf, 0, g_block_size);
+    wr32be(g_jbuf, 0, JBD2_MAGIC);
+    wr32be(g_jbuf, 4, JBD2_DESCRIPTOR);
+    wr32be(g_jbuf, 8, seq);
+    unsigned off = 12;
+    for (unsigned i = 0; i < g_txn_count; ++i) {
+        wr32be(g_jbuf, off, (unsigned)g_txn_target[i]);
+        unsigned flags = JBD2_FLAG_SAME_UUID;
+        /* A metadata block whose first word happens to be the journal's magic
+         * would look like a descriptor to recovery, so it is stored with that
+         * word zeroed and this flag says to put it back. */
+        if (rd32be(g_txn_buf[i], 0) == JBD2_MAGIC)
+            flags |= JBD2_FLAG_ESCAPE;
+        if (i + 1 == g_txn_count)
+            flags |= JBD2_FLAG_LAST_TAG;
+        wr32be(g_jbuf, off + 4, flags);
+        off += 8;
+    }
+    if (jrnl_write(g_jrnl_first, g_jbuf) != 0)
+        return -1;
+
+    for (unsigned i = 0; i < g_txn_count; ++i) {
+        memcpy(g_jdata, g_txn_buf[i], g_block_size);
+        if (rd32be(g_jdata, 0) == JBD2_MAGIC)
+            wr32be(g_jdata, 0, 0);
+        if (jrnl_write(g_jrnl_first + 1 + i, g_jdata) != 0)
+            return -1;
+    }
+
+    memset(g_jbuf, 0, g_block_size);
+    wr32be(g_jbuf, 0, JBD2_MAGIC);
+    wr32be(g_jbuf, 4, JBD2_COMMIT);
+    wr32be(g_jbuf, 8, seq);
+    if (jrnl_write(g_jrnl_first + 1 + g_txn_count, g_jbuf) != 0)
+        return -1;
+
+    /* The moment it becomes real. */
+    if (jrnl_read(0, g_jbuf) != 0 || rd32be(g_jbuf, 0) != JBD2_MAGIC)
+        return -1;
+    wr32be(g_jbuf, 24, seq);
+    wr32be(g_jbuf, 28, g_jrnl_first);
+    if (jrnl_write(0, g_jbuf) != 0)
+        return -1;
+
+    /* Now the disk itself. If the power goes here, recovery does this again. */
+    for (unsigned i = 0; i < g_txn_count; ++i) {
+        g_txn_bypass = 1;
+        const int r = write_block(g_txn_target[i], g_txn_buf[i]);
+        g_txn_bypass = 0;
+        if (r != 0)
+            return -1;
+    }
+
+    /* And it is finished, so the journal is empty again. */
+    g_jrnl_seq = seq + 1;
+    if (jrnl_read(0, g_jbuf) == 0 && rd32be(g_jbuf, 0) == JBD2_MAGIC) {
+        wr32be(g_jbuf, 24, g_jrnl_seq);
+        wr32be(g_jbuf, 28, 0);
+        jrnl_write(0, g_jbuf);
+    }
+    g_txn_count = 0;
+    return 0;
+}
+
+static void txn_begin(void)
+{
+    g_txn_count = 0;
+    g_txn_open = 1;
+}
+
+static int txn_end(void)
+{
+    const int r = txn_flush();
+    g_txn_open = 0;
+    return r;
 }
 
 /* Find the journal and read its superblock. Failure here is not fatal: a
@@ -1940,6 +2125,9 @@ int main(void)
 
         memset(&r, 0, sizeof(r));
         r.tag = m.tag;
+        /* Every request is a transaction. A read collects nothing and commits
+         * nothing, so this costs those exactly one comparison. */
+        txn_begin();
         /* The default is "something went wrong and this handler did not say
          * what", which is what -1 used to mean for everything. Handlers that
          * know better set a real code, and most of them do - the difference
@@ -2471,6 +2659,11 @@ int main(void)
         } else if (m.tag == VFS_SYNC) {
             r.word[0] = write_superblock();
         }
+        /* Before the reply, not after: a caller told its write succeeded and
+         * then finding it did not is the one outcome worth ruling out. */
+        if (txn_end() != 0 && r.word[0] >= 0)
+            r.word[0] = -EIO;
+
         ipc_reply(handle, &r);
     }
 }
