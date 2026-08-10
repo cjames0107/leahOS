@@ -361,6 +361,167 @@ void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w)
         wg_text(x, y, cut, colour);
 }
 
+
+/* --- the glass vocabulary -----------------------------------------------------
+ *
+ * Five things the new interface is made of, in one place so that every window
+ * agrees about them: the surface a window is painted on, a group of controls
+ * that share one pill, a container that holds other things, a sidebar, and the
+ * bright edge that makes any of them look like glass rather than paint.
+ *
+ * All of them ask whether the glass is on, because the answer changes what
+ * "slightly darker" has to mean. Over a blurred backdrop a container is a wash
+ * of white and the blur does the rest; over a flat panel there is nothing
+ * behind to show through, so the same container has to be a shade darker than
+ * what it sits on or it is invisible.
+ */
+
+static int glass_on(void)
+{
+    return g_ws != 0 && g_ws->magic == WS_MAGIC && g_ws->theme.blur != 0;
+}
+
+/* The colour a window's own background is, which is the colour its title bar
+ * is: the server paints the frame in this and the client paints its content in
+ * it, so the two meet without a seam. */
+uint32_t wg_base_colour(void)
+{
+    const uint32_t face = g_ws != 0 ? (g_ws->theme.face & 0x00FFFFFFu) : WG_FACE;
+    return draw_over(0xFF000000u | face, 0x66FFFFFFu);
+}
+
+/* Shift a colour toward black by `amount` out of 255, which is what "slightly
+ * darker" is when there is nothing behind to be slightly more opaque than. */
+static uint32_t darken(uint32_t colour, unsigned amount)
+{
+    unsigned r = (colour >> 16) & 0xFF, g = (colour >> 8) & 0xFF, b = colour & 0xFF;
+    r = r > amount ? r - amount : 0;
+    g = g > amount ? g - amount : 0;
+    b = b > amount ? b - amount : 0;
+    return 0xFF000000u | (r << 16) | (g << 8) | b;
+}
+
+/* A bright line just inside the top edge and a fainter one inside the bottom.
+ *
+ * This is the whole trick of a glassy surface: light collects along the upper
+ * lip of something transparent and again, more weakly, where it curves away at
+ * the bottom. Two arcs of the shape's own outline, clipped to the top and
+ * bottom bands, and the eye supplies the thickness. */
+static void inner_glow(int x, int y, int w, int h, int radius)
+{
+    if (w <= 2 || h <= 4)
+        return;
+    struct surface c = canvas();
+    const int band = h / 3 > 1 ? h / 3 : 1;
+
+    c.cx = x; c.cy = y; c.cw = w; c.ch = band;
+    draw_round_rect_outline(&c, x, y, w, h, radius, 1, 0x59FFFFFFu);
+
+    c.cy = y + h - band; c.ch = band;
+    draw_round_rect_outline(&c, x, y, w, h, radius, 1, 0x24FFFFFFu);
+}
+
+/* A container: a box holding other things.
+ *
+ * `pad` is how much room there is between it and the window's edge, and the
+ * corner follows from it. A box pressed against the edge wants a small radius
+ * or it fights the window's own corner; one floating in the middle of a lot of
+ * space can afford a large one. This is the rule the whole layout reads by,
+ * so it lives here rather than in each window's idea of a nice number. */
+int wg_container_radius(int pad)
+{
+    int r = 4 + pad;
+    if (r > 14) r = 14;
+    return r;
+}
+
+void wg_container(int x, int y, int w, int h, int pad)
+{
+    const struct surface c = canvas();
+    const int r = wg_container_radius(pad);
+    if (glass_on())
+        draw_round_rect(&c, x, y, w, h, r, 0x2EFFFFFFu);
+    else
+        draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 14));
+    draw_round_rect_outline(&c, x, y, w, h, r, 1,
+                            glass_on() ? 0x2BFFFFFFu : 0x1A000000u);
+    inner_glow(x, y, w, h, r);
+}
+
+/* A sidebar: full height, and a shade apart from the content beside it.
+ *
+ * Square on the outside because it runs into the window's own edges, which
+ * already have corners of their own - a rounded sidebar inside a rounded
+ * window is two curves fighting over the same pixels. */
+void wg_sidebar(int x, int y, int w, int h)
+{
+    const struct surface c = canvas();
+    if (glass_on())
+        draw_round_rect(&c, x, y, w, h, 0, 0x33FFFFFFu);
+    else
+        draw_round_rect(&c, x, y, w, h, 0, darken(wg_base_colour(), 18));
+    /* One hairline down the inside edge, where it meets the content. */
+    draw_rect(&c, x + w - 1, y, 1, h,
+              glass_on() ? 0x22FFFFFFu : 0x14000000u);
+}
+
+/* A row of controls sharing one pill.
+ *
+ * Things that belong together are drawn together: back and forward are one
+ * control with two ends, and putting a gap between them says they are two
+ * unrelated buttons that happen to be adjacent. Anything that does a different
+ * kind of job gets a pill of its own.
+ *
+ * `count` segments of `seg_w` each. `selected` is the index drawn as pressed,
+ * or -1 for none. */
+void wg_pill_group(int x, int y, int seg_w, int h, int count,
+                   const char* const* labels, int selected)
+{
+    if (count <= 0)
+        return;
+    const struct surface c = canvas();
+    const int w = seg_w * count;
+    const int r = h / 2;
+
+    if (glass_on())
+        draw_round_rect(&c, x, y, w, h, r, 0x38FFFFFFu);
+    else
+        draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 10));
+
+    /* The chosen segment, inside the pill rather than instead of it. */
+    if (selected >= 0 && selected < count) {
+        const int sx = x + selected * seg_w;
+        draw_round_rect(&c, sx + 1, y + 1, seg_w - 2, h - 2, r - 1,
+                        glass_on() ? 0x66FFFFFFu : 0x99FFFFFFu);
+    }
+
+    /* Hairlines between the segments, short of the ends so they do not cut
+     * across the curve. */
+    for (int i = 1; i < count; ++i)
+        draw_rect(&c, x + i * seg_w, y + 3, 1, h - 6,
+                  glass_on() ? 0x24FFFFFFu : 0x18000000u);
+
+    draw_round_rect_outline(&c, x, y, w, h, r, 1,
+                            glass_on() ? 0x3AFFFFFFu : 0x22000000u);
+    inner_glow(x, y, w, h, r);
+
+    for (int i = 0; i < count; ++i) {
+        if (labels[i] == 0)
+            continue;
+        const int tw = wg_text_width(labels[i]);
+        wg_text(x + i * seg_w + (seg_w - tw) / 2,
+                y + (h - wg_text_height()) / 2, labels[i], 0xF0101810u);
+    }
+}
+
+/* One control on its own, which is the same shape with one segment. */
+void wg_pill(int x, int y, int w, int h, const char* label, int down)
+{
+    const char* one[1];
+    one[0] = label;
+    wg_pill_group(x, y, w, h, 1, one, down ? 0 : -1);
+}
+
 void wg_button(int x, int y, int w, int h, const char* label, int down)
 {
     const struct surface c = canvas();

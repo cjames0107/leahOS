@@ -95,6 +95,32 @@ void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w);
 /* A push button, drawn pressed when `down`. */
 void wg_button(int x, int y, int w, int h, const char* label, int down);
 
+/* --- the glass vocabulary --------------------------------------------------
+ *
+ * Each of these asks the server whether the glass is on, because that changes
+ * what "slightly apart from its background" has to mean: a wash of white over
+ * a blurred backdrop, or a shade darker over a flat one. A window using them
+ * looks right in both without knowing which it is in. */
+
+/* What a window's background is, which is also what its title bar is - the
+ * server paints the frame this colour so the two meet without a seam. */
+uint32_t wg_base_colour(void);
+
+/* A box that holds other things. `pad` is its distance from the window edge
+ * and the corner radius follows from it: pressed against the edge wants a
+ * tight curve, floating in space can afford a generous one. */
+int  wg_container_radius(int pad);
+void wg_container(int x, int y, int w, int h, int pad);
+
+/* Full height, square, a shade apart from the content beside it. */
+void wg_sidebar(int x, int y, int w, int h);
+
+/* Controls that belong together share one pill; anything doing a different
+ * kind of job gets its own. `selected` is the pressed segment, or -1. */
+void wg_pill_group(int x, int y, int seg_w, int h, int count,
+                   const char* const* labels, int selected);
+void wg_pill(int x, int y, int w, int h, const char* label, int down);
+
 #endif /* _WIDGET_H */
 
 /* --- scrollbars -----------------------------------------------------------

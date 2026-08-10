@@ -647,10 +647,15 @@ static void draw_about(void)
 
 static void draw(void)
 {
-    wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
+    wg_fill(0, 0, (int)g_w, (int)g_h, wg_base_colour());
 
     /* The sidebar, sunken so it reads as a place rather than a row of buttons. */
-    wg_fill(0, 0, SIDEBAR, (int)g_h, 0xB0B0B0);
+    /* Full height and a shade apart from the page beside it, rather than a
+     * grey rectangle that stops wherever the list of pages happens to end. */
+    wg_sidebar(0, 0, SIDEBAR, (int)g_h);
+    /* The page itself, held in a container inset from the sidebar and the
+     * window's edges. */
+    wg_container(SIDEBAR + 6, 6, (int)g_w - SIDEBAR - 12, (int)g_h - 12, 6);
     wg_bevel(0, 0, SIDEBAR, (int)g_h, 0);
     for (int i = 0; i < PAGES; ++i) {
         const int y = 10 + i * ROW_H;

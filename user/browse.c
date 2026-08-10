@@ -111,16 +111,20 @@ static char g_hist[MAX_HISTORY][256];
 static int  g_hist_n;
 static int  g_hist_at = -1;
 
-static struct box g_back    = { 8,   5, 26, 20 };
-static struct box g_fwd     = { 36,  5, 26, 20 };
-static struct box g_up      = { 64,  5, 26, 20 };
-static struct box g_vicon   = { 100, 5, 46, 20 };
-static struct box g_vlist   = { 150, 5, 46, 20 };
-static struct box g_vtree   = { 200, 5, 46, 20 };
-static struct box g_open    = { 254, 5, 50, 20 };
-static struct box g_rename  = { 308, 5, 62, 20 };
-static struct box g_upline  = { 378, 5, 22, 20 };
-static struct box g_dnline  = { 402, 5, 22, 20 };
+/* Three groups and two singletons. Back, forward and up are one control with
+ * three ends - they are the same question asked in three directions - so their
+ * boxes are contiguous and they share a pill. The three views are another.
+ * Open and Rename do different kinds of job and stand alone. */
+static struct box g_back    = { 8,   5, 28, 22 };
+static struct box g_fwd     = { 36,  5, 28, 22 };
+static struct box g_up      = { 64,  5, 28, 22 };
+static struct box g_vicon   = { 100, 5, 50, 22 };
+static struct box g_vlist   = { 150, 5, 50, 22 };
+static struct box g_vtree   = { 200, 5, 50, 22 };
+static struct box g_open    = { 258, 5, 52, 22 };
+static struct box g_rename  = { 318, 5, 64, 22 };
+static struct box g_upline  = { 390, 5, 24, 22 };
+static struct box g_dnline  = { 414, 5, 24, 22 };
 
 static int inside(const struct box* b, int x, int y)
 {
@@ -375,30 +379,31 @@ static void arrow_glyph(const struct box* b, int dir, int enabled)
 
 static void draw_toolbar(void)
 {
-    wg_fill(0, 0, (int)g_w, TOOLBAR_H, WG_FACE);
+    wg_fill(0, 0, (int)g_w, TOOLBAR_H, wg_base_colour());
     /* Back and forward are icons because they are the two controls used most
      * and the two whose meaning a word does not improve. Up keeps a glyph of
      * its own rather than a label for the same reason. */
-    wg_button(g_back.x, g_back.y, g_back.w, g_back.h, "", 0);
-    arrow_glyph(&g_back, 0, g_hist_at > 0);
-    wg_button(g_fwd.x, g_fwd.y, g_fwd.w, g_fwd.h, "", 0);
-    arrow_glyph(&g_fwd, 1, g_hist_at + 1 < g_hist_n);
-    wg_button(g_up.x, g_up.y, g_up.w, g_up.h, "", 0);
-    arrow_glyph(&g_up, 2, strcmp(g_path, "/") != 0);
-    wg_button(g_rename.x, g_rename.y, g_rename.w, g_rename.h, "Rename", 0);
-    wg_button(g_vicon.x, g_vicon.y, g_vicon.w, g_vicon.h, "Icon",
-              g_view == VIEW_ICON);
-    wg_button(g_vlist.x, g_vlist.y, g_vlist.w, g_vlist.h, "List",
-              g_view == VIEW_LIST);
-    wg_button(g_vtree.x, g_vtree.y, g_vtree.w, g_vtree.h, "Tree",
-              g_view == VIEW_TREE);
-    wg_button(g_open.x, g_open.y, g_open.w, g_open.h, "Open", 0);
-    wg_button(g_upline.x, g_upline.y, g_upline.w, g_upline.h, "^", 0);
-    wg_button(g_dnline.x, g_dnline.y, g_dnline.w, g_dnline.h, "v", 0);
+    {
+        static const char* const nav[3]  = { "", "", "" };
+        static const char* const view[3] = { "Icon", "List", "Tree" };
+        static const char* const line[2] = { "^", "v" };
+        wg_pill_group(g_back.x, g_back.y, g_back.w, g_back.h, 3, nav, -1);
+        /* The arrows go on top of the pill: it is one control, and these say
+         * which of its three ends is which. */
+        arrow_glyph(&g_back, 0, g_hist_at > 0);
+        arrow_glyph(&g_fwd,  1, g_hist_at >= 0 && g_hist_at + 1 < g_hist_n);
+        arrow_glyph(&g_up,   2, strcmp(g_path, "/") != 0);
+        wg_pill_group(g_vicon.x, g_vicon.y, g_vicon.w, g_vicon.h, 3, view,
+                      g_view);
+        wg_pill(g_open.x, g_open.y, g_open.w, g_open.h, "Open", 0);
+        wg_pill(g_rename.x, g_rename.y, g_rename.w, g_rename.h, "Rename", 0);
+        wg_pill_group(g_upline.x, g_upline.y, g_upline.w, g_upline.h, 2,
+                      line, -1);
+    }
 
     /* The path, in a sunken well so it reads as a display rather than a
      * control - it is not editable. */
-    wg_fill(6, TOOLBAR_H + 1, (int)g_w - 12, PATH_H - 3, WG_PAPER);
+    wg_container(6, TOOLBAR_H + 1, (int)g_w - 12, PATH_H - 3, 6);
     wg_bevel(6, TOOLBAR_H + 1, (int)g_w - 12, PATH_H - 3, 0);
     wg_text_clipped(10, TOOLBAR_H + 2, g_path, WG_INK, (int)g_w - 20);
 }
@@ -501,10 +506,12 @@ static void draw_tree(void)
 static void draw(void)
 {
     wg_theme();                 /* whatever settings last chose */
-    wg_fill(0, 0, (int)g_w, (int)g_h, WG_FACE);
+    wg_fill(0, 0, (int)g_w, (int)g_h, wg_base_colour());
 
     /* The listing sits in its own sunken well, the way a document area does. */
-    wg_fill(4, content_top(), (int)g_w - 8, content_h(), wg_body_colour());
+    /* A container rather than a white sheet: it sits four pixels in from the
+     * window's edge, so it gets the small corner that goes with that. */
+    wg_container(4, content_top(), (int)g_w - 8, content_h(), 4);
 
     if (g_view == VIEW_ICON)      draw_icons();
     else if (g_view == VIEW_LIST) draw_list();

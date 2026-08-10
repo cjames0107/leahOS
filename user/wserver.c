@@ -725,9 +725,41 @@ static void draw_window(int slot, int focused)
     if (g_clip.y >= bar_bottom || g_clip.y + g_clip.h <= w->y)
         goto contents;
 
-    /* The three controls, left to right. Only the close box has a vector
-     * glyph; a minimise is a bar and a maximise is a square outline, both of
-     * which are quicker to draw than to load. */
+    /* One pill holding all three. Close, minimise and maximise are three ways
+     * of saying what happens to this window, so they are one control with
+     * three ends rather than three controls that happen to be adjacent - and
+     * the pill is what tells the eye which of those it is looking at. */
+    {
+        int px0, py0, px2, ignored;
+        control_box(w, 0, &px0, &py0);
+        control_box(w, 2, &px2, &ignored);
+        const int pw = px2 + CONTROL_SIZE - px0 + 12;
+        const int ph = CONTROL_SIZE + 8;
+        const int pr = ph / 2;
+        const int bx0 = px0 - 6, by0 = py0 - 4;
+
+        draw_round_rect(&c, bx0, by0, pw, ph, pr,
+                        focused ? 0x30FFFFFFu : 0x1CFFFFFFu);
+        draw_round_rect_outline(&c, bx0, by0, pw, ph, pr, 1,
+                                focused ? 0x3AFFFFFFu : 0x22FFFFFFu);
+        /* The bright lip along the top and the fainter one at the bottom:
+         * the same two arcs every glassy thing in this interface has. */
+        {
+            struct surface g = c;
+            const int band = ph / 3 > 1 ? ph / 3 : 1;
+            g.cx = bx0; g.cy = by0; g.cw = pw; g.ch = band;
+            draw_round_rect_outline(&g, bx0, by0, pw, ph, pr, 1, 0x59FFFFFFu);
+            g.cy = by0 + ph - band;
+            draw_round_rect_outline(&g, bx0, by0, pw, ph, pr, 1, 0x24FFFFFFu);
+        }
+        /* Hairlines between them, short of the ends so they miss the curve. */
+        for (int i = 1; i < 3; ++i) {
+            int hx, hy;
+            control_box(w, i, &hx, &hy);
+            draw_rect(&c, hx - 4, by0 + 3, 1, ph - 6, 0x24FFFFFFu);
+        }
+    }
+
     for (int which = 0; which < 3; ++which) {
         int bx, by;
         control_box(w, which, &bx, &by);
