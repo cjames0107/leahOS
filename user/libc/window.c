@@ -282,6 +282,22 @@ void win_set_min_size(int id, unsigned width, unsigned height)
     block->windows[id].min_height = height;
 }
 
+void win_set_sidebar(int id, unsigned width)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+        return;
+    block->windows[id].sidebar = width;
+}
+
+void win_set_alpha(int id)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+        return;
+    block->windows[id].flags |= WS_FLAG_ALPHA;
+}
+
 void win_set_desktop(int id)
 {
     struct ws_shared* block = control();

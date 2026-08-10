@@ -379,7 +379,7 @@ static void arrow_glyph(const struct box* b, int dir, int enabled)
 
 static void draw_toolbar(void)
 {
-    wg_fill(0, 0, (int)g_w, TOOLBAR_H, wg_base_colour());
+
     /* Back and forward are icons because they are the two controls used most
      * and the two whose meaning a word does not improve. Up keeps a glyph of
      * its own rather than a label for the same reason. */
@@ -506,7 +506,7 @@ static void draw_tree(void)
 static void draw(void)
 {
     wg_theme();                 /* whatever settings last chose */
-    wg_fill(0, 0, (int)g_w, (int)g_h, wg_base_colour());
+    wg_glass_clear();
 
     /* The listing sits in its own sunken well, the way a document area does. */
     /* A container rather than a white sheet: it sits four pixels in from the
@@ -1013,6 +1013,9 @@ int main(int argc, char** argv)
         return 1;
     }
     const int id = win_create(x, y, g_w, g_h, "Files");
+    /* Its pixels carry alpha, so the glass reaches past the title bar. */
+    if (id >= 0)
+        win_set_alpha(id);
     if (id < 0) {
         printf("browse: no window server\n");
         return 1;

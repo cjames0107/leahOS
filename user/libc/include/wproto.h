@@ -66,6 +66,18 @@
  * - its pixels, its events - works exactly as any other window does. */
 #define WS_FLAG_DESKTOP 1u
 
+/* The client's pixels carry alpha in the high byte, and the server blends
+ * them onto what it has already composed rather than copying over it.
+ *
+ * This is what lets the glass reach past the frame. A window's chrome is a
+ * blurred backdrop with a wash of white on it; without this its contents were
+ * an opaque rectangle laid on top, so the effect stopped at the title bar and
+ * the window read as two different materials joined at a seam.
+ *
+ * Only windows that say so, because a client that has not thought about its
+ * alpha byte leaves it zero, and zero here means invisible. */
+#define WS_FLAG_ALPHA   2u
+
 /* Slot states. A client walks 0 -> CLAIMED -> LIVE and finally back to FREE. */
 #define WS_SLOT_FREE    0u
 #define WS_SLOT_CLAIMED 1u   /* won by a client, not yet filled in           */
@@ -136,6 +148,11 @@ struct ws_window {
     volatile int32_t  x, y;         /* top-left of the frame, owned by the server
                                        once live: dragging moves it */
     volatile uint32_t width, height;/* the content area, owned by the client   */
+    /* How wide this window's sidebar is, or zero. The server tints that column
+     * across the title bar as well, because a sidebar that stops where the
+     * chrome begins is a panel with a lid on it - the whole point of a full
+     * height sidebar is that it is one surface from the top of the window. */
+    volatile uint32_t sidebar;
     volatile uint32_t present;      /* client bumps it after drawing           */
     volatile uint32_t drawn;        /* server copies present here once shown   */
     char title[WS_TITLE_LEN];

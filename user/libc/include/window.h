@@ -34,6 +34,16 @@ void win_set_min_size(int id, unsigned width, unsigned height);
  * draggable. Call before drawing; see WS_FLAG_DESKTOP in <wproto.h>. */
 void win_set_desktop(int id);
 
+/* Say that this window's pixels carry alpha, so the server blends them onto
+ * the blurred backdrop instead of copying over it. A window that says this
+ * must fill its alpha byte everywhere - zero means invisible, not opaque. */
+void win_set_alpha(int id);
+
+/* How wide this window's sidebar is. The server carries the same tint up
+ * across the title bar, so the sidebar is one surface from the very top of the
+ * window rather than a panel starting under the chrome. */
+void win_set_sidebar(int id, unsigned width);
+
 /* Show what has been drawn. */
 void win_present(int id);
 

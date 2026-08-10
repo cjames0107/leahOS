@@ -10,13 +10,16 @@
  * idiom. They live here because paint, uitest, the browser and the editor were
  * otherwise going to carry four copies of the same bevel routine. */
 
-#define WG_FACE    0xC0C0C0u
+/* Near-white rather than the old plate grey. The whole interface is a light
+ * surface with soft shadows now, and a mid grey face is the one thing that
+ * still read as a machine from 1991. */
+#define WG_FACE    0xF2F4F7u
 #define WG_LIGHT   0xFFFFFFu
-#define WG_SHADOW  0x606060u
+#define WG_SHADOW  0x9AA3AEu
 #define WG_INK     0x000000u
-#define WG_ACCENT  0x000080u
+#define WG_ACCENT  0x2C6BEDu
 #define WG_PAPER   0xFFFFFFu
-#define WG_DIM     0x808080u
+#define WG_DIM     0x8B94A0u
 
 /* One radius for every control in the interface, matching the windows they sit
  * in. Smaller than a window's, because a button inside a rounded panel with the
@@ -105,6 +108,11 @@ void wg_button(int x, int y, int w, int h, const char* label, int down);
 /* What a window's background is, which is also what its title bar is - the
  * server paints the frame this colour so the two meet without a seam. */
 uint32_t wg_base_colour(void);
+
+/* Paint the window's background. With the glass on this leaves alpha in the
+ * pixels so the server blends them over the blur; with it off it is the flat
+ * panel colour. A window using this must have called win_set_alpha. */
+void wg_glass_clear(void);
 
 /* A box that holds other things. `pad` is its distance from the window edge
  * and the corner radius follows from it: pressed against the edge wants a

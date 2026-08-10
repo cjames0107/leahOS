@@ -83,8 +83,8 @@ struct preset {
     uint32_t pattern;
 };
 static const struct preset kPresets[] = {
-    { "Default",  0x008080, 0xC0C0C0, 0xFFFFFF, 0x606060, 0x000080, 0xFFFFFF,
-      0xFFFFFF, 0xB0C4DE, 0xFFFFFF, 0x000000, 0, WS_PATTERN_FLAT },
+    { "Default",  0x8894A8, 0xF2F4F7, 0xFFFFFF, 0x9AA3AE, 0xF2F4F7, 0x18202B,
+      0xFFFFFF, 0x2C6BED, 0xFFFFFF, 0x18202B, 0, WS_PATTERN_FLAT },
     { "Slate",    0x2E3440, 0x4C566A, 0x7B88A1, 0x2B303B, 0x5E81AC, 0xECEFF4,
       0xD8DEE9, 0x5E81AC, 0x3B4252, 0xE5E9F0, 10, WS_PATTERN_GRID },
     { "Parchment",0x8B7355, 0xE8DCC0, 0xFFF8E7, 0x9A8C70, 0x6B4423, 0xFFF8E7,
@@ -442,7 +442,7 @@ static void draw_appearance(void)
     wg_text(SIDEBAR + 366, 196, "preview", WG_DIM);
     const int px = SIDEBAR + 366, py = 214;
     wg_fill(px, py, 150, 60, g_ws ? g_ws->theme.desktop : 0x008080);
-    wg_fill(px + 12, py + 10, 110, 40, g_ws ? g_ws->theme.face : 0xC0C0C0);
+    wg_fill(px + 12, py + 10, 110, 40, g_ws ? g_ws->theme.face : 0xF2F4F7);
     wg_bevel(px + 12, py + 10, 110, 40, 1);
     wg_fill(px + 15, py + 13, 104, 12, g_ws ? g_ws->theme.title_active : 0x000080);
     wg_bevel(px, py, 150, 60, 0);
@@ -647,7 +647,7 @@ static void draw_about(void)
 
 static void draw(void)
 {
-    wg_fill(0, 0, (int)g_w, (int)g_h, wg_base_colour());
+    wg_glass_clear();
 
     /* The sidebar, sunken so it reads as a place rather than a row of buttons. */
     /* Full height and a shade apart from the page beside it, rather than a
@@ -695,6 +695,11 @@ int main(int argc, char** argv)
     apply_saved_audio();
 
     const int id = win_create(wx, wy, g_w, g_h, "Settings");
+    /* Its pixels carry alpha, so the glass reaches past the title bar. */
+    if (id >= 0) {
+        win_set_alpha(id);
+        win_set_sidebar(id, SIDEBAR);
+    }
     if (id < 0) {
         printf("settings: no window server\n");
         return 1;

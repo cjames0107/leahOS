@@ -91,7 +91,7 @@ void wg_plot(int x, int y, uint32_t colour)
     if (g_px == 0 || x < 0 || y < 0 ||
         (unsigned)x >= g_w || (unsigned)y >= g_h)
         return;
-    g_px[(unsigned)y * g_w + (unsigned)x] = colour;
+    g_px[(unsigned)y * g_w + (unsigned)x] = 0xFF000000u | colour;
 }
 
 /* An icon: 32x32 pixels with one bit of alpha, drawn straight over whatever is
@@ -138,9 +138,10 @@ void wg_fill(int x, int y, int w, int h, uint32_t colour)
     if (y1 > (int)g_h) y1 = (int)g_h;
     if (g_px == 0)
         return;
+    const uint32_t solid = 0xFF000000u | colour;
     for (int row = y0; row < y1; ++row)
         for (int col = x0; col < x1; ++col)
-            g_px[(unsigned)row * g_w + (unsigned)col] = colour;
+            g_px[(unsigned)row * g_w + (unsigned)col] = solid;
 }
 
 /* --- the RGB picker -------------------------------------------------------
@@ -421,6 +422,47 @@ static void inner_glow(int x, int y, int w, int h, int radius)
     draw_round_rect_outline(&c, x, y, w, h, radius, 1, 0x24FFFFFFu);
 }
 
+/* Fill a rounded shape with a chosen alpha, written rather than blended.
+ *
+ * The difference matters: blending would fold the colour into whatever the
+ * buffer already held and hand back something opaque, which is right for a
+ * control drawn on a surface and wrong for the surface itself. This leaves the
+ * alpha in the pixel for the server to blend against the blur. */
+static void glass_fill(int x, int y, int w, int h, int radius, uint32_t argb)
+{
+    const unsigned a = (argb >> 24) & 0xFF;
+    const uint32_t rgb = argb & 0x00FFFFFFu;
+    for (int py = y; py < y + h; ++py) {
+        if (py < 0 || (unsigned)py >= g_h)
+            continue;
+        for (int px = x; px < x + w; ++px) {
+            if (px < 0 || (unsigned)px >= g_w)
+                continue;
+            const int cov = draw_round_coverage(px, py, x, y, w, h, radius);
+            if (cov == 0)
+                continue;
+            const unsigned pa = (a * (unsigned)cov + 127) / 255;
+            g_px[(unsigned)py * g_w + (unsigned)px] = (pa << 24) | rgb;
+        }
+    }
+}
+
+/* A window's own background.
+ *
+ * With the glass on this is a wash of white with the alpha left in it, so the
+ * server blends it over the blurred backdrop and the interior becomes the same
+ * material as the title bar. With the glass off there is nothing behind to
+ * show through, so it is the flat panel colour, opaque. */
+void wg_glass_clear(void)
+{
+    if (g_px == 0)
+        return;
+    const uint32_t c = glass_on() ? 0x59FFFFFFu
+                                  : wg_base_colour();
+    for (unsigned i = 0; i < g_w * g_h; ++i)
+        g_px[i] = c;
+}
+
 /* A container: a box holding other things.
  *
  * `pad` is how much room there is between it and the window's edge, and the
@@ -440,7 +482,7 @@ void wg_container(int x, int y, int w, int h, int pad)
     const struct surface c = canvas();
     const int r = wg_container_radius(pad);
     if (glass_on())
-        draw_round_rect(&c, x, y, w, h, r, 0x2EFFFFFFu);
+        glass_fill(x, y, w, h, r, 0x7AFFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 14));
     draw_round_rect_outline(&c, x, y, w, h, r, 1,
@@ -457,7 +499,7 @@ void wg_sidebar(int x, int y, int w, int h)
 {
     const struct surface c = canvas();
     if (glass_on())
-        draw_round_rect(&c, x, y, w, h, 0, 0x33FFFFFFu);
+        glass_fill(x, y, w, h, 0, 0x8CFFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, 0, darken(wg_base_colour(), 18));
     /* One hairline down the inside edge, where it meets the content. */

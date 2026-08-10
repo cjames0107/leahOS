@@ -725,6 +725,27 @@ static void draw_window(int slot, int focused)
     if (g_clip.y >= bar_bottom || g_clip.y + g_clip.h <= w->y)
         goto contents;
 
+    /* A sidebar's tint, carried up through the title bar so that the column is
+     * one surface from the top of the window. The client paints the rest of it;
+     * this is the piece the client cannot reach, because its pixels start
+     * below the chrome. */
+    if (w->sidebar > 0 && !is_desktop(slot)) {
+        const int sw = (int)w->sidebar + BORDER;
+        const int sh = BORDER + TITLE_HEIGHT;
+        struct surface g = c;
+        const int x0 = imax(w->x, g_clip.x), y0 = imax(w->y, g_clip.y);
+        const int x1 = imin(w->x + sw, g_clip.x + g_clip.w);
+        const int y1 = imin(w->y + sh, g_clip.y + g_clip.h);
+        if (x1 > x0 && y1 > y0) {
+            g.cx = x0; g.cy = y0; g.cw = x1 - x0; g.ch = y1 - y0;
+            /* Rounded to the window's own shape so it follows the top-left
+             * corner instead of squaring it off. */
+            draw_round_rect(&g, w->x, w->y, (int)fw, (int)fh, CORNER,
+                            g_control->theme.blur != 0 ? 0x33FFFFFFu
+                                                       : 0x14000000u);
+        }
+    }
+
     /* One pill holding all three. Close, minimise and maximise are three ways
      * of saying what happens to this window, so they are one control with
      * three ends rather than three controls that happen to be adjacent - and
@@ -830,8 +851,18 @@ contents:
      * straight copy and stays as fast as it was. */
     const int curved_from = w->y + (int)fh - CORNER - BORDER;
 
+    /* A window that carries alpha is blended onto what is already there, which
+     * is the blurred backdrop and the wash over it. That is what lets the glass
+     * continue past the title bar instead of stopping at it. */
+    const int translucent = (w->flags & WS_FLAG_ALPHA) != 0;
+
     for (int y = y0; y < y1; ++y) {
         const uint32_t* row = &px[(unsigned long)(y - content_y) * g_width[slot]];
+        if (translucent && y < curved_from) {
+            for (int x = x0; x < x1; ++x)
+                back_blend(x, y, row[x - content_x]);
+            continue;
+        }
         if (y < curved_from) {
             memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x0],
                    &row[x0 - content_x], (size_t)(x1 - x0) * sizeof(uint32_t));
@@ -843,7 +874,11 @@ contents:
             if (cov == 0)
                 continue;
             const uint32_t colour = row[x - content_x];
-            back_blend(x, y, ((unsigned)cov << 24) | (colour & 0x00FFFFFFu));
+            /* The corner's coverage and the pixel's own alpha both apply. */
+            unsigned a = (unsigned)cov;
+            if (translucent)
+                a = (a * ((colour >> 24) & 0xFFu) + 127) / 255;
+            back_blend(x, y, (a << 24) | (colour & 0x00FFFFFFu));
         }
     }
 }
@@ -1651,16 +1686,19 @@ int main(void)
      * same grey as the face - what marks it as a title bar is the pinstripes,
      * not a colour, which is the thing this era got right. */
     g_control->theme.desktop      = 0x8894A8;   /* the blue-grey behind it all */
-    g_control->theme.face         = 0xDDDDDD;
+    /* Near-white surfaces and a blue accent. The old plate greys and navy
+     * selection were the last of the 1991 machine showing through a design
+     * that is otherwise soft light and shadow. */
+    g_control->theme.face         = 0xF2F4F7;
     g_control->theme.light        = 0xFFFFFF;
-    g_control->theme.shadow       = 0x888888;
-    g_control->theme.title_active = 0xDDDDDD;
-    g_control->theme.title_idle   = 0xDDDDDD;
-    g_control->theme.title_text   = 0x000000;
+    g_control->theme.shadow       = 0x9AA3AE;
+    g_control->theme.title_active = 0xF2F4F7;
+    g_control->theme.title_idle   = 0xF2F4F7;
+    g_control->theme.title_text   = 0x18202B;
     g_control->theme.cursor       = 0xFFFFFF;
-    g_control->theme.selection    = 0x000080;   /* the classic selection navy */
+    g_control->theme.selection    = 0x2C6BED;
     g_control->theme.body         = 0xFFFFFF;
-    g_control->theme.text         = 0x000000;
+    g_control->theme.text         = 0x18202B;
     g_control->theme.text_scale   = 1;
     g_control->theme.contrast     = 0;
     g_control->theme.pattern      = WS_PATTERN_DITHER;
