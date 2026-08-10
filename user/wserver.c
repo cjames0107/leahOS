@@ -964,8 +964,13 @@ static void compose_rect(const struct rect* r)
 
 static void present_region(int x, int y, unsigned w, unsigned h)
 {
-    if (x < 0) { w += (unsigned)(-x); x = 0; }
-    if (y < 0) { h += (unsigned)(-y); y = 0; }
+    /* Clipping a rectangle that starts off-screen makes it smaller, not
+     * bigger. This added the overhang instead of removing it, so a region
+     * reaching above the top of the screen was presented taller than it was
+     * composed - blitting rows of the back buffer that nothing had drawn into
+     * this frame, straight over the screen. */
+    if (x < 0) { if (w <= (unsigned)(-x)) return; w -= (unsigned)(-x); x = 0; }
+    if (y < 0) { if (h <= (unsigned)(-y)) return; h -= (unsigned)(-y); y = 0; }
     if ((unsigned)x >= g_fb.width || (unsigned)y >= g_fb.height)
         return;
     if ((unsigned)x + w > g_fb.width)  w = g_fb.width - (unsigned)x;
@@ -1286,8 +1291,18 @@ static void reconcile(void)
             if (present != g_mapped_gen[slot]) {
                 g_mapped_gen[slot] = present;
                 w->drawn = present;
-                damage_rect(w->x + BORDER, w->y + BORDER + TITLE_HEIGHT,
-                            (int)g_width[slot], (int)g_height[slot]);
+                /* A desktop has no frame, so its pixels start at its own
+                 * corner rather than inside a border and a title bar. Adding
+                 * that offset unconditionally damaged a rectangle shifted
+                 * twenty-nine pixels down the screen: the top twenty-nine rows
+                 * were never damaged, never composed and never presented, and
+                 * kept whatever was on the framebuffer before the desktop
+                 * started - which is the white strip that has been along the
+                 * top of the screen this whole time. */
+                const int cx = is_desktop(slot) ? w->x : w->x + BORDER;
+                const int cy = is_desktop(slot) ? w->y
+                                                : w->y + BORDER + TITLE_HEIGHT;
+                damage_rect(cx, cy, (int)g_width[slot], (int)g_height[slot]);
             }
         }
     }
