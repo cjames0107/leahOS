@@ -40,11 +40,45 @@
 #define CMD_FLUSH     0xE7
 #define CMD_IDENTIFY  0xEC
 
-static unsigned g_io;               /* the channel's command ports */
-static unsigned g_control;          /* and its control port        */
+/* Every drive the two legacy channels can hold. The system's own disk is
+ * whichever one was asked for on the command line and is always index 0, so
+ * that a caller from before there was a choice still names it correctly. */
+struct drive {
+    int           present;
+    unsigned      io, control;
+    int           slave;
+    unsigned long sectors;
+    char          model[44];
+};
+
+static struct drive g_disk[BLK_MAX_DISKS];
+static unsigned     g_disks;
+static unsigned     g_at = 0xFFFFFFFFu;  /* which one the ports are set for */
+
+/* The drive currently being talked to. identify() and the read and write paths
+ * were written against these and still are; what changed is that they are no
+ * longer the only ones there could be. */
+static unsigned g_io;
+static unsigned g_control;
 static int      g_slave;
 static unsigned long g_sectors;
 static char     g_model[44];
+
+/* Point the globals above at one of the drives. */
+static int use_disk(unsigned which)
+{
+    if (which >= g_disks || !g_disk[which].present)
+        return -1;
+    if (which == g_at)
+        return 0;
+    g_io      = g_disk[which].io;
+    g_control = g_disk[which].control;
+    g_slave   = g_disk[which].slave;
+    g_sectors = g_disk[which].sectors;
+    memcpy(g_model, g_disk[which].model, sizeof(g_model));
+    g_at = which;
+    return 0;
+}
 static struct blk_shared* g_shared;
 
 /* A status read settles in about 400ns, which is four reads of the alternate
@@ -177,24 +211,56 @@ int main(int argc, char** argv)
      * the kernel has none. The arguments are still there for pointing a second
      * copy at some other disk. */
     const int channel = argc > 1 ? atoi_simple(argv[1]) : 0;
-    g_slave = argc > 2 ? atoi_simple(argv[2]) : 1;
-    g_io = channel == 0 ? 0x1F0 : 0x170;
-    g_control = channel == 0 ? 0x3F6 : 0x376;
+    const int slave   = argc > 2 ? atoi_simple(argv[2]) : 1;
 
-    if (io_permit(g_io, 8) != 0 || io_permit(g_control, 1) != 0) {
-        printf("blockd: refused the drive's ports\n");
+    /* Both channels, because a second filesystem is on one of them. */
+    if (io_permit(0x1F0, 8) != 0 || io_permit(0x3F6, 1) != 0 ||
+        io_permit(0x170, 8) != 0 || io_permit(0x376, 1) != 0) {
+        printf("blockd: refused the drives' ports\n");
         return 1;
     }
 
-    /* We poll rather than take interrupts, so tell the drive not to raise
-     * any: an unhandled one on a shared line is a way to wedge the machine. */
-    outb(g_control, 0x02);
-    settle();
+    /* The one that was asked for goes first, so it is disk 0 - the index every
+     * caller written before there was a choice already asks for. Then every
+     * other drive the two channels hold, in the order the hardware has them. */
+    static const struct { unsigned io, control; int slave; } kSlots[] = {
+        { 0x1F0, 0x3F6, 0 }, { 0x1F0, 0x3F6, 1 },
+        { 0x170, 0x376, 0 }, { 0x170, 0x376, 1 },
+    };
+    const unsigned wanted = (unsigned)(channel == 0 ? 0 : 2) +
+                            (slave != 0 ? 1u : 0u);
 
-    if (identify() != 0) {
-        printf("blockd: no drive on channel %d\n", channel);
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        for (unsigned i = 0; i < 4 && g_disks < BLK_MAX_DISKS; ++i) {
+            if ((pass == 0) != (i == wanted))
+                continue;               /* the asked-for one first, then the rest */
+            g_io      = kSlots[i].io;
+            g_control = kSlots[i].control;
+            g_slave   = kSlots[i].slave;
+
+            /* Polled, not interrupt driven: an unhandled interrupt on a shared
+             * line is a way to wedge the machine. */
+            outb(g_control, 0x02);
+            settle();
+            if (identify() != 0)
+                continue;
+
+            struct drive* d = &g_disk[g_disks++];
+            d->present = 1;
+            d->io = g_io;
+            d->control = g_control;
+            d->slave = g_slave;
+            d->sectors = g_sectors;
+            memcpy(d->model, g_model, sizeof(d->model));
+        }
+    }
+
+    if (g_disks == 0) {
+        printf("blockd: no drive on either channel\n");
         return 1;
     }
+    g_at = 0xFFFFFFFFu;
+    use_disk(0);
 
     const int shm = shm_open(BLK_SHM_KEY, sizeof(struct blk_shared), SHM_PUBLIC);
     g_shared = shm < 0 ? 0 : (struct blk_shared*)shm_map(shm);
@@ -210,7 +276,10 @@ int main(int argc, char** argv)
     }
 
     printf("blockd[%d]: %s, %lu sectors, in ring 3\n",
-           getpid(), g_model, g_sectors);
+           getpid(), g_disk[0].model, g_disk[0].sectors);
+    for (unsigned i = 1; i < g_disks; ++i)
+        printf("blockd: disk %u, %s, %lu sectors\n",
+               i, g_disk[i].model, g_disk[i].sectors);
 
     for (;;) {
         struct ipc_message m, r;
@@ -221,6 +290,15 @@ int main(int argc, char** argv)
 
         memset(&r, 0, sizeof(r));
         r.tag = m.tag;
+        /* Which disk, for every request that names one. */
+        if (m.tag == BLK_INFO || m.tag == BLK_READ || m.tag == BLK_WRITE) {
+            if (use_disk((unsigned)m.word[2]) != 0) {
+                r.word[0] = -1;
+                ipc_reply(handle, &r);
+                continue;
+            }
+        }
+
         if (m.tag == BLK_INFO) {
             r.word[0] = (long)g_sectors;
             r.word[1] = BLK_SECTOR;

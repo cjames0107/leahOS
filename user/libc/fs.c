@@ -1249,6 +1249,32 @@ long fsck(int repair, char* report, unsigned long max, unsigned* fixed)
     return a.word[0];
 }
 
+int fs_mount(unsigned disk, const char* at)
+{
+    char resolved[PATH_MAX];
+    struct ipc_message a;
+    start();
+    __fd_resolve(at, resolved);
+    if (vfs_call(VFS_MOUNT, resolved, (long)disk, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    return from_vfs(a.word[0]) < 0 ? -1 : 0;
+}
+
+int fs_umount(const char* at)
+{
+    char resolved[PATH_MAX];
+    struct ipc_message a;
+    start();
+    __fd_resolve(at, resolved);
+    if (vfs_call(VFS_UMOUNT, resolved, 0, 0, &a) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    return from_vfs(a.word[0]) < 0 ? -1 : 0;
+}
+
 void sync(void)
 {
     struct ipc_message a;

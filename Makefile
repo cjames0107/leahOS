@@ -22,6 +22,9 @@ IMG     := $(DIST)/leahos.img
 EXT_IMG := $(DIST)/ext.img
 # A third disk behind an AHCI controller, to exercise the DMA path.
 SATA_IMG := $(DIST)/sata.img
+# A fourth disk: a small ext4 volume with nothing to do with the root, so that
+# mounting a second filesystem is something that can actually be tried.
+MNT_IMG := $(DIST)/mnt.img
 # A USB disk behind the xHCI controller, for the mass-storage driver.
 USB_IMG  := $(DIST)/usb.img
 DIST_ELF := $(DIST)/leahos.elf
@@ -134,7 +137,7 @@ STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
 
 .PHONY: all image run headless debug gdb toolchain clean help
-all: $(IMG) $(EXT_IMG) $(SATA_IMG) $(USB_IMG)
+all: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 image: $(IMG)
 
 # --- bootloader -------------------------------------------------------------
@@ -293,6 +296,22 @@ $(EXT_IMG): $(USER_ELFS) tools/mkext.sh $(MEDIA_STAMP) $(FONT_OUT) | $(DIST)
 	@APPS="$(EXT_APPS)" MEDIA_DIR="$(BUILD)/media" FONT_DIR="$(BUILD)/fonts" \
 	    tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
 
+# Built with mke2fs directly rather than through mkext.sh: it wants no
+# programs, no fonts and no accounts, only a filesystem with a file on it.
+$(MNT_IMG): | $(DIST)
+	@dd if=/dev/zero of=$@ bs=1048576 count=16 status=none
+	@E2=$$(ls -d /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin \
+	    2>/dev/null | head -1); \
+	 $$E2/mke2fs -q -t ext4 -b 1024 -O ^has_journal,^resize_inode,^64bit \
+	    -F $@ >/dev/null 2>&1; \
+	 printf 'set_current_time now\nmkdir /notes\nquit\n' | \
+	    $$E2/debugfs -w $@ >/dev/null 2>&1; \
+	 echo "second filesystem on the other disk" > $(DIST)/.mntfile; \
+	 printf 'cd /notes\nwrite $(DIST)/.mntfile hello.txt\nquit\n' | \
+	    $$E2/debugfs -w $@ >/dev/null 2>&1; \
+	 rm -f $(DIST)/.mntfile
+	@echo "mnt:    $@ (16 MiB ext4, one directory and one file)"
+
 $(SATA_IMG): | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=16 status=none
 	@echo "sata:   $@ (16 MiB, blank, for the AHCI DMA test)"
@@ -321,6 +340,7 @@ $(DIST):
 QEMUFLAGS := -machine pc,hpet=on \
              -drive format=raw,file=$(IMG),if=ide \
              -drive format=raw,file=$(EXT_IMG),if=ide \
+             -drive format=raw,file=$(MNT_IMG),if=ide \
              -device qemu-xhci,id=xhci0 \
              -drive format=raw,file=$(USB_IMG),if=none,id=usbdisk \
              -device usb-storage,drive=usbdisk,bus=xhci0.0 \
@@ -334,16 +354,16 @@ QEMUFLAGS := -machine pc,hpet=on \
              -no-reboot -no-shutdown \
              $(QEMU_EXTRA)
 
-run: $(IMG) $(EXT_IMG) $(SATA_IMG) $(USB_IMG)
+run: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio
 
 # Boot with no window, give the kernel TIMEOUT seconds, then print COM1.
-headless: $(IMG) $(EXT_IMG) $(SATA_IMG) $(USB_IMG)
+headless: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	@tools/run-headless.sh $(TIMEOUT)
 
 # Halts before the first instruction and waits for `make gdb` on :1234.
 # int,cpu_reset logging is how you find out which vector triple-faulted.
-debug: $(IMG) $(EXT_IMG) $(SATA_IMG) $(USB_IMG)
+debug: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio -S -s -d int,cpu_reset -D $(QEMU_LOG)
 
 gdb:

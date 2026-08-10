@@ -20,8 +20,12 @@ struct blk_shared {
 };
 
 /* Message tags on IPC_PORT_BLOCK. */
-#define BLK_INFO  1     /* -> w0 = sectors, w1 = bytes each, data = the model */
-#define BLK_READ  2     /* w0 = first sector, w1 = how many -> into the segment */
-#define BLK_WRITE 3     /* w0 = first sector, w1 = how many <- from the segment */
+/* w2 names the disk, and zero is the one the system booted from - so a caller
+ * that predates there being more than one asks for that one and is right. */
+#define BLK_INFO  1     /* w2 = disk -> w0 = sectors, w1 = bytes, data = model */
+#define BLK_READ  2     /* w0 = first sector, w1 = how many, w2 = disk         */
+#define BLK_WRITE 3     /* w0 = first sector, w1 = how many, w2 = disk         */
+
+#define BLK_MAX_DISKS 4
 
 #endif

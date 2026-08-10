@@ -28,7 +28,7 @@
 static int g_blk;
 static struct blk_shared* g_sectors;
 
-static int disk_read(unsigned long lba, unsigned count)
+static int disk_read(unsigned long lba, unsigned count, unsigned dev)
 {
     struct ipc_message q, a;
     memset(&q, 0, sizeof(q));
@@ -36,6 +36,7 @@ static int disk_read(unsigned long lba, unsigned count)
     q.tag = BLK_READ;
     q.word[0] = (long)lba;
     q.word[1] = (long)count;
+    q.word[2] = (long)dev;
     if (ipc_call(g_blk, &q, &a) != 0 || a.word[0] != 0)
         return -1;
     return 0;
@@ -118,7 +119,7 @@ static int read_block(unsigned long block, unsigned char* out)
     if (txn_peek(block, out))
         return 0;
     const unsigned sectors = g_block_size / BLK_SECTOR;
-    if (disk_read(block * sectors, sectors) != 0)
+    if (disk_read(block * sectors, sectors, g_cur->dev) != 0)
         return -1;
     memcpy(out, g_sectors->data, g_block_size);
     return 0;
@@ -241,7 +242,7 @@ static void wr32w(unsigned char* p, unsigned at, unsigned v)
     p[at + 2] = (unsigned char)(v >> 16); p[at + 3] = (unsigned char)(v >> 24);
 }
 
-static int disk_write(unsigned long lba, unsigned count)
+static int disk_write(unsigned long lba, unsigned count, unsigned dev)
 {
     struct ipc_message q, a;
     memset(&q, 0, sizeof(q));
@@ -249,6 +250,7 @@ static int disk_write(unsigned long lba, unsigned count)
     q.tag = BLK_WRITE;
     q.word[0] = (long)lba;
     q.word[1] = (long)count;
+    q.word[2] = (long)dev;
     if (ipc_call(g_blk, &q, &a) != 0 || a.word[0] != 0)
         return -1;
     return 0;
@@ -315,7 +317,7 @@ static int write_block(unsigned long block, const unsigned char* in)
     }
     const unsigned sectors = g_block_size / BLK_SECTOR;
     memcpy(g_sectors->data, in, g_block_size);
-    return disk_write(block * sectors, sectors);
+    return disk_write(block * sectors, sectors, g_cur->dev);
 }
 
 /* Whatever the transaction is holding for this block, if it holds one. */
@@ -1809,14 +1811,53 @@ static const char* route(const char* path)
                          : (path[best_len] == '\0' ? "/" : path + best_len);
 }
 
-static int mount(void)
-{
-    g_cur = &g_fs[0];
-    g_cur->block_size = 1024;
-    g_cur->inode_size = 128;
-    g_cur->desc_size = 32;
+/* Read a disk's superblock into a slot and make it a filesystem.
+ *
+ * The root goes in slot 0 at startup; anything else finds a free one. The
+ * slot is filled in before anything reads it because everything that reads a
+ * disk reads it through the slot - including, immediately below, the journal.
+ */
+static int mount_read_sb(void);
 
-    if (disk_read(0, 8) != 0)
+static int mount_at(unsigned dev, const char* at)
+{
+    struct fs* slot = 0;
+    for (int i = 0; i < FS_MAX; ++i) {
+        if (g_fs[i].used && strcmp(g_fs[i].at, at) == 0)
+            return -EBUSY;              /* something is already there */
+        if (g_fs[i].used && g_fs[i].dev == dev)
+            return -EBUSY;              /* and a disk is mounted once */
+        if (!g_fs[i].used && slot == 0)
+            slot = &g_fs[i];
+    }
+    if (slot == 0)
+        return -ENOSPC;
+    if (strlen(at) >= sizeof(slot->at))
+        return -ENAMETOOLONG;
+
+    struct fs* const was = g_cur;
+    g_cur = slot;
+    memset(slot, 0, sizeof(*slot));
+    slot->dev = dev;
+    slot->block_size = 1024;
+    slot->inode_size = 128;
+    slot->desc_size = 32;
+
+    if (mount_read_sb() != 0) {
+        memset(slot, 0, sizeof(*slot));
+        g_cur = was;
+        return -EIO;
+    }
+    unsigned n = 0;
+    while (at[n] != '\0') { slot->at[n] = at[n]; ++n; }
+    slot->at[n] = '\0';
+    slot->used = 1;
+    return 0;
+}
+
+static int mount_read_sb(void)
+{
+    if (disk_read(0, 8, g_cur->dev) != 0)
         return -1;
     const unsigned char* sb = g_sectors->data + 1024;
     if (rd16(sb, 56) != 0xEF53)
@@ -1848,11 +1889,13 @@ static int mount(void)
         printf("vfsd: the journal could not be replayed\n");
 
     g_mounted = 1;
-    g_cur->used = 1;
-    g_cur->dev = 0;
-    g_cur->at[0] = '/';
-    g_cur->at[1] = '\0';
     return 0;
+}
+
+/* The root, at startup. */
+static int mount(void)
+{
+    return mount_at(0, "/") == 0 ? 0 : -1;
 }
 
 
@@ -2382,6 +2425,40 @@ int main(void)
                                      &used, &fixed);
                 r.word[1] = (long)fixed;
                 r.bytes = used;
+            }
+        } else if (m.tag == VFS_MOUNT) {
+            /* Root only: attaching a disk puts somebody else's idea of who
+             * owns which file into this tree. */
+            if (caller_uid(from) != 0) {
+                r.word[0] = -EPERM;
+            } else {
+                const char* at = (const char*)m.data;
+                /* The batch belongs to whichever disk it was collected for,
+                 * and this is about to change which that is. */
+                txn_flush();
+                struct fs* const was = g_cur;
+                r.word[0] = mount_at((unsigned)m.word[1], at);
+                g_cur = was;
+            }
+        } else if (m.tag == VFS_UMOUNT) {
+            if (caller_uid(from) != 0) {
+                r.word[0] = -EPERM;
+            } else {
+                const char* at = (const char*)m.data;
+                r.word[0] = -EINVAL;
+                for (int i = 1; i < FS_MAX; ++i) {   /* never the root */
+                    if (!g_fs[i].used || strcmp(g_fs[i].at, at) != 0)
+                        continue;
+                    /* Anything it is still holding goes to its own disk
+                     * before the slot stops describing that disk. */
+                    struct fs* const was = g_cur;
+                    g_cur = &g_fs[i];
+                    txn_flush();
+                    memset(&g_fs[i], 0, sizeof(g_fs[i]));
+                    g_cur = was == &g_fs[i] ? &g_fs[0] : was;
+                    r.word[0] = 0;
+                    break;
+                }
             }
         } else if (m.tag == VFS_MKNOD) {
             /* Root only. The four bytes are harmless; the claim they make

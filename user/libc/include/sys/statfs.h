@@ -32,4 +32,13 @@ int statfs(const char* path, struct statfs* out);
  * server currently believes it to be. */
 long fsck(int repair, char* report, unsigned long max, unsigned* fixed);
 
+
+/* Attach the filesystem on `disk` at `at`, or detach whatever is there.
+ *
+ * The disk is an index, because that is all the block driver knows about
+ * itself: zero is the one the system booted from. Root only - attaching a
+ * disk puts somebody else's idea of who owns which file into this tree. */
+int fs_mount(unsigned disk, const char* at);
+int fs_umount(const char* at);
+
 #endif /* _SYS_STATFS_H */

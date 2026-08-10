@@ -41,6 +41,8 @@ struct vfs_shared {
 #define VFS_LINK    18  /* data = target\0path\0 -> a second name, one inode  */
 #define VFS_MKFIFO  19  /* data = path -> a name for a pipe, holding nothing  */
 #define VFS_MKNOD   20  /* data = path, w1 = kind, w2 = rdev -> a device node */
+#define VFS_MOUNT   22  /* data = mount point, w1 = disk -> attaches it       */
+#define VFS_UMOUNT  23  /* data = mount point -> detaches it                  */
 #define VFS_FSCK    21  /* w1 = repair -> w0 = problems, w1 = fixed, data =
                            the report as lines of text                      */
 
