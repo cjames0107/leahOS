@@ -1,0 +1,29 @@
+sync - write out what the filesystem is holding back
+
+SYNOPSIS
+    sync
+
+DESCRIPTION
+    Changes to the tree are collected into a journal transaction and
+    committed a little later, rather than one transaction per operation.
+    Several operations in a row touch the same handful of metadata blocks
+    - the same bitmap, the same directory, the same group descriptor - so
+    a batch of them costs very little more than one of them did, and
+    committing each separately roughly tripled the traffic to the disk.
+
+    What that gives up is that a call which returned successfully is in
+    the tree but not necessarily on the disk yet. sync is what makes it
+    so, and returns when it is.
+
+    A batch is also committed when it fills up, and when it is more than
+    a second old and another request arrives.
+
+BUGS
+    That last condition needs another request. A burst of writes followed
+    by an idle filesystem leaves the batch uncommitted until something
+    else asks for something, because the server is asleep waiting for a
+    request and has nothing to wake it. Run sync before pulling the power
+    out.
+
+SEE ALSO
+    fsck, mount

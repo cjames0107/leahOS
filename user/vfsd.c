@@ -226,11 +226,21 @@ static int disk_write(unsigned long lba, unsigned count)
  * again to find the next free one - and a read that went to the disk would
  * get the version from before the change.
  */
-#define TXN_MAX 16
+/* Deep enough that a batch holds several operations. Metadata repeats
+ * heavily between them - the same bitmap, the same group descriptor, the same
+ * directory block - and a repeat replaces its earlier copy rather than adding
+ * to it, so this is many more operations than it looks like. */
+#define TXN_MAX 32
+
+/* How long a batch may stay open, and how much room is kept for the request
+ * that would otherwise overflow it. */
+#define TXN_MAX_AGE_MS 1000
+#define TXN_HEADROOM   10
 
 static int           g_txn_open;
 static int           g_txn_bypass;   /* the journal's own writes */
 static unsigned      g_txn_count;
+static unsigned long g_txn_started;
 static unsigned long g_txn_target[TXN_MAX];
 static unsigned char g_txn_buf[TXN_MAX][8192];
 
@@ -1636,14 +1646,38 @@ static int txn_flush(void)
     return 0;
 }
 
+/* A batch spans requests rather than being one per request.
+ *
+ * Committing every request meant a descriptor, a commit block and two
+ * journal superblock writes for every three blocks of actual change, which
+ * roughly tripled the traffic to the disk server and was felt on every boot.
+ * Several operations in a row touch the same handful of metadata blocks, so a
+ * batch of them costs very little more than one of them did.
+ *
+ * What this gives up is that a reply no longer means "on the disk". It means
+ * what it means on every other filesystem: the change is in the tree, and it
+ * will be on the disk at the next commit. sync forces one.
+ */
 static void txn_begin(void)
 {
+    if (g_txn_open)
+        return;                 /* already collecting */
     g_txn_count = 0;
+    g_txn_started = uptime_ms();
     g_txn_open = 1;
 }
 
-static int txn_end(void)
+static int txn_end(int force)
 {
+    if (!g_txn_open)
+        return 0;
+    /* Kept open unless it is nearly full, old, or somebody asked. The room
+     * left is for one more request: a batch is only ever split at a request
+     * boundary, so a single operation is still all-or-nothing. */
+    const int full = g_txn_count + TXN_HEADROOM > TXN_MAX;
+    const int old  = uptime_ms() - g_txn_started >= TXN_MAX_AGE_MS;
+    if (!force && !full && !old)
+        return 0;
     const int r = txn_flush();
     g_txn_open = 0;
     return r;
@@ -2661,7 +2695,7 @@ int main(void)
         }
         /* Before the reply, not after: a caller told its write succeeded and
          * then finding it did not is the one outcome worth ruling out. */
-        if (txn_end() != 0 && r.word[0] >= 0)
+        if (txn_end(m.tag == VFS_SYNC) != 0 && r.word[0] >= 0)
             r.word[0] = -EIO;
 
         ipc_reply(handle, &r);

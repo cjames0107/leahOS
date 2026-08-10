@@ -131,4 +131,12 @@ int passwd(const char* name, const char* old_password, const char* new_password)
 #define SEEK_CUR 1
 #define SEEK_END 2
 
+
+/* Write out everything the filesystem is holding back.
+ *
+ * Metadata changes are batched into a journal transaction and committed a
+ * little later, so a call that returned successfully is in the tree but is
+ * not necessarily on the disk yet. This is what makes it so. */
+void sync(void);
+
 #endif /* _UNISTD_H */

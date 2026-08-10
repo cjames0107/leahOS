@@ -1249,6 +1249,16 @@ long fsck(int repair, char* report, unsigned long max, unsigned* fixed)
     return a.word[0];
 }
 
+void sync(void)
+{
+    struct ipc_message a;
+    start();
+    /* Nothing to report: a filesystem that could not write what it was
+     * holding has a problem this call cannot describe and the next one will
+     * run into anyway. */
+    vfs_call(VFS_SYNC, "", 0, 0, &a);
+}
+
 int statfs(const char* path, struct statfs* out)
 {
     char resolved[PATH_MAX];
