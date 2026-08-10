@@ -18,12 +18,12 @@ DESCRIPTION
     A batch is also committed when it fills up, and when it is more than
     a second old and another request arrives.
 
-BUGS
-    That last condition needs another request. A burst of writes followed
-    by an idle filesystem leaves the batch uncommitted until something
-    else asks for something, because the server is asleep waiting for a
-    request and has nothing to wake it. Run sync before pulling the power
-    out.
+    That last condition needs another request, which on an idle machine
+    never comes: the server is asleep waiting for one and has no clock of
+    its own to wake it. syncd runs from boot and calls this every five
+    seconds so that idle is not the same as never - the same job, and the
+    same interval, as update on early UNIX.
 
 SEE ALSO
-    fsck, mount
+    fsck, mount, syncd
+

@@ -123,7 +123,7 @@ KERNEL_BIN := $(BUILD)/kernel.bin
 # because the first filesystem this could read was FAT; that driver has been
 # gone for a long time and the shouting outlived it.
 SBIN_PROGRAMS := init login wserver desktop blockd vfsd netd e1000d audiod \
-                 authd usbd ps2d useradd passwd ifconfig
+                 authd usbd ps2d syncd useradd passwd ifconfig
 BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami date \
                  chmod chown stat less grep find wc head tail sort diff tar \
                  gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync

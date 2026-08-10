@@ -1,0 +1,39 @@
+syncd - commit the filesystem's held-back changes on a timer
+
+SYNOPSIS
+    syncd
+
+DESCRIPTION
+    The filesystem server batches metadata changes into a journal
+    transaction rather than committing one per operation, which is what
+    keeps the disk traffic down. A batch is committed when it fills up,
+    when somebody calls sync, or when it is more than a second old and
+    another request arrives.
+
+    That last condition needs another request. A burst of writes followed
+    by an idle filesystem left the batch sitting there indefinitely,
+    because the server is asleep in ipc_recv with nothing to wake it and
+    no clock of its own to wake it with.
+
+    syncd is that clock. It sleeps five seconds and calls sync, forever.
+    It is started by init and takes no arguments.
+
+    It could have been a thread inside the server. The server is
+    single-threaded on purpose - one request at a time, and so no locking
+    around the transaction buffer, the mount table or the block cache -
+    and a second thread in there touching all three would be a large
+    change to buy a small guarantee. From outside it is an ordinary
+    client and the guarantee is the same.
+
+    Five seconds is what ext4 uses, and the trade is the same one: a crash
+    loses at most that much work, and an idle machine writes its disk
+    occasionally rather than never. It is the job `update` did on early
+    UNIX.
+
+BUGS
+    A commit still cannot be proven to have reached the platter. The
+    driver has no flush this can wait on, so this makes the window
+    bounded rather than making it airtight.
+
+SEE ALSO
+    sync, fsck, mount

@@ -79,6 +79,19 @@ static void splash_progress(const char* what)
 /* Start a server and wait for the port it is going to claim, so the next one
  * up does not race it. Waiting on the port rather than on a delay means a slow
  * machine waits longer and a fast one does not wait at all. */
+/* Start something that does not own a port, so there is nothing to wait for
+ * and nothing to report if it is late. */
+static void spawn(const char* path, const char* name)
+{
+    if (fork() == 0) {
+        char* argv[2];
+        argv[0] = (char*)name;
+        argv[1] = 0;
+        execve(path, argv, 0);
+        exit(127);
+    }
+}
+
 static void start(const char* path, const char* name, unsigned port)
 {
     splash_progress(name);
@@ -115,6 +128,10 @@ int main(void)
      * answers. */
     start("/sbin/ps2d", "ps2d", IPC_PORT_PS2);
     start("/sbin/usbd", "usbd", IPC_PORT_USB);
+
+    /* No port of its own, so nothing to wait for - it is a client, not a
+     * server. See syncd.c for what it is for. */
+    spawn("/sbin/syncd", "syncd");
 
     splash_progress("starting login");
 
