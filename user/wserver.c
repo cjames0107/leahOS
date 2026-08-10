@@ -857,11 +857,44 @@ static struct rect drag_rect(void);
  * through there - which is why a normal window only counts for the rectangle
  * inside its corners.
  */
+/* Whether some window already covers every pixel of this rectangle with
+ * something opaque. When one does, the wallpaper underneath is painted and
+ * then immediately painted over - a whole damage rectangle of work for pixels
+ * nobody was ever going to see.
+ *
+ * Frosted glass is not opaque, so with the glass on nothing qualifies. And a
+ * window's own corners are rounded and antialiased, so the wallpaper does show
+ * through there, which is why an ordinary window only counts for the rectangle
+ * inside its corners. A desktop has no frame and no corners and counts whole.
+ */
+static int covered_opaque(const struct rect* r)
+{
+    if (g_control->theme.blur != 0)
+        return 0;
+    for (int i = 0; i < g_count; ++i) {
+        const int slot = g_order[i];
+        const struct ws_window* w = &g_control->windows[slot];
+        if (g_pixels[slot] == 0)
+            continue;               /* nothing drawn there yet to cover with */
+        int x = w->x, y = w->y;
+        int cw = (int)frame_width(slot), ch = (int)frame_height(slot);
+        if (!is_desktop(slot)) {
+            x += CORNER; y += CORNER;
+            cw -= CORNER * 2; ch -= CORNER * 2;
+        }
+        if (r->x >= x && r->y >= y &&
+            r->x + r->w <= x + cw && r->y + r->h <= y + ch)
+            return 1;
+    }
+    return 0;
+}
+
 static void compose_rect(const struct rect* r)
 {
 
     g_clip = *r;
-    for (int y = r->y; y < r->y + r->h; ++y) {
+    const int hidden = covered_opaque(r);
+    for (int y = r->y; !hidden && y < r->y + r->h; ++y) {
         uint32_t* row = &g_back[(unsigned)y * g_fb.width + (unsigned)r->x];
         if (g_paper != 0) {
             const unsigned sy = (unsigned)y * g_paper_h / g_fb.height;
