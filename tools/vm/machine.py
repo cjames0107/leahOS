@@ -66,7 +66,7 @@ class Machine:
             "-display", "none",
             "-serial", f"file:{LOG}",
             "-monitor", f"unix:{SOCK},server,nowait",
-        ])
+        ], cwd=ROOT)     # the Makefile names its images relatively
         for _ in range(200):
             if os.path.exists(SOCK):
                 break
@@ -226,9 +226,29 @@ class Test:
         time.sleep(3)
         self.m.type("root\n"); time.sleep(0.5); self.m.type("toor\n")
         time.sleep(55)
-        # The terminal, below every other window, so the click cannot land on
-        # something that has opened over it.
-        self.m.click(200, 690); time.sleep(3)
+        # Find the terminal, rather than assuming a click landed on it.
+        #
+        # Clicking a fixed point and typing was the single biggest source of
+        # lost runs in this harness: a window opens over the spot, or the
+        # desktop has not finished arranging itself, and every keystroke goes
+        # somewhere that is not listening. The failure looks exactly like a
+        # broken system - the machine boots, draws, faults nowhere, and answers
+        # nothing - which sent me diagnosing the keyboard driver for a fault
+        # that was in this file.
+        #
+        # So it asks. The shell echoes to the serial line, which is the one
+        # place this can read, and a shell that answers is a shell that has the
+        # keys.
+        for attempt in range(6):
+            self.m.click(200, 690)
+            time.sleep(3)
+            mark = "==awake-%d==" % attempt
+            self.m.type("echo %s > /dev/console\n" % mark)
+            for _ in range(20):
+                if mark in self.m.serial():
+                    return
+                time.sleep(0.5)
+        raise Failure("no window took the keyboard after six tries")
 
     def run(self, command, timeout=90):
         """Run a command and wait for it to finish.
