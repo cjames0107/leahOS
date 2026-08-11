@@ -36,6 +36,15 @@ int port_create(unsigned name);
 int port_destroy(int port);
 /* Blocks until a request arrives. Returns a handle to answer with, or -1. */
 int ipc_recv(int port, struct ipc_message* out, unsigned* caller_pid);
+
+/* The same, but giving up after `ms` milliseconds and returning -2.
+ *
+ * A server that can only wait forever has no clock of its own, so anything it
+ * needs to do periodically has to become another process - which is how the
+ * filesystem ended up needing a separate daemon to commit its journal. With
+ * this it can keep its own time. */
+int ipc_recv_timeout(int port, struct ipc_message* out, unsigned* caller_pid,
+                     unsigned long ms);
 /* The same without blocking: -1 when nothing is waiting. A server that also
  * owns hardware has a card to drain as well as a port to answer. */
 int ipc_try_recv(int port, struct ipc_message* out, unsigned* caller_pid);

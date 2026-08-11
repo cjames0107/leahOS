@@ -53,7 +53,13 @@ void init();
 // returns a handle to answer with; reply answers it and unblocks the caller.
 i64 port_create(u32 name);
 i64 port_destroy(i32 port);
-i64 recv(i32 port, Message* out, u32* caller_pid);
+// Wait for a request. `deadline_ticks` of zero waits forever; otherwise the
+// call returns -2 when that many ticks have passed with nothing arriving.
+//
+// A server that can only block forever cannot do anything on its own - it has
+// no clock, so periodic work has to become somebody else's process. This is
+// what lets a server keep its own time.
+i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks = 0);
 
 // The same, but returns -1 immediately when nothing is waiting. A server that
 // also owns hardware cannot block forever on its port: it has a card to drain

@@ -588,10 +588,15 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             frame->rax = static_cast<u64>(-1);
             break;
         }
+        // r10 is a wait in milliseconds, or zero for "wait as long as it
+        // takes". Converted here because the tick rate is the kernel's own.
+        const u64 ms = frame->r10;
+        const u64 deadline = ms == 0 ? 0
+            : timer::ticks() + (ms * timer::kFrequencyHz + 999) / 1000;
         frame->rax = static_cast<u64>(
             ipc::recv(static_cast<i32>(frame->rdi),
                       reinterpret_cast<ipc::Message*>(frame->rsi),
-                      reinterpret_cast<u32*>(frame->rdx)));
+                      reinterpret_cast<u32*>(frame->rdx), deadline));
         break;
     }
 

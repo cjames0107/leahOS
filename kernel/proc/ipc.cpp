@@ -1,6 +1,7 @@
 #include <leah/cpu.hpp>
 #include <leah/ipc.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/timer.hpp>
 #include <leah/string.hpp>
 
 namespace ipc {
@@ -160,7 +161,7 @@ i64 try_recv(i32 port, Message* out, u32* caller_pid)
     return take(port, out, caller_pid);
 }
 
-i64 recv(i32 port, Message* out, u32* caller_pid)
+i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
 {
     if (!valid_port(port) || out == nullptr)
         return -1;
@@ -173,7 +174,24 @@ i64 recv(i32 port, Message* out, u32* caller_pid)
             return got;
         // Nothing waiting. The port is the channel, so a request arriving wakes
         // exactly the server that can serve it.
-        scheduler::block_on(port_channel(port));
+        if (deadline_ticks == 0) {
+            scheduler::block_on(port_channel(port));
+        } else {
+            if (timer::ticks() >= deadline_ticks)
+                return -2;      // the wait ran out; the caller has work to do
+            scheduler::block_on_until(port_channel(port), deadline_ticks);
+            if (!valid_port(port))
+                return -1;
+            // Take before deciding the wait expired, and *return* what was
+            // taken. Testing the clock first would throw away a request that
+            // arrived in the same instant the deadline passed, and taking
+            // without returning would drop one outright.
+            const i64 after = take(port, out, caller_pid);
+            if (after >= 0)
+                return after;
+            if (timer::ticks() >= deadline_ticks)
+                return -2;
+        }
         if (!valid_port(port))
             return -1;          // the port went away while we slept
     }

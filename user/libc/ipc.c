@@ -27,6 +27,16 @@ int ipc_recv(int port, struct ipc_message* out, unsigned* caller_pid)
     return (int)__syscall(SYS_ipcrecv, port, (long)out, (long)caller_pid, 0, 0);
 }
 
+int ipc_recv_timeout(int port, struct ipc_message* out, unsigned* caller_pid,
+                     unsigned long ms)
+{
+    /* Milliseconds, converted by the kernel: the tick rate is the kernel's
+     * and asking it to do the arithmetic is better than this library carrying
+     * a copy of a number it does not own. */
+    return (int)__syscall(SYS_ipcrecv, port, (long)out, (long)caller_pid,
+                          (long)ms, 0);
+}
+
 int ipc_try_recv(int port, struct ipc_message* out, unsigned* caller_pid)
 {
     return (int)__syscall(SYS_ipctryrecv, port, (long)out, (long)caller_pid, 0, 0);
