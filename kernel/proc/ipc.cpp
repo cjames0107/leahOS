@@ -126,8 +126,17 @@ i64 call(i32 port, const Message* request, Message* reply_out)
     // interrupts masked, so nothing can slip between marking this queued and
     // going to sleep on it.
     scheduler::wake(port_channel(port));
-    while (r.state != State::Answered && r.state != State::Abandoned)
+    while (r.state != State::Answered && r.state != State::Abandoned) {
         scheduler::block_on(request_channel(handle));
+        if (scheduler::signal_pending()) {
+            // Abandoned rather than left queued: the server may still answer,
+            // and it must not write into a slot this caller has stopped
+            // watching. Freeing it here would let the next caller take the
+            // same slot and receive the previous one's reply.
+            r.state = State::Abandoned;
+            return -1;
+        }
+    }
 
     const bool ok = r.state == State::Answered;
     if (ok)
@@ -176,6 +185,14 @@ i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
         // exactly the server that can serve it.
         if (deadline_ticks == 0) {
             scheduler::block_on(port_channel(port));
+            // A signal wakes this, and until now that was all it did: nothing
+            // had arrived, so the loop went round and slept again. The signal
+            // stayed pending and the process stayed alive - which is why a
+            // server sitting here survived a terminate and survived a kill.
+            // Returning hands control back to the syscall exit, where signals
+            // are actually delivered.
+            if (scheduler::signal_pending())
+                return -3;
         } else {
             if (timer::ticks() >= deadline_ticks)
                 return -2;      // the wait ran out; the caller has work to do
@@ -191,6 +208,8 @@ i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
                 return after;
             if (timer::ticks() >= deadline_ticks)
                 return -2;
+            if (scheduler::signal_pending())
+                return -3;
         }
         if (!valid_port(port))
             return -1;          // the port went away while we slept

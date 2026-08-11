@@ -57,11 +57,31 @@ def body(t):
     t.expect("cat /sata/sata/hello.txt", "came off the SATA disk")
     t.expect("mount -u /sata; echo detached", "detached")
 
-    # There is no check here that a driver restarts, and the reason is worth
-    # writing down: nothing this suite can do will stop one. A server sitting
-    # in ipc_recv survives a terminate and survives a kill - it wakes, and goes
-    # back to waiting - so the only thing that ends one is a fault, which is
-    # not something to induce on purpose in a running system.
+    # A driver that dies comes back. audiod is the safe one to prove it on:
+    # nothing else here depends on sound.
+    #
+    # The pids are compared rather than the name being counted. A check that
+    # only asked whether something called audiod was running passed against a
+    # kill that did nothing at all, which is how the blocked-in-IPC bug stayed
+    # hidden - the process woke, ignored the signal, and went back to waiting.
+    # The pid is parsed here and sent as a literal, because this shell has no
+    # command substitution - `kill $(ps | grep ...)` passes the dollar sign to
+    # kill and does nothing at all, which is exactly what it did, and what made
+    # a working system look like one whose servers could not be killed.
+    import re
+    out = t.run("ps | grep audiod")
+    t.checks += 1
+    found = re.findall(r"^\s*(\d+)\s.*audiod", out, re.M)
+    if not found:
+        raise Failure("audiod is not running")
+    was = found[-1]
+
+    t.expect("kill %s; echo killed" % was, "killed")
+    t.expect("sleep 4; ps | grep audiod", "audiod")
+    now = re.findall(r"^\s*(\d+)\s.*audiod", t.m.serial(), re.M)
+    if was in now[-1:]:
+        raise Failure("audiod kept pid %s: it was not replaced" % was)
+    t.checks += 1
 
     # Something is actually on the screen. Every other check here would pass
     # on a machine that draws nothing at all.
