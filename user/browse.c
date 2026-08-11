@@ -35,8 +35,11 @@
 /* The sidebar is the window's spine: places above, whatever is mounted below.
  * Everything else measures from its right edge. */
 #define SIDEBAR_W 140
-#define TOOLBAR_H 30
-#define PATH_H    20
+/* One band, not two. The navigation, the path and the menu button are all
+ * answers to "where am I and what can I do here", and stacking them put a
+ * strip of nothing between the chrome and the files. */
+#define TOOLBAR_H 34
+#define PATH_H    0
 #define STATUS_H  20
 #define ROW_H     18
 #define CELL_W    92
@@ -378,14 +381,14 @@ static void places_build(void)
 
 static int sidebar_row(int y)
 {
-    const int row = (y - TOOLBAR_H - 8) / 24;
+    const int row = (y - 10) / 24;
     return (row >= 0 && row < g_places) ? row : -1;
 }
 
 static void draw_sidebar(void)
 {
     wg_sidebar(0, 0, SIDEBAR_W, (int)g_h);
-    int y = TOOLBAR_H + 8;
+    int y = 10;
     for (int i = 0; i < g_places; ++i, y += 24) {
         const int here = strcmp(g_place[i].path, g_path) == 0;
         if (here)
@@ -506,10 +509,14 @@ static void draw_toolbar(void)
 
     /* The path, in a sunken well so it reads as a display rather than a
      * control - it is not editable. */
-    wg_container(content_left() + 6, TOOLBAR_H + 1,
-                 (int)g_w - content_left() - 12, PATH_H - 3, 6);
-    wg_text_clipped(content_left() + 10, TOOLBAR_H + 2, g_path, WG_INK,
-                    (int)g_w - content_left() - 20);
+    {
+        const int px = content_left() + 104;
+        const int pw = (int)g_w - px - 50;
+        if (pw > 40) {
+            wg_container(px, 6, pw, 22, 6);
+            wg_text_clipped(px + 10, 9, g_path, WG_INK, pw - 20);
+        }
+    }
 }
 
 /* The menu itself, drawn over everything when it is open. */
