@@ -116,10 +116,23 @@ i64 sys_mmap(u64 addr, u64 length, u64 prot, u64 flags)
     if ((prot & kProtExec) == 0)
         page_flags |= vmm::NoExecute;
 
+    // Reserved, not allocated. A program that asks for a megabyte and touches
+    // a page of it used to pay for the megabyte - a frame and a memset each -
+    // before it ran a single instruction. Each page is written down as what it
+    // will be, and the first touch of one is what makes it exist.
     for (u64 offset = 0; offset < bytes; offset += vmm::kPageSize) {
         const u64 page = base + offset;
         if (vmm::translate(page) != 0)
             continue;                                   // already mapped
+        if (!vmm::reserve(page, page_flags))
+            return -1;
+    }
+    return static_cast<i64>(base);
+
+    for (u64 offset = 0; offset < bytes; offset += vmm::kPageSize) {
+        const u64 page = base + offset;
+        if (vmm::translate(page) != 0)
+            continue;
         const paddr_t frame = pmm::alloc();
         if (frame == 0)
             return -1;

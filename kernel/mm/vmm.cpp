@@ -246,6 +246,23 @@ bool unmap_into(u64* pml4, vaddr_t virt)
 // The address of the leaf entry describing `virt`, or null when the walk runs
 // out of tables or lands on a huge page. Returning the entry itself (rather than
 // its contents) is what lets the CoW fault rewrite it in place.
+// The same walk, but building the tables it needs on the way down. Reserving a
+// page has to create them: the entry it writes is the only record that the
+// range was asked for, and there is nowhere to put it otherwise.
+static u64* walk_to_pte_making(u64* pml4, vaddr_t virt)
+{
+    u64* pdpt = next_level(pml4, index_of(virt, 4), true);
+    if (pdpt == nullptr)
+        return nullptr;
+    u64* pd = next_level(pdpt, index_of(virt, 3), true);
+    if (pd == nullptr)
+        return nullptr;
+    u64* pt = next_level(pd, index_of(virt, 2), true);
+    if (pt == nullptr)
+        return nullptr;
+    return &pt[index_of(virt, 1)];
+}
+
 u64* walk_to_pte(u64* pml4, vaddr_t virt)
 {
     u64* pdpt = next_level(pml4, index_of(virt, 4), false);
@@ -460,6 +477,30 @@ u64 entry_for(vaddr_t virt)
     return pt_entry != nullptr ? *pt_entry : 0;
 }
 
+bool handle_lazy_fault(vaddr_t virt)
+{
+    u64* pt_entry = walk_to_pte(current_pml4(), virt);
+    if (pt_entry == nullptr)
+        return false;
+    const u64 entry = *pt_entry;
+    if ((entry & Present) != 0 || (entry & Lazy) == 0)
+        return false;
+
+    const paddr_t frame = pmm::alloc();
+    if (frame == 0)
+        return false;                   // out of memory is not "not a fault"
+
+    // Zeroed through the direct map: the page is not mapped where the process
+    // will see it until the entry below is written, and writing to it through
+    // that address first would fault again.
+    memset(reinterpret_cast<void*>(memory::phys_to_direct(frame)), 0, kPageSize);
+
+    const u64 flags = entry & (Write | User | NoExecute);
+    *pt_entry = frame | flags | Present;
+    invalidate(virt);
+    return true;
+}
+
 bool handle_cow_fault(vaddr_t virt)
 {
     u64* pt_entry = walk_to_pte(current_pml4(), virt);
@@ -559,6 +600,18 @@ AddressSpace create_address_space()
         space[i] = kernel[i];
 
     return space_phys;
+}
+
+// Write down what a page is going to be, without giving it anything yet.
+bool reserve(vaddr_t virt, u64 flags)
+{
+    u64* pt_entry = walk_to_pte_making(current_pml4(), virt);
+    if (pt_entry == nullptr)
+        return false;
+    if ((*pt_entry & Present) != 0)
+        return true;                    // already backed; leave it alone
+    *pt_entry = (flags & (Write | User | NoExecute)) | Lazy;
+    return true;
 }
 
 AddressSpace fork_address_space(AddressSpace parent)

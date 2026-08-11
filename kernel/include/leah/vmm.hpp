@@ -23,6 +23,11 @@ enum Flags : u64 {
     // page that several address spaces share read-only and must be copied
     // before anyone writes to it.
     CopyOnWrite  = 1ull << 9,
+    // Reserved but not yet backed. The entry is not Present, so the processor
+    // ignores every other bit in it - which is exactly what makes it a place to
+    // write down what the mapping is *going* to be. The fault handler reads the
+    // protection back out of it and puts a zeroed frame there.
+    Lazy         = 1ull << 10,
     // A genuinely shared mapping - shared memory, not a fork artefact. fork
     // must hand it to the child as it stands rather than making it
     // copy-on-write: the whole point of the segment is that writes are seen by
@@ -83,6 +88,15 @@ void destroy_address_space(AddressSpace space);
 // private copy and make it writable again. Returns false if `virt` was not a
 // CoW page, in which case the fault is a real one.
 bool handle_cow_fault(vaddr_t virt);
+
+// A reserved page being touched for the first time. Allocates, zeroes and maps
+// with the protection recorded when the range was reserved. False when the
+// address was not reserved, which is a real fault and has to stay one.
+bool handle_lazy_fault(vaddr_t virt);
+
+// Write down what a page will be, without backing it. The first write to it
+// faults, and handle_lazy_fault turns the note into a page.
+bool reserve(vaddr_t virt, u64 flags);
 
 // The page table entry behind an address, so a fault report can say whether the
 // page was missing, read-only, or something else again. Zero when unmapped.

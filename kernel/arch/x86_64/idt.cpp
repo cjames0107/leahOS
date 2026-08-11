@@ -267,6 +267,13 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
             vmm::handle_cow_fault(fault_address))
             return;                     // resolved: retry the faulting write
 
+        // Not present, but reserved: a page that was asked for and is only now
+        // being touched. Reads count as well as writes - a program is entitled
+        // to read the zeroes it was promised.
+        if ((frame->error_code & kPresent) == 0 &&
+            vmm::handle_lazy_fault(fault_address))
+            return;
+
         // A ring-3 fault that cannot be resolved is the program's bug, not the
         // kernel's, and killing the kernel over it is a category error: a
         // process that dereferences a bad pointer should die on its own. The
