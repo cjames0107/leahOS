@@ -120,7 +120,12 @@ void wg_icon_scaled(int x, int y, const uint32_t* px, int sw, int sh,
             const uint32_t s = px[(unsigned)sy * (unsigned)sw +
                                   (unsigned)(col * sw / dw)];
             if ((s >> 24) != 0)
-                g_px[(unsigned)py * g_w + (unsigned)pxx] = s & 0xFFFFFF;
+                /* Opaque, explicitly. Stripping the alpha to zero used to mean
+                 * "no alpha here"; since the server started reading that byte
+                 * it means "not there at all", and every icon in the system
+                 * turned into an empty square. */
+                g_px[(unsigned)py * g_w + (unsigned)pxx] =
+                    0xFF000000u | (s & 0x00FFFFFFu);
         }
     }
 }
@@ -485,8 +490,12 @@ static void glass_fill(int x, int y, int w, int h, int radius, uint32_t argb)
             const int cov = draw_round_coverage(px, py, x, y, w, h, radius);
             if (cov == 0)
                 continue;
+            /* Composited onto the background, not written over it. Writing
+             * made a half-covered corner *more* see-through than the surface
+             * around it, so every rounded box had four dark notches where its
+             * corners punched a hole in the window. */
             const unsigned pa = (a * (unsigned)cov + 127) / 255;
-            g_px[(unsigned)py * g_w + (unsigned)px] = (pa << 24) | rgb;
+            blend_px(px, py, (pa << 24) | rgb);
         }
     }
 }
@@ -501,8 +510,9 @@ void wg_glass_clear(void)
 {
     if (g_px == 0)
         return;
-    const uint32_t c = glass_on() ? 0x59FFFFFFu
-                                  : wg_base_colour();
+    /* Exactly the wash the server puts on the frame, so the title bar and the
+     * body under it are the same material rather than two near-misses. */
+    const uint32_t c = glass_on() ? 0x66FFFFFFu : wg_base_colour();
     for (unsigned i = 0; i < g_w * g_h; ++i)
         g_px[i] = c;
 }
@@ -526,7 +536,7 @@ void wg_container(int x, int y, int w, int h, int pad)
     const struct surface c = canvas();
     const int r = wg_container_radius(pad);
     if (glass_on())
-        glass_fill(x, y, w, h, r, 0x7AFFFFFFu);
+        glass_fill(x, y, w, h, r, 0x30FFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 14));
     inner_glow(x, y, w, h, r);
@@ -541,7 +551,9 @@ void wg_sidebar(int x, int y, int w, int h)
 {
     const struct surface c = canvas();
     if (glass_on())
-        glass_fill(x, y, w, h, 0, 0x8CFFFFFFu);
+        /* The same amount the server adds over the title bar, so the column
+         * is one tone from the very top of the window. */
+        glass_fill(x, y, w, h, 0, 0x33FFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, 0, darken(wg_base_colour(), 18));
     /* No line down the inside edge. The change of tone is the edge, and a
