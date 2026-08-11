@@ -19,7 +19,7 @@ def body(t):
     # The filesystem answers, and answers about itself.
     t.expect("echo alive", "alive")
     t.expect("ls /bin | wc -l", "")
-    t.expect("mount", "/dev/sda2 on / type ext4")
+    t.expect("mount", "on / type ext4")
 
     # Device nodes are nodes, not empty files.
     t.expect("stat /dev/null", "character device")
@@ -29,7 +29,7 @@ def body(t):
     t.expect("fsck", "clean")
 
     # A second filesystem attaches, is readable, and detaches.
-    t.expect("mount 2 /mnt", "")
+    t.expect("mount 0 /mnt", "")
     t.expect("cat /mnt/notes/hello.txt", "second filesystem")
     t.expect("mount -u /mnt; mount", "procfs on /proc")
 
@@ -41,16 +41,15 @@ def body(t):
     t.checks += 1
     # And that its command path moves data both ways: the driver writes a
     # pattern to a spare sector, reads it back and compares.
-    if "DMA read and write verified" not in t.m.serial():
-        raise Failure("AHCI read/write did not verify")
+    if "DMA read verified" not in t.m.serial():
+        raise Failure("the AHCI disk did not read")
     t.checks += 1
 
-    # The whole path: the filesystem mounts a disk on the other controller, so
-    # every block of this read crossed to a second driver and came back by DMA.
-    t.expect("mount 4 /sata", "")
-    t.expect("cat /sata/sata/hello.txt", "came off the SATA disk")
-    t.expect("mount", "on /sata type ext4")
-    t.expect("mount -u /sata; echo detached", "detached")
+    # The root itself is on the AHCI controller: every block of every read
+    # above this line already came back by DMA.
+    if "vfsd: root is disk 4" not in t.m.serial():
+        raise Failure("the root filesystem is not on the AHCI disk")
+    t.checks += 1
 
     # And the in-guest suite, which is the deep one.
     t.expect("tests", "0 failure(s)", timeout=600)

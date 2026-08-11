@@ -43,8 +43,8 @@ class Machine:
         self.proc = subprocess.Popen([
             "qemu-system-x86_64", "-machine", "pc,hpet=on",
             "-drive", f"format=raw,file={ROOT}/build/dist/leahos.img,if=ide",
-            "-drive", f"format=raw,file={ROOT}/build/dist/ext.img,if=ide",
             "-drive", f"format=raw,file={ROOT}/build/dist/mnt.img,if=ide",
+            "-drive", f"format=raw,file={ROOT}/build/dist/sata.img,if=ide",
             "-snapshot",
             "-netdev", "user,id=net0", "-device", "e1000,netdev=net0",
             "-audiodev", "wav,id=snd0,path=/tmp/leah-audio.wav,"
@@ -54,9 +54,11 @@ class Machine:
             # different machine from the one people use is checking something
             # nobody runs - which is how the SATA controller came to be absent
             # from every check while being present in every real boot.
+            # The root volume lives on the AHCI controller now, so the
+            # harness has to attach it the same way the Makefile does.
             "-device", "ahci,id=sata0",
-            "-drive", f"format=raw,file={ROOT}/build/dist/sata.img,if=none,id=satadisk",
-            "-device", "ide-hd,drive=satadisk,bus=sata0.0",
+            "-drive", f"format=raw,file={ROOT}/build/dist/ext.img,if=none,id=rootdisk",
+            "-device", "ide-hd,drive=rootdisk,bus=sata0.0",
             "-m", mem, "-smp", str(cpus), "-display", "none",
             "-serial", f"file:{LOG}",
             "-monitor", f"unix:{SOCK},server,nowait",

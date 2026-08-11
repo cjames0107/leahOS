@@ -176,7 +176,7 @@ $(BUILD)/kernel/arch/x86_64/ap_blob.asm.o: $(BUILD)/ap_trampoline.bin
 $(BUILD)/%.img: $(BUILD)/%.elf tools/mkbootimage.py
 	python3 tools/mkbootimage.py $< $@
 
-$(BUILD)/kernel/arch/x86_64/servers.asm.o: $(BUILD)/blockd.img $(BUILD)/vfsd.img $(BUILD)/init.img
+$(BUILD)/kernel/arch/x86_64/servers.asm.o: $(BUILD)/blockd.img $(BUILD)/vfsd.img $(BUILD)/init.img $(BUILD)/ahcid.img
 
 # --- kernel -----------------------------------------------------------------
 $(BUILD)/%.asm.o: %.asm
@@ -349,16 +349,16 @@ $(DIST):
 # order, so the kernel's ATA driver finds the ext disk as drive index 1.
 QEMUFLAGS := -machine pc,hpet=on \
              -drive format=raw,file=$(IMG),if=ide \
-             -drive format=raw,file=$(EXT_IMG),if=ide \
              -drive format=raw,file=$(MNT_IMG),if=ide \
+             -drive format=raw,file=$(SATA_IMG),if=ide \
              -device qemu-xhci,id=xhci0 \
              -drive format=raw,file=$(USB_IMG),if=none,id=usbdisk \
              -device usb-storage,drive=usbdisk,bus=xhci0.0 \
              -device usb-kbd,bus=xhci0.0 \
              -audiodev $(AUDIODEV),id=snd0 -device AC97,audiodev=snd0 \
              -device ahci,id=sata0 \
-             -drive format=raw,file=$(SATA_IMG),if=none,id=satadisk \
-             -device ide-hd,drive=satadisk,bus=sata0.0 \
+             -drive format=raw,file=$(EXT_IMG),if=none,id=rootdisk \
+             -device ide-hd,drive=rootdisk,bus=sata0.0 \
              -m $(MEM) -smp $(CPUS) \
              -netdev user,id=net0,ipv4=on,ipv6=on -device e1000,netdev=net0 \
              -no-reboot -no-shutdown \

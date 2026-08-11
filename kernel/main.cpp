@@ -48,6 +48,8 @@ extern "C" u8 __kernel_start[];
 extern "C" u8 __kernel_end[];
 
 // The two programs the kernel carries, from servers.asm.
+extern "C" const u8 g_server_ahcid[];
+extern "C" const u8 g_server_ahcid_end[];
 extern "C" const u8 g_server_blockd[];
 extern "C" const u8 g_server_blockd_end[];
 extern "C" const u8 g_server_vfsd[];
@@ -170,6 +172,18 @@ bool start_servers()
         console::printf("  kernel: the disk driver never claimed its port\n");
         return false;
     }
+
+    // The other controller, before the filesystem rather than after it: the
+    // root volume may be on this one, and a driver started afterwards is a
+    // driver that was not there when the mount happened. It is allowed to fail
+    // - a machine with no AHCI controller is a machine that boots from the
+    // other one - so nothing is waited for and nothing is checked.
+    const usize ahcid_size =
+        static_cast<usize>(g_server_ahcid_end - g_server_ahcid);
+    process::create_embedded("ahcid", g_server_ahcid, ahcid_size,
+                             scheduler::current_pid());
+    for (u32 i = 0; i < 20000 && ipc::port_open(ipc::kPortBlock2) < 0; ++i)
+        scheduler::yield();
 
     if (process::create_embedded("vfsd", g_server_vfsd, vfsd_size,
                                  scheduler::current_pid()) == 0) {

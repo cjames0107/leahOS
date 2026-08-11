@@ -2056,10 +2056,53 @@ static int mount_read_sb(void)
     return 0;
 }
 
-/* The root, at startup. */
+/* The root, at startup - found rather than assumed.
+ *
+ * It used to be disk zero because there was one disk driver and its first disk
+ * was the only candidate. With a second controller the root can be on either,
+ * and which disk holds it is not something to write down in two places and
+ * hope they agree. So every disk is asked, and the one whose superblock
+ * carries the label the image is built with is the root.
+ *
+ * A disk that is not ext4, or is ext4 but is not this system's, is skipped -
+ * which is what stops the spare volume and the boot disk from being mounted as
+ * the root just because they were looked at first. */
+#define ROOT_LABEL "leahroot"
+
+static int root_label_matches(void)
+{
+    const char* want = ROOT_LABEL;
+    for (unsigned i = 0; i < 16; ++i) {
+        const char c = (char)g_sb[120 + i];
+        if (want[i] == '\0')
+            return c == '\0';
+        if (c != want[i])
+            return 0;
+    }
+    return 1;
+}
+
 static int mount(void)
 {
-    return mount_at(0, "/") == 0 ? 0 : -1;
+    /* Both drivers' disks. The AHCI one first: a machine with the root there
+     * is a machine where looking at the other controller first only wastes
+     * the time of reading a superblock that will be rejected. */
+    static const unsigned kOrder[] = {
+        BLK_AHCI_BASE, BLK_AHCI_BASE + 1, 0, 1, 2, 3
+    };
+    for (unsigned i = 0; i < sizeof(kOrder) / sizeof(kOrder[0]); ++i) {
+        if (mount_at(kOrder[i], "/") != 0)
+            continue;
+        if (root_label_matches()) {
+            printf("vfsd: root is disk %u\n", kOrder[i]);
+            return 0;
+        }
+        /* Right kind of filesystem, wrong one. Put the slot back. */
+        memset(&g_fs[0], 0, sizeof(g_fs[0]));
+        g_cur = &g_fs[0];
+    }
+    printf("vfsd: no disk carries the root filesystem\n");
+    return -1;
 }
 
 

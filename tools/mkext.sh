@@ -278,8 +278,11 @@ MKE2FS_BLOCK="${MKE2FS_BLOCK:-4096}"
 MKE2FS_INODE="${MKE2FS_INODE:-256}"
 
 # -F: operate on a plain file. -d: populate from the staging tree at creation.
+# Labelled, because the filesystem server finds its root by looking for this
+# rather than by being told which disk to trust. Two disks can both be ext4;
+# only one of them is the system.
 "$MKE2FS" -q -F -t ext4 -b "$MKE2FS_BLOCK" -I "$MKE2FS_INODE" \
-    -O "$MKE2FS_FEATURES" \
+    -O "$MKE2FS_FEATURES" -L leahroot \
     -d "$STAGING" "$OUT" >/dev/null
 
 # mke2fs -d copies the *host* ownership, which is whoever built the image - so

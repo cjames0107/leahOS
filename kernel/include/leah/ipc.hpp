@@ -41,6 +41,7 @@ struct Message {
 constexpr u32 kPortNet   = 1;
 constexpr u32 kPortVfs   = 2;
 constexpr u32 kPortBlock = 3;
+constexpr u32 kPortBlock2 = 9;   // the AHCI driver's, when there is one
 constexpr u32 kPortNic   = 4;   // the raw Ethernet device
 constexpr u32 kPortAudio = 5;
 constexpr u32 kPortAuth  = 6;   // the account database

@@ -133,10 +133,10 @@ int main(void)
      * server. See syncd.c for what it is for. */
     spawn("/sbin/syncd", "syncd");
 
-    /* Finds the SATA controller and says what is on it. It does not serve
-     * anything yet, so there is no port to wait for and nothing depends on it
-     * having finished. */
-    spawn("/sbin/ahcid", "ahcid");
+    /* Not ahcid: the kernel starts it, because the root filesystem is on the
+     * controller it drives and it has to exist before there is anything to
+     * load a second copy from. Starting one here as well produced two, and the
+     * second one stopped the port the first was serving out of. */
 
     splash_progress("starting login");
 
