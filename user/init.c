@@ -133,6 +133,11 @@ int main(void)
      * server. See syncd.c for what it is for. */
     spawn("/sbin/syncd", "syncd");
 
+    /* Finds the SATA controller and says what is on it. It does not serve
+     * anything yet, so there is no port to wait for and nothing depends on it
+     * having finished. */
+    spawn("/sbin/ahcid", "ahcid");
+
     splash_progress("starting login");
 
     // login owns the screen from here: it authenticates, starts a shell as

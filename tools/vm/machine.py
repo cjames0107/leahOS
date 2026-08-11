@@ -50,6 +50,13 @@ class Machine:
             "-audiodev", "wav,id=snd0,path=/tmp/leah-audio.wav,"
                          "out.frequency=48000,out.channels=2,out.format=s16",
             "-device", "AC97,audiodev=snd0",
+            # The same controllers `make run` gives it. A harness that boots a
+            # different machine from the one people use is checking something
+            # nobody runs - which is how the SATA controller came to be absent
+            # from every check while being present in every real boot.
+            "-device", "ahci,id=sata0",
+            "-drive", f"format=raw,file={ROOT}/build/dist/sata.img,if=none,id=satadisk",
+            "-device", "ide-hd,drive=satadisk,bus=sata0.0",
             "-m", mem, "-smp", str(cpus), "-display", "none",
             "-serial", f"file:{LOG}",
             "-monitor", f"unix:{SOCK},server,nowait",

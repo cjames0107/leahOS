@@ -33,6 +33,13 @@ def body(t):
     t.expect("cat /mnt/notes/hello.txt", "second filesystem")
     t.expect("mount -u /mnt; mount", "procfs on /proc")
 
+    # The SATA controller is found and its port enumerated. Reading the serial
+    # line directly, because this is printed at boot before there is a shell.
+    if "ahcid: AHCI" not in t.m.serial():
+        from machine import Failure
+        raise Failure("the AHCI controller was not found at boot")
+    t.checks += 1
+
     # And the in-guest suite, which is the deep one.
     t.expect("tests", "0 failure(s)", timeout=600)
 
