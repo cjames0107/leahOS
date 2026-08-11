@@ -44,7 +44,7 @@ class Machine:
             "qemu-system-x86_64", "-machine", "pc,hpet=on",
             "-drive", f"format=raw,file={ROOT}/build/dist/leahos.img,if=ide",
             "-drive", f"format=raw,file={ROOT}/build/dist/mnt.img,if=ide",
-            "-drive", f"format=raw,file={ROOT}/build/dist/sata.img,if=ide",
+
             "-snapshot",
             "-netdev", "user,id=net0", "-device", "e1000,netdev=net0",
             "-audiodev", "wav,id=snd0,path=/tmp/leah-audio.wav,"
@@ -59,6 +59,8 @@ class Machine:
             "-device", "ahci,id=sata0",
             "-drive", f"format=raw,file={ROOT}/build/dist/ext.img,if=none,id=rootdisk",
             "-device", "ide-hd,drive=rootdisk,bus=sata0.0",
+            "-drive", f"format=raw,file={ROOT}/build/dist/sata.img,if=none,id=satadisk",
+            "-device", "ide-hd,drive=satadisk,bus=sata0.1",
             "-m", mem, "-smp", str(cpus), "-display", "none",
             "-serial", f"file:{LOG}",
             "-monitor", f"unix:{SOCK},server,nowait",

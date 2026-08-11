@@ -350,7 +350,7 @@ $(DIST):
 QEMUFLAGS := -machine pc,hpet=on \
              -drive format=raw,file=$(IMG),if=ide \
              -drive format=raw,file=$(MNT_IMG),if=ide \
-             -drive format=raw,file=$(SATA_IMG),if=ide \
+
              -device qemu-xhci,id=xhci0 \
              -drive format=raw,file=$(USB_IMG),if=none,id=usbdisk \
              -device usb-storage,drive=usbdisk,bus=xhci0.0 \
@@ -359,6 +359,8 @@ QEMUFLAGS := -machine pc,hpet=on \
              -device ahci,id=sata0 \
              -drive format=raw,file=$(EXT_IMG),if=none,id=rootdisk \
              -device ide-hd,drive=rootdisk,bus=sata0.0 \
+             -drive format=raw,file=$(SATA_IMG),if=none,id=satadisk \
+             -device ide-hd,drive=satadisk,bus=sata0.1 \
              -m $(MEM) -smp $(CPUS) \
              -netdev user,id=net0,ipv4=on,ipv6=on -device e1000,netdev=net0 \
              -no-reboot -no-shutdown \

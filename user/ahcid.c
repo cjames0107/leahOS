@@ -91,18 +91,33 @@ static void cfg_write(unsigned bus, unsigned slot, unsigned fn, unsigned off,
 }
 
 static volatile unsigned* g_hba;        /* the controller's registers */
-static unsigned g_port;                 /* the one with a disk on it  */
-static unsigned long g_sectors;         /* how many it holds          */
+/* Every port with a disk on it.
+ *
+ * The command list and the reply area are per port, because the controller
+ * writes into them on its own schedule and two ports sharing either would be
+ * two conversations in one notebook. The command table and the data buffer are
+ * not: this driver issues one command and waits for it, so there is never a
+ * second transfer in flight to want them. */
+#define MAX_DISKS 4
+
+struct disk {
+    unsigned      port;
+    unsigned long sectors;
+    volatile unsigned char* cmd_list;
+    volatile unsigned char* fis;
+    uint64_t cmd_list_phys, fis_phys;
+};
+
+static struct disk g_disk[MAX_DISKS];
+static unsigned    g_disks;
 
 /* The structures the controller reads out of memory, so they have to be where
  * it can reach them: allocated once, physically contiguous, and never moved.
  * dma_alloc hands back both addresses because the controller needs the
  * physical one and this program needs the virtual one. */
-static volatile unsigned char* g_cmd_list;      /* 32 headers, 1 KiB    */
-static volatile unsigned char* g_fis;           /* replies, 256 bytes   */
 static volatile unsigned char* g_cmd_table;     /* one command's detail */
 static volatile unsigned char* g_buffer;        /* the data itself      */
-static uint64_t g_cmd_list_phys, g_fis_phys, g_cmd_table_phys, g_buffer_phys;
+static uint64_t g_cmd_table_phys, g_buffer_phys;
 
 #define BUFFER_BYTES 4096
 
@@ -121,11 +136,11 @@ static void wr32(volatile unsigned char* at, unsigned off, unsigned value)
     *(volatile unsigned*)(at + off) = value;
 }
 
-/* Wait for the device to stop being busy. Returns 0 when it is ready. */
-static int wait_ready(void)
+/* Wait for a device to stop being busy. Returns 0 when it is ready. */
+static int wait_ready(unsigned d)
 {
     for (int spin = 0; spin < 2000000; ++spin) {
-        const unsigned tfd = hba(PORT_BASE(g_port) + PORT_TFD);
+        const unsigned tfd = hba(PORT_BASE(g_disk[d].port) + PORT_TFD);
         if ((tfd & (TFD_BSY | TFD_DRQ)) == 0)
             return 0;
     }
@@ -138,9 +153,9 @@ static int wait_ready(void)
  * addresses while it is running, and it will not start until it has stopped -
  * so both waits are real and skipping either leaves it reading whatever the
  * firmware left behind. */
-static int port_start(void)
+static int port_start(unsigned d)
 {
-    const unsigned base = PORT_BASE(g_port);
+    const unsigned base = PORT_BASE(g_disk[d].port);
 
     hba_set(base + PORT_CMD, hba(base + PORT_CMD) & ~CMD_ST);
     for (int spin = 0; spin < 1000000; ++spin)
@@ -153,10 +168,10 @@ static int port_start(void)
     if ((hba(base + PORT_CMD) & (CMD_CR | CMD_FR)) != 0)
         return -1;
 
-    hba_set(base + PORT_CLB,  (unsigned)(g_cmd_list_phys & 0xFFFFFFFFu));
-    hba_set(base + PORT_CLBU, (unsigned)(g_cmd_list_phys >> 32));
-    hba_set(base + PORT_FB,   (unsigned)(g_fis_phys & 0xFFFFFFFFu));
-    hba_set(base + PORT_FBU,  (unsigned)(g_fis_phys >> 32));
+    hba_set(base + PORT_CLB,  (unsigned)(g_disk[d].cmd_list_phys & 0xFFFFFFFFu));
+    hba_set(base + PORT_CLBU, (unsigned)(g_disk[d].cmd_list_phys >> 32));
+    hba_set(base + PORT_FB,   (unsigned)(g_disk[d].fis_phys & 0xFFFFFFFFu));
+    hba_set(base + PORT_FBU,  (unsigned)(g_disk[d].fis_phys >> 32));
 
     hba_set(base + PORT_SERR, hba(base + PORT_SERR));   /* write to clear */
     hba_set(base + PORT_IS, hba(base + PORT_IS));
@@ -171,19 +186,19 @@ static int port_start(void)
  * Slot zero every time: this issues one command and waits for it, so there is
  * never a second in flight to collide with. Thirty-two slots are for a driver
  * that keeps several going, which this is not yet. */
-static int transfer(unsigned long lba, unsigned sectors, int write)
+static int transfer(unsigned d, unsigned long lba, unsigned sectors, int write)
 {
-    if (sectors == 0 || sectors * 512u > BUFFER_BYTES)
+    if (d >= g_disks || sectors == 0 || sectors * 512u > BUFFER_BYTES)
         return -1;
-    if (wait_ready() != 0)
+    if (wait_ready(d) != 0)
         return -1;
 
-    const unsigned base = PORT_BASE(g_port);
+    const unsigned base = PORT_BASE(g_disk[d].port);
     hba_set(base + PORT_IS, hba(base + PORT_IS));
 
     /* The header: a five-dword command FIS, one region to scatter into, and
      * the direction. */
-    volatile unsigned* header = (volatile unsigned*)g_cmd_list;
+    volatile unsigned* header = (volatile unsigned*)g_disk[d].cmd_list;
     header[0] = (5u) | (write ? (1u << 6) : 0u) | (1u << 16);
     header[1] = 0;                                  /* bytes moved so far */
     header[2] = (unsigned)(g_cmd_table_phys & 0xFFFFFFFFu);
@@ -238,14 +253,14 @@ static int transfer(unsigned long lba, unsigned sectors, int write)
  * IDENTIFY returns 512 bytes rather than moving sectors, but over AHCI it is
  * issued exactly like a read - the difference is entirely in the command byte
  * and in what comes back. */
-static int identify(void)
+static int identify(unsigned d)
 {
-    if (wait_ready() != 0)
+    if (wait_ready(d) != 0)
         return -1;
-    const unsigned base = PORT_BASE(g_port);
+    const unsigned base = PORT_BASE(g_disk[d].port);
     hba_set(base + PORT_IS, hba(base + PORT_IS));
 
-    volatile unsigned* header = (volatile unsigned*)g_cmd_list;
+    volatile unsigned* header = (volatile unsigned*)g_disk[d].cmd_list;
     header[0] = 5u | (1u << 16);
     header[1] = 0;
     header[2] = (unsigned)(g_cmd_table_phys & 0xFFFFFFFFu);
@@ -284,7 +299,7 @@ static int identify(void)
     if (sectors == 0)
         for (int i = 0; i < 4; ++i)     /* fall back to the 28-bit count */
             sectors |= (unsigned long)id[120 + i] << (8 * i);
-    g_sectors = sectors;
+    g_disk[d].sectors = sectors;
     return sectors != 0 ? 0 : -1;
 }
 
@@ -369,9 +384,8 @@ int main(void)
                                 : "something that is not a disk");
     }
 
-    /* The one port with a disk on it. */
-    int have_port = 0;
-    for (unsigned port = 0; port < 32 && !have_port; ++port) {
+    /* Every port with a disk on it, up to as many as this can hold. */
+    for (unsigned port = 0; port < 32 && g_disks < MAX_DISKS; ++port) {
         if ((implemented & (1u << port)) == 0)
             continue;
         const unsigned ssts = hba(PORT_BASE(port) + PORT_SSTS);
@@ -379,38 +393,61 @@ int main(void)
             continue;
         if (hba(PORT_BASE(port) + PORT_SIG) != SIG_ATA)
             continue;
-        g_port = port;
-        have_port = 1;
+        g_disk[g_disks++].port = port;
     }
-    if (!have_port) {
+    if (g_disks == 0) {
         printf("ahcid: no disk to drive\n");
         return 1;
     }
 
-    /* One allocation, carved up. Each piece has an alignment the controller
-     * insists on - a kilobyte for the command list, 256 bytes for the reply
-     * area, 128 for the command table - and a page satisfies all of them, so
-     * the pieces are simply put on page boundaries rather than arithmetic
-     * being done to prove each one. */
+    /* One allocation, carved into pages. Each structure has an alignment the
+     * controller insists on - a kilobyte for a command list, 256 bytes for a
+     * reply area, 128 for a command table - and a page satisfies all of them,
+     * so the pieces are put on page boundaries rather than arithmetic being
+     * done to prove each one. */
+    const unsigned long want = (unsigned long)(g_disks * 2 + 2) * 4096ul;
     uint64_t phys = 0;
-    unsigned char* dma = (unsigned char*)dma_alloc(16384, &phys);
+    unsigned char* dma = (unsigned char*)dma_alloc(want, &phys);
     if (dma == 0) {
         printf("ahcid: no memory the controller can reach\n");
         return 1;
     }
-    memset(dma, 0, 16384);
-    g_cmd_list   = dma;              g_cmd_list_phys  = phys;
-    g_fis        = dma + 4096;       g_fis_phys       = phys + 4096;
-    g_cmd_table  = dma + 8192;       g_cmd_table_phys = phys + 8192;
-    g_buffer     = dma + 12288;      g_buffer_phys    = phys + 12288;
+    memset(dma, 0, want);
 
-    if (port_start() != 0) {
-        printf("ahcid: port %u will not start\n", g_port);
-        return 1;
+    unsigned long at = 0;
+    for (unsigned d = 0; d < g_disks; ++d) {
+        g_disk[d].cmd_list      = dma + at;
+        g_disk[d].cmd_list_phys = phys + at;
+        at += 4096;
+        g_disk[d].fis      = dma + at;
+        g_disk[d].fis_phys = phys + at;
+        at += 4096;
     }
+    g_cmd_table = dma + at;  g_cmd_table_phys = phys + at;  at += 4096;
+    g_buffer    = dma + at;  g_buffer_phys    = phys + at;
 
-    if (identify() != 0) {
-        printf("ahcid: the disk would not say how big it is\n");
+    /* Start each port and ask each disk how big it is. A port that will not
+     * start, or a disk that will not answer, is dropped rather than allowed to
+     * shift the numbering of the ones that did - which is why this compacts
+     * the array instead of leaving a hole in it. */
+    unsigned kept = 0;
+    for (unsigned d = 0; d < g_disks; ++d) {
+        if (d != kept)
+            g_disk[kept] = g_disk[d];
+        if (port_start(kept) != 0) {
+            printf("ahcid: port %u will not start\n", g_disk[kept].port);
+            continue;
+        }
+        if (identify(kept) != 0) {
+            printf("ahcid: port %u would not say how big it is\n",
+                   g_disk[kept].port);
+            continue;
+        }
+        ++kept;
+    }
+    g_disks = kept;
+    if (g_disks == 0) {
+        printf("ahcid: no disk came up\n");
         return 1;
     }
 
@@ -425,15 +462,15 @@ int main(void)
      *
      * The write path is still exercised, by everything the system does to its
      * own root. It does not need a rehearsal that damages the stage. */
-    memset((void*)g_buffer, 0, 512);
-    if (transfer(0, 1, 0) != 0) {
-        printf("ahcid: the disk will not read\n");
-        return 1;
+    for (unsigned d = 0; d < g_disks; ++d) {
+        memset((void*)g_buffer, 0, 512);
+        const int ok = transfer(d, 0, 1, 0) == 0;
+        printf("ahcid: disk %u on port %u, %lu sectors, DMA read %s\n",
+               BLK_AHCI_BASE + d, g_disk[d].port, g_disk[d].sectors,
+               ok ? "verified" : "FAILED");
+        if (!ok)
+            return 1;
     }
-    const int plausible = g_buffer[510] == 0x55 || g_buffer[510] == 0x00 ||
-                          g_sectors > 0;
-    printf("ahcid: port %u, %lu sectors, DMA read %s\n", g_port, g_sectors,
-           plausible ? "verified" : "returned nothing");
 
     /* Now serve. The protocol is the one the other driver speaks, on a port of
      * its own: a client that wants this disk asks here, and the disk index it
@@ -453,7 +490,8 @@ int main(void)
         printf("ahcid: a driver already has this port\n");
         return 1;
     }
-    printf("ahcid: serving disk %u on port %d\n", BLK_AHCI_BASE, IPC_PORT_BLOCK2);
+    printf("ahcid: serving %u disk%s from %u on port %d\n", g_disks,
+           g_disks == 1 ? "" : "s", BLK_AHCI_BASE, IPC_PORT_BLOCK2);
 
     for (;;) {
         struct ipc_message m, r;
@@ -466,15 +504,15 @@ int main(void)
         r.tag = m.tag;
         r.word[0] = -1;
 
-        /* One disk, so anything other than zero is a question about a disk
-         * this driver does not have. */
-        if (m.word[2] != 0) {
+        /* Which of this driver's disks is being asked about. */
+        const unsigned d = (unsigned)m.word[2];
+        if (d >= g_disks) {
             ipc_reply(handle, &r);
             continue;
         }
 
         if (m.tag == BLK_INFO) {
-            r.word[0] = (long)g_sectors;
+            r.word[0] = (long)g_disk[d].sectors;
             r.word[1] = BLK_SECTOR;
             unsigned n = 0;
             while (n < sizeof(r.data) - 1 && "AHCI DISK"[n] != '\0') {
@@ -492,7 +530,7 @@ int main(void)
             }
             if (m.tag == BLK_WRITE)
                 memcpy((void*)g_buffer, shared->data, count * BLK_SECTOR);
-            if (transfer(lba, count, m.tag == BLK_WRITE) == 0) {
+            if (transfer(d, lba, count, m.tag == BLK_WRITE) == 0) {
                 if (m.tag == BLK_READ)
                     memcpy(shared->data, (const void*)g_buffer,
                            count * BLK_SECTOR);

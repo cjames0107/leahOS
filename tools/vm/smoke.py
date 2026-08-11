@@ -51,6 +51,12 @@ def body(t):
         raise Failure("the root filesystem is not on the AHCI disk")
     t.checks += 1
 
+    # And a second disk on the same controller, which is what multi-port
+    # support is for: disk 5 is the AHCI driver's second port.
+    t.expect("mount 5 /sata", "")
+    t.expect("cat /sata/sata/hello.txt", "came off the SATA disk")
+    t.expect("mount -u /sata; echo detached", "detached")
+
     # And the in-guest suite, which is the deep one.
     t.expect("tests", "0 failure(s)", timeout=600)
 
