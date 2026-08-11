@@ -119,7 +119,15 @@ static volatile unsigned char* g_cmd_table;     /* one command's detail */
 static volatile unsigned char* g_buffer;        /* the data itself      */
 static uint64_t g_cmd_table_phys, g_buffer_phys;
 
-#define BUFFER_BYTES 4096
+/* As much as the protocol will ever ask for in one request.
+ *
+ * This was a single page, which is smaller than the largest transfer a client
+ * may send - so the filesystem's read-ahead, which asks for exactly the
+ * maximum, was refused every time and fell back to one block. Every read of
+ * the root disk was costing a rejected request and then a small one. A driver
+ * whose buffer is smaller than its protocol is a driver that silently does the
+ * slow thing. */
+#define BUFFER_BYTES (BLK_SECTOR * BLK_MAX_COUNT)
 
 static unsigned hba(unsigned off)
 {
@@ -405,7 +413,11 @@ int main(void)
      * reply area, 128 for a command table - and a page satisfies all of them,
      * so the pieces are put on page boundaries rather than arithmetic being
      * done to prove each one. */
-    const unsigned long want = (unsigned long)(g_disks * 2 + 2) * 4096ul;
+    /* Two pages per disk for its command list and reply area, one for the
+     * shared command table, and however many the data buffer needs. */
+    const unsigned long buffer_pages = (BUFFER_BYTES + 4095ul) / 4096ul;
+    const unsigned long want =
+        ((unsigned long)g_disks * 2ul + 1ul + buffer_pages) * 4096ul;
     uint64_t phys = 0;
     unsigned char* dma = (unsigned char*)dma_alloc(want, &phys);
     if (dma == 0) {
