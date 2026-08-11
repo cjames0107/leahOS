@@ -133,6 +133,42 @@ class Machine:
         print(f"  shot -> {png}")
         return png
 
+    def screen_colours(self, name="probe"):
+        """How many distinct colours are on the screen.
+
+        The checks drive the terminal by keystroke and read the answers off the
+        serial line, which means a machine whose display never draws anything
+        passes every one of them. A blank screen is the one failure this suite
+        was structurally unable to see, so it samples the framebuffer and
+        counts: a desktop has hundreds of colours in it, and a dead one has
+        one."""
+        ppm = "/tmp/%s.ppm" % name
+        self.cmd("screendump %s" % ppm, 1.0)
+        try:
+            with open(ppm, "rb") as f:
+                data = f.read()
+        except OSError:
+            return 0
+        # P6 header: magic, width, height, maxval - each possibly on its own
+        # line, with comments allowed between.
+        at, fields = 2, []
+        while len(fields) < 3 and at < len(data):
+            while at < len(data) and data[at:at + 1].isspace():
+                at += 1
+            if data[at:at + 1] == b"#":
+                while at < len(data) and data[at] != 0x0A:
+                    at += 1
+                continue
+            start = at
+            while at < len(data) and not data[at:at + 1].isspace():
+                at += 1
+            fields.append(int(data[start:at]))
+        at += 1
+        seen = set()
+        for i in range(at, len(data) - 3, 997 * 3):      # a scattered sample
+            seen.add(data[i:i + 3])
+        return len(seen)
+
     def serial(self):
         try:
             with open(LOG, "r", errors="replace") as f:

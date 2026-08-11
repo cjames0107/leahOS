@@ -57,6 +57,14 @@ def body(t):
     t.expect("cat /sata/sata/hello.txt", "came off the SATA disk")
     t.expect("mount -u /sata; echo detached", "detached")
 
+    # Something is actually on the screen. Every other check here would pass
+    # on a machine that draws nothing at all.
+    colours = t.m.screen_colours("smoke")
+    if colours < 16:
+        raise Failure("the screen has %d colour(s) - nothing is being drawn"
+                      % colours)
+    t.checks += 1
+
     # How the filesystem behaves when more than one thing wants it. The ratio
     # between one reader and four is the whole question: a server that serves
     # strictly one at a time takes four times as long for four readers.

@@ -641,8 +641,30 @@ AddressSpace fork_address_space(AddressSpace parent)
                 u64* pt = table_of(pd[d]);
                 for (u64 t = 0; t < kEntriesPerTable; ++t) {
                     const u64 entry = pt[t];
-                    if ((entry & Present) == 0)
+
+                    /* A reserved page is deliberately not present - that is
+                     * what makes the processor fault on it so the handler can
+                     * put a page there. It is still part of the address space,
+                     * and skipping it here handed the child a hole where its
+                     * parent had a mapping it simply had not touched yet.
+                     *
+                     * The child faulted on it, found nothing reserved, and was
+                     * killed for touching an address it owned. Intermittently,
+                     * because whether a page was touched before the fork - and
+                     * so present and copied - is a matter of timing. */
+                    if ((entry & Present) == 0) {
+                        if ((entry & Lazy) != 0) {
+                            const vaddr_t at =
+                                m << 39 | p << 30 | d << 21 | t << 12;
+                            u64* into = walk_to_pte_making(child_pml4, at);
+                            if (into == nullptr) {
+                                destroy_address_space(child);
+                                return 0;
+                            }
+                            *into = entry;      /* reserved there too */
+                        }
                         continue;
+                    }
 
                     const vaddr_t virt = m << 39 | p << 30 | d << 21 | t << 12;
                     const u64 flags = entry & (Write | User | NoExecute);
