@@ -107,6 +107,11 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
     w->min_width = 64;
     w->min_height = 32;
     w->flags = 0;
+    /* Slots are reused, so anything a previous window left here is this
+     * window's problem. A text editor inheriting a settings window's sidebar
+     * width had the server tinting a column across its title bar for a sidebar
+     * that was not there. */
+    w->sidebar = 0;
     unsigned n = 0;
     while (title != 0 && title[n] != '\0' && n < WS_TITLE_LEN - 1) {
         w->title[n] = title[n];
