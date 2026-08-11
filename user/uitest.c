@@ -192,6 +192,12 @@ int main(int argc, char** argv)
         return 1;
     }
     g_px = win_map(id);
+    /* The widget layer draws into whatever this points at, and without it
+     * every wg_ call is a no-op against a null buffer - which is exactly what
+     * happened: the window came up with its title and its colour bar, drawn by
+     * this program's own helpers, and nothing else. */
+    wg_target(g_px, g_w, g_h);
+    wg_theme();
     if (g_px == 0)
         return 1;
     win_set_min_size(id, 260, 250);
@@ -207,6 +213,7 @@ int main(int argc, char** argv)
                 g_w = (unsigned)event.x;
                 g_h = (unsigned)event.y;
                 g_px = win_map(id);
+                wg_target(g_px, g_w, g_h);
                 if (g_px == 0)
                     return 1;
                 note("resized to", event.x, event.y);
