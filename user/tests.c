@@ -2559,8 +2559,12 @@ static void test_procfs(void)
         fclose(in);
     }
     check("mounts lists the root filesystem", strstr(text, "ext4") != 0);
-    check("and the two that are not storage",
-          strstr(text, "procfs") != 0 && strstr(text, "devfs") != 0);
+    /* And procfs, which is the only thing in the table that is not a disk.
+     * /dev used to be listed here as a devfs; it is ordinary inodes on the
+     * root filesystem now, and the table stopped claiming otherwise when it
+     * started being read from the mount table rather than a list written down
+     * at build time. */
+    check("and the one that is not storage", strstr(text, "procfs") != 0);
 
     /* A process's directory exists exactly while the process does, so this
      * one is here by virtue of asking. */

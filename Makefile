@@ -354,6 +354,13 @@ QEMUFLAGS := -machine pc,hpet=on \
              -no-reboot -no-shutdown \
              $(QEMU_EXTRA)
 
+# The headless check. Boots, drives a shell, and asserts against the serial
+# line rather than against a screenshot - a screenshot needs somebody to look
+# at it, and this needs to be able to fail on its own.
+.PHONY: check
+check: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
+	@python3 tools/vm/smoke.py
+
 run: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio
 
@@ -386,6 +393,7 @@ help:
 	@echo
 	@echo '  make              build $(IMG)'
 	@echo '  make run          boot in QEMU, window + serial on stdio'
+	@echo '  make check        boot headless and assert, non-zero on failure'
 	@echo '  make headless     boot with no window, print COM1, exit'
 	@echo '  make debug        boot halted, gdb stub on :1234'
 	@echo '  make gdb          attach to a `make debug` session'

@@ -114,14 +114,67 @@ static unsigned char g_block[8192];
 
 static int txn_peek(unsigned long block, unsigned char* out);
 
+/* --- the block cache ---------------------------------------------------------
+ *
+ * Every read used to be a message to the disk server and a wait for the reply,
+ * and the same handful of blocks were asked for over and over: the group
+ * descriptors on every allocation, an inode table block on every stat, the
+ * directory being listed once per entry in it. Walking a directory of thirty
+ * files read the same block thirty-one times, each one a context switch out to
+ * a driver doing programmed I/O a sector at a time.
+ *
+ * Direct-mapped rather than associative, and write-through rather than
+ * write-back. Both are the unclever choice on purpose: a direct-mapped cache
+ * needs no replacement policy and no bookkeeping on a hit - the fast path is a
+ * comparison and a memcpy - and writing through means the disk is never behind
+ * the cache, so the journal's ordering is exactly what it was and nothing here
+ * can lose data that was already promised. The one thing that would be wrong
+ * is a stale entry, and there is a single place a block is written.
+ */
+#define CACHE_SLOTS 512
+
+static unsigned char g_cache[CACHE_SLOTS][8192];
+static unsigned long g_cache_block[CACHE_SLOTS];
+static unsigned      g_cache_dev[CACHE_SLOTS];
+static unsigned char g_cache_full[CACHE_SLOTS];
+
+static unsigned cache_slot(unsigned long block, unsigned dev)
+{
+    /* The low bits of the block number, mixed with the device so that two
+     * disks do not collide on every slot at once. */
+    return (unsigned)((block ^ ((unsigned long)dev << 9)) % CACHE_SLOTS);
+}
+
+static void cache_put(unsigned long block, unsigned dev,
+                      const unsigned char* data)
+{
+    const unsigned i = cache_slot(block, dev);
+    memcpy(g_cache[i], data, g_block_size);
+    g_cache_block[i] = block;
+    g_cache_dev[i] = dev;
+    g_cache_full[i] = 1;
+}
+
+static int cache_get(unsigned long block, unsigned dev, unsigned char* out)
+{
+    const unsigned i = cache_slot(block, dev);
+    if (!g_cache_full[i] || g_cache_block[i] != block || g_cache_dev[i] != dev)
+        return 0;
+    memcpy(out, g_cache[i], g_block_size);
+    return 1;
+}
+
 static int read_block(unsigned long block, unsigned char* out)
 {
     if (txn_peek(block, out))
+        return 0;
+    if (cache_get(block, g_cur->dev, out))
         return 0;
     const unsigned sectors = g_block_size / BLK_SECTOR;
     if (disk_read(block * sectors, sectors, g_cur->dev) != 0)
         return -1;
     memcpy(out, g_sectors->data, g_block_size);
+    cache_put(block, g_cur->dev, out);
     return 0;
 }
 
@@ -317,6 +370,9 @@ static int write_block(unsigned long block, const unsigned char* in)
     }
     const unsigned sectors = g_block_size / BLK_SECTOR;
     memcpy(g_sectors->data, in, g_block_size);
+    /* Write-through: the cache is updated with what the disk is being told,
+     * so a later read cannot see the version from before this. */
+    cache_put(block, g_cur->dev, in);
     return disk_write(block * sectors, sectors, g_cur->dev);
 }
 

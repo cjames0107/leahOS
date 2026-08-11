@@ -1,0 +1,35 @@
+"""The checks worth making on every build, in the order a failure matters.
+
+Deliberately shallow and broad: this is meant to catch a boot that does not
+boot and a filesystem that does not answer, not to replace the in-guest suite,
+which is what `tests` is for and which this runs last.
+"""
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from machine import main
+
+
+def body(t):
+    # The filesystem answers, and answers about itself.
+    t.expect("echo alive", "alive")
+    t.expect("ls /bin | wc -l", "")
+    t.expect("mount", "/dev/sda2 on / type ext4")
+
+    # Device nodes are nodes, not empty files.
+    t.expect("stat /dev/null", "character device")
+    t.expect("echo discard > /dev/null; echo wrote", "wrote")
+
+    # The journal is being honoured.
+    t.expect("fsck", "clean")
+
+    # A second filesystem attaches, is readable, and detaches.
+    t.expect("mount 2 /mnt", "")
+    t.expect("cat /mnt/notes/hello.txt", "second filesystem")
+    t.expect("mount -u /mnt; mount", "procfs on /proc")
+
+    # And the in-guest suite, which is the deep one.
+    t.expect("tests", "0 failure(s)", timeout=300)
+
+
+main("smoke", body)
