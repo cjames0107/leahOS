@@ -57,6 +57,12 @@ def body(t):
     t.expect("cat /sata/sata/hello.txt", "came off the SATA disk")
     t.expect("mount -u /sata; echo detached", "detached")
 
+    # How the filesystem behaves when more than one thing wants it. The ratio
+    # between one reader and four is the whole question: a server that serves
+    # strictly one at a time takes four times as long for four readers.
+    for n in (1, 2, 4):
+        t.expect("fsbench %d" % n, "fsbench: %d reader" % n, timeout=240)
+
     # And the in-guest suite, which is the deep one.
     t.expect("tests", "0 failure(s)", timeout=600)
 

@@ -128,7 +128,7 @@ BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami date
                  chmod chown stat less grep find wc head tail sort diff tar \
                  gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync
 USRBIN_PROGRAMS := hello gui tone lspci ping ping6 arp nslookup fetch fetch6 env \
-                 screenshot tests ipctest nictest nettest blktest vfstest \
+                 screenshot tests fsbench ipctest nictest nettest blktest vfstest \
                  mvtest v6test churn
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player
 USER_PROGRAMS := $(SBIN_PROGRAMS) $(BIN_PROGRAMS) $(USRBIN_PROGRAMS) $(APP_PROGRAMS)
