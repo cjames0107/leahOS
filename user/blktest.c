@@ -56,8 +56,8 @@ int main(void)
         printf("blktest: the read failed\n");
         return 1;
     }
-    const unsigned magic = (unsigned)buf->data[1024 + 56] |
-                           ((unsigned)buf->data[1024 + 57] << 8);
+    const unsigned magic = (unsigned)buf->data[0][1024 + 56] |
+                           ((unsigned)buf->data[0][1024 + 57] << 8);
     if (magic == 0xEF53) {
         printf("  ok  read an ext4 superblock off the platter\n");
     } else {
@@ -69,21 +69,21 @@ int main(void)
      * opened with -snapshot, so nothing here outlives the machine. */
     const unsigned long spare = 40000;
     for (int i = 0; i < BLK_SECTOR; ++i)
-        buf->data[i] = (unsigned char)(i * 7 + 3);
+        buf->data[0][i] = (unsigned char)(i * 7 + 3);
     memset(&q, 0, sizeof(q));
     q.tag = BLK_WRITE;
     q.word[0] = (long)spare;
     q.word[1] = 1;
     const int wrote = ipc_call(port, &q, &a) == 0 && a.word[0] == 0;
 
-    memset(buf->data, 0, BLK_SECTOR);
+    memset(buf->data[0], 0, BLK_SECTOR);
     memset(&q, 0, sizeof(q));
     q.tag = BLK_READ;
     q.word[0] = (long)spare;
     q.word[1] = 1;
     int same = wrote && ipc_call(port, &q, &a) == 0 && a.word[0] == 0;
     for (int i = 0; same && i < BLK_SECTOR; ++i)
-        if (buf->data[i] != (unsigned char)(i * 7 + 3))
+        if (buf->data[0][i] != (unsigned char)(i * 7 + 3))
             same = 0;
     if (same) {
         printf("  ok  a sector written came back the same\n");

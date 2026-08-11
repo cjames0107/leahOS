@@ -516,8 +516,11 @@ int main(void)
         r.tag = m.tag;
         r.word[0] = -1;
 
-        /* Which of this driver's disks is being asked about. */
+        /* Which of this driver's disks, and which region of the shared buffer
+         * the bytes travel in. */
         const unsigned d = (unsigned)m.word[2];
+        const unsigned slot = (unsigned)m.word[3] < BLK_SLOTS
+                            ? (unsigned)m.word[3] : 0u;
         if (d >= g_disks) {
             ipc_reply(handle, &r);
             continue;
@@ -541,10 +544,10 @@ int main(void)
                 continue;
             }
             if (m.tag == BLK_WRITE)
-                memcpy((void*)g_buffer, shared->data, count * BLK_SECTOR);
+                memcpy((void*)g_buffer, shared->data[slot], count * BLK_SECTOR);
             if (transfer(d, lba, count, m.tag == BLK_WRITE) == 0) {
                 if (m.tag == BLK_READ)
-                    memcpy(shared->data, (const void*)g_buffer,
+                    memcpy(shared->data[slot], (const void*)g_buffer,
                            count * BLK_SECTOR);
                 r.word[0] = 0;
             }

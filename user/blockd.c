@@ -311,12 +311,15 @@ int main(int argc, char** argv)
         } else if (m.tag == BLK_READ || m.tag == BLK_WRITE) {
             const unsigned long lba = (unsigned long)m.word[0];
             unsigned count = (unsigned)m.word[1];
+            /* Which region of the shared buffer this transfer travels in. */
+            const unsigned slot = (unsigned)m.word[3] < BLK_SLOTS
+                                ? (unsigned)m.word[3] : 0u;
             if (count == 0 || count > BLK_MAX_COUNT) {
                 r.word[0] = -1;
             } else {
                 r.word[0] = (m.tag == BLK_READ)
-                    ? read_sectors(lba, count, g_shared->data)
-                    : write_sectors(lba, count, g_shared->data);
+                    ? read_sectors(lba, count, g_shared->data[slot])
+                    : write_sectors(lba, count, g_shared->data[slot]);
             }
         } else {
             r.word[0] = -1;

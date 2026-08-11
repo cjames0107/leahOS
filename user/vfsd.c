@@ -33,6 +33,17 @@ static struct blk_shared* g_sectors;
 static int g_blk2 = -1;
 static struct blk_shared* g_sectors2;
 
+/* Which region of a driver's shared buffer this server's transfers use.
+ *
+ * One, for now, because this server handles one request at a time. It is a
+ * function rather than a constant so that the day there is a thread per
+ * request, the answer becomes the thread's own slot and nothing else has to
+ * change. */
+static unsigned disk_slot(void)
+{
+    return 0;
+}
+
 /* Which driver has this disk, and what it calls it.
  *
  * Two controllers that share nothing are two servers. The numbering runs
@@ -83,12 +94,14 @@ static int disk_read(unsigned long lba, unsigned count, unsigned dev)
     q.word[0] = (long)lba;
     q.word[1] = (long)count;
     q.word[2] = (long)local;
+    q.word[3] = (long)disk_slot();
     if (ipc_call(port, &q, &a) != 0 || a.word[0] != 0)
         return -1;
     /* Bring it into this server's own buffer, so everything above here reads
      * from one place regardless of which driver answered. */
     if (dev >= BLK_AHCI_BASE)
-        memcpy(g_sectors->data, g_sectors2->data, count * BLK_SECTOR);
+        memcpy(g_sectors->data[disk_slot()], g_sectors2->data[disk_slot()],
+               count * BLK_SECTOR);
     return 0;
 }
 
@@ -274,7 +287,7 @@ static int read_block(unsigned long block, unsigned char* out)
     const unsigned sectors = g_block_size / BLK_SECTOR;
     if (disk_read(block * sectors, sectors, g_cur->dev) != 0)
         return -1;
-    memcpy(out, g_sectors->data, g_block_size);
+    memcpy(out, g_sectors->data[disk_slot()], g_block_size);
     cache_put(block, g_cur->dev, out);
     return 0;
 }
@@ -406,11 +419,13 @@ static int disk_write(unsigned long lba, unsigned count, unsigned dev)
     if (port < 0)
         return -1;
     if (dev >= BLK_AHCI_BASE)
-        memcpy(g_sectors2->data, g_sectors->data, count * BLK_SECTOR);
+        memcpy(g_sectors2->data[disk_slot()], g_sectors->data[disk_slot()],
+               count * BLK_SECTOR);
     q.tag = BLK_WRITE;
     q.word[0] = (long)lba;
     q.word[1] = (long)count;
     q.word[2] = (long)local;
+    q.word[3] = (long)disk_slot();
     if (ipc_call(port, &q, &a) != 0 || a.word[0] != 0)
         return -1;
     return 0;
@@ -476,7 +491,7 @@ static int write_block(unsigned long block, const unsigned char* in)
         return 0;
     }
     const unsigned sectors = g_block_size / BLK_SECTOR;
-    memcpy(g_sectors->data, in, g_block_size);
+    memcpy(g_sectors->data[disk_slot()], in, g_block_size);
     /* Write-through: the cache is updated with what the disk is being told,
      * so a later read cannot see the version from before this. */
     cache_put(block, g_cur->dev, in);
@@ -2022,7 +2037,7 @@ static int mount_read_sb(void)
 {
     if (disk_read(0, 8, g_cur->dev) != 0)
         return -1;
-    const unsigned char* sb = g_sectors->data + 1024;
+    const unsigned char* sb = g_sectors->data[disk_slot()] + 1024;
     if (rd16(sb, 56) != 0xEF53)
         return -1;
 
