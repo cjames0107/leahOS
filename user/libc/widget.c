@@ -523,9 +523,15 @@ void wg_glass_clear(void)
 {
     if (g_px == 0)
         return;
-    /* Exactly the wash the server puts on the frame, so the title bar and the
-     * body under it are the same material rather than two near-misses. */
-    const uint32_t c = glass_on() ? 0x66FFFFFFu : wg_base_colour();
+    /* Nothing at all, when the glass is on.
+     *
+     * The server already washes the whole frame - title bar and body alike -
+     * before a client's pixels reach it. A client that washed its body again
+     * was laying a second coat over the first, so the body came out more
+     * opaque than the title bar above it: the same colour, mixed twice. Left
+     * clear, the one wash the server applies is the only one, and the two are
+     * identical because they are literally the same paint. */
+    const uint32_t c = glass_on() ? 0x00000000u : wg_base_colour();
     for (unsigned i = 0; i < g_w * g_h; ++i)
         g_px[i] = c;
 }
@@ -893,4 +899,36 @@ void wg_field(int x, int y, int w, int h, const char* text, int focused)
                                 0xCC000000u | wg_sel_colour());
     if (text != 0)
         wg_text(x + 8, y + (h - wg_text_height()) / 2, text, wg_ink_colour());
+}
+
+/* --- grouped settings rows ---------------------------------------------------
+ *
+ * A page of settings is not a flat list of controls. It is a handful of small
+ * groups, each with a heading, and a row inside a group is a label on the left
+ * and its control on the right. That shape is what makes a long page readable
+ * without every window inventing its own spacing for it.
+ *
+ * The group is a container; the rows are hairlines between, not boxes within,
+ * because a box inside a box is the thing this design keeps having to remove.
+ */
+#define WG_ROW_H 30
+
+void wg_group_begin(int x, int y, int w, int rows, const char* title)
+{
+    if (title != 0 && title[0] != '\0')
+        wg_text(x + 4, y - wg_text_height() - 4, title, WG_DIM);
+    wg_container(x, y, w, rows * WG_ROW_H, 10);
+}
+
+/* The label side of one row, and where its control should go. */
+int wg_row(int x, int y, int w, int index, const char* label)
+{
+    const int ry = y + index * WG_ROW_H;
+    if (index > 0)
+        draw_rect(&(struct surface){ g_px, (int)g_w, (int)g_h, 0, 0, 0, 0 },
+                  x + 12, ry, w - 24, 1,
+                  glass_on() ? 0x1AFFFFFFu : 0x14000000u);
+    wg_text(x + 14, ry + (WG_ROW_H - wg_text_height()) / 2, label,
+            wg_ink_colour());
+    return ry + (WG_ROW_H - 22) / 2;    /* where a 22-tall control sits */
 }

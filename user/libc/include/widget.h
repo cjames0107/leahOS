@@ -137,6 +137,13 @@ void wg_pill(int x, int y, int w, int h, const char* label, int down);
 /* A checkbox, a radio button and a text field, in the same vocabulary. The
  * sunken white squares with bevels round them were the last controls that gave
  * the interface's age away whatever was redrawn around them. */
+/* A page of settings is small groups of rows, each group with a heading and
+ * each row a label with its control on the right. Defined here so that every
+ * page does not invent its own spacing. */
+#define WG_ROW_H 30
+void wg_group_begin(int x, int y, int w, int rows, const char* title);
+int  wg_row(int x, int y, int w, int index, const char* label);
+
 void wg_check(int x, int y, int size, int on);
 void wg_radio(int x, int y, int size, int on);
 void wg_field(int x, int y, int w, int h, const char* text, int focused);

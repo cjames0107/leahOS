@@ -360,18 +360,33 @@ static void kv(int y, const char* k, const char* v)
     wg_text_clipped(SIDEBAR + 130, y, v, WG_INK, (int)g_w - SIDEBAR - 145);
 }
 
+/* A row's value, set against the group's right edge. */
+static void kv_at(int right, int y, const char* value)
+{
+    const int tw = wg_text_width(value);
+    wg_text_clipped(right - tw, y, value, WG_DIM, right - SIDEBAR - 120);
+}
+
 static void draw_general(void)
 {
     char name[64] = "?", line[96], cwd[128] = "";
     username(getuid(), name);
     getcwd(cwd, sizeof(cwd));
-    wg_text(SIDEBAR + 14, 16, "General", WG_INK);
-    wg_fill(SIDEBAR + 14, 34, (int)g_w - SIDEBAR - 28, 1, WG_DIM);
 
-    kv(50, "user", name);
+    const int x = SIDEBAR + 16, w = (int)g_w - SIDEBAR - 32;
+    wg_text(x, 12, "General", wg_ink_colour());
+
+    /* Who you are. */
+    int y = 58;
+    wg_group_begin(x, y, w, 3, "Account");
     snprintf(line, sizeof(line), "%u", getuid());
-    kv(70, "uid", line);
-    kv(90, "directory", cwd);
+    wg_row(x, y, w, 0, "User");       kv_at(x + w - 14, y + 4, name);
+    wg_row(x, y, w, 1, "User ID");    kv_at(x + w - 14, y + WG_ROW_H + 4, line);
+    wg_row(x, y, w, 2, "Directory");  kv_at(x + w - 14, y + WG_ROW_H * 2 + 4, cwd);
+
+    /* And what it is running on. */
+    y += 3 * WG_ROW_H + 34;
+    wg_group_begin(x, y, w, 3, "This Computer");
 
     struct fb_info fb;
     if (fb_info(&fb) == 0)
@@ -379,95 +394,73 @@ static void draw_general(void)
                  fb.bits_per_pixel);
     else
         snprintf(line, sizeof(line), "none");
-    kv(110, "screen", line);
+    wg_row(x, y, w, 0, "Display");    kv_at(x + w - 14, y + 4, line);
 
     struct mem_info m;
-    if (mem_info(&m) == 0) {
-        snprintf(line, sizeof(line), "%llu KiB of %llu KiB used",
+    if (mem_info(&m) == 0)
+        snprintf(line, sizeof(line), "%llu of %llu KiB used",
                  (unsigned long long)(m.used / 1024),
                  (unsigned long long)(m.usable / 1024));
-        kv(130, "memory", line);
-    }
+    else
+        snprintf(line, sizeof(line), "unknown");
+    wg_row(x, y, w, 1, "Memory");     kv_at(x + w - 14, y + WG_ROW_H + 4, line);
+
     struct proc_info procs[64];
     const int n = proc_list(procs, 64);
     snprintf(line, sizeof(line), "%d", n < 0 ? 0 : n);
-    kv(150, "tasks", line);
-
-    wg_text_clipped(SIDEBAR + 14, 186,
-                    "the desktop is the window server; log out to restart it",
-                    WG_DIM, (int)g_w - SIDEBAR - 28);
+    wg_row(x, y, w, 2, "Tasks");      kv_at(x + w - 14, y + WG_ROW_H * 2 + 4, line);
 }
 
 static void draw_appearance(void)
 {
-    wg_text(SIDEBAR + 14, 16, "Appearance", WG_INK);
-    wg_fill(SIDEBAR + 14, 34, (int)g_w - SIDEBAR - 28, 1, WG_DIM);
+    const int x = SIDEBAR + 16, w = (int)g_w - SIDEBAR - 32;
+    wg_text(x, 12, "Appearance", wg_ink_colour());
 
-    wg_text(SIDEBAR + 14, 42, "theme", WG_DIM);
+    /* Theme: the presets, and the one switch that changes how everything is
+     * drawn rather than what colour it is. */
+    int y = 58;
+    wg_group_begin(x, y, w, 2, "Theme");
+    wg_row(x, y, w, 0, "Preset");
     for (int i = 0; i < PRESETS; ++i)
-        wg_button(SIDEBAR + 90 + i * 78, 38, 74, 22, kPresets[i].name, 0);
+        wg_pill(x + w - 14 - (PRESETS - i) * 80, y + 4, 76, 22,
+                kPresets[i].name, 0);
+    wg_row(x, y, w, 1, "Window Backdrop");
+    wg_pill(x + w - 170, y + WG_ROW_H + 4, 76, 22, "opaque",
+            g_ws && g_ws->theme.blur == 0);
+    wg_pill(x + w - 90,  y + WG_ROW_H + 4, 76, 22, "blurred",
+            g_ws && g_ws->theme.blur != 0);
 
-    wg_text(SIDEBAR + 14, 70, "element", WG_DIM);
-    for (int i = 0; i < ELEMENTS; ++i)
-        wg_button(SIDEBAR + 90 + (i % 3) * 78, 66 + (i / 3) * 24, 74, 22,
-                  kElements[i], g_element == i);
+    /* Colour: which element, and the three sliders that set it. */
+    y += 2 * WG_ROW_H + 34;
+    wg_group_begin(x, y, w, 2, "Colour");
+    wg_row(x, y, w, 0, "Element");
+    for (int i = 0; i < ELEMENTS && i < 3; ++i)
+        wg_pill(x + w - 14 - (3 - i) * 84, y + 4, 80, 22, kElements[i],
+                g_element == i);
+    wg_row(x, y, w, 1, "Value");
+    wg_rgb_draw(x + w - 190, y + WG_ROW_H + 2, 176, element_colour());
 
-    wg_text(SIDEBAR + 14, 122, "colour", WG_DIM);
-    wg_rgb_draw(PICK_X, PICK_Y, PICK_W, element_colour());
+    /* Text and desktop. */
+    y += 2 * WG_ROW_H + 34;
+    wg_group_begin(x, y, w, 3, "Desktop");
+    wg_row(x, y, w, 0, "Text Size");
+    wg_pill(x + w - 170, y + 4, 76, 22, "normal",
+            g_ws && g_ws->theme.text_scale != 2);
+    wg_pill(x + w - 90,  y + 4, 76, 22, "large",
+            g_ws && g_ws->theme.text_scale == 2);
 
-    wg_text(SIDEBAR + 14, 196, "text", WG_DIM);
-    wg_button(SIDEBAR + 90, 192, 74, 22, "normal",
-              g_ws && g_ws->theme.text_scale != 2);
-    wg_button(SIDEBAR + 168, 192, 74, 22, "large",
-              g_ws && g_ws->theme.text_scale == 2);
+    wg_row(x, y, w, 1, "Pattern");
+    for (int i = 0; i < WS_PATTERN_COUNT && i < 4; ++i)
+        wg_pill(x + w - 14 - (4 - i) * 62, y + WG_ROW_H + 4, 58, 22,
+                kPatterns[i], g_ws && (int)g_ws->theme.pattern == i);
 
-    wg_text(SIDEBAR + 14, 224, "contrast", WG_DIM);
-    wg_button(SIDEBAR + 90, 220, 34, 22, "-", 0);
-    wg_button(SIDEBAR + 126, 220, 34, 22, "+", 0);
-    {
-        char c[24];
-        snprintf(c, sizeof(c), "%d", g_ws ? (int)g_ws->theme.contrast : 0);
-        wg_text(SIDEBAR + 166, 223, c, WG_INK);
-    }
+    wg_row(x, y, w, 2, "Wallpaper");
+    wg_pill(x + w - 200, y + WG_ROW_H * 2 + 4, 116, 22, "Choose a PNG...", 0);
+    wg_pill(x + w - 80,  y + WG_ROW_H * 2 + 4, 66, 22, "Remove", 0);
 
-    /* Narrower than they look like they should be, and the preview is further
-     * right than it was: five buttons and a 150-pixel preview both wanted the
-     * same strip. They overlapped by fourteen pixels even with four. */
-    wg_text(SIDEBAR + 14, 252, "pattern", WG_DIM);
-    for (int i = 0; i < WS_PATTERN_COUNT; ++i)
-        wg_button(SIDEBAR + 90 + i * PATTERN_STEP, 248, PATTERN_W, 22,
-                  kPatterns[i], g_ws && (int)g_ws->theme.pattern == i);
-
-    /* A live preview, so a choice can be judged before it is made. */
-    wg_text(SIDEBAR + 366, 196, "preview", WG_DIM);
-    const int px = SIDEBAR + 366, py = 214;
-    wg_fill(px, py, 150, 60, g_ws ? g_ws->theme.desktop : 0x008080);
-    wg_fill(px + 12, py + 10, 110, 40, g_ws ? g_ws->theme.face : 0xF2F4F7);
-    wg_bevel(px + 12, py + 10, 110, 40, 1);
-    wg_fill(px + 15, py + 13, 104, 12, g_ws ? g_ws->theme.title_active : 0x000080);
-    wg_bevel(px, py, 150, 60, 0);
-
-    /* Not a matter of taste, which is why it is not part of a preset: on a
-     * machine without graphics acceleration the glass is what makes the
-     * desktop feel slow, and this is the switch that gets it back. */
-    wg_text(SIDEBAR + 14, 280, "window backdrop", WG_DIM);
-    wg_button(SIDEBAR + 156, 276, 74, 22, "opaque",
-              g_ws && g_ws->theme.blur == 0);
-    wg_button(SIDEBAR + 234, 276, 74, 22, "blurred",
-              g_ws && g_ws->theme.blur != 0);
-
-    wg_text(SIDEBAR + 14, 310, "wallpaper", WG_DIM);
-    wg_button(SIDEBAR + 90, 306, 130, 24, "Choose a PNG...", 0);
-    wg_button(SIDEBAR + 228, 306, 96, 24, "Remove", 0);
-    if (g_ws != 0 && g_ws->theme.wallpaper[0] != '\0')
-        wg_text_clipped(SIDEBAR + 90, 334, (const char*)g_ws->theme.wallpaper,
-                        WG_INK, (int)g_w - SIDEBAR - 105);
-    else
-        wg_text(SIDEBAR + 90, 334, "none - the pattern shows", WG_DIM);
-
-    wg_text_clipped(SIDEBAR + 14, 358,
+    wg_text_clipped(x, y + 3 * WG_ROW_H + 12,
                     "saved to ~/.leahrc and restored when settings next starts",
-                    WG_DIM, (int)g_w - SIDEBAR - 28);
+                    WG_DIM, w);
 }
 
 /* --- sound ----------------------------------------------------------------
@@ -764,57 +757,63 @@ int main(int argc, char** argv)
                         }
                     }
                 } else if (g_page == PAGE_APPEAR) {
-                    for (int i = 0; i < PRESETS; ++i)
-                        if (e.x >= SIDEBAR + 90 + i * 78 &&
-                            e.x < SIDEBAR + 164 + i * 78 &&
-                            e.y >= 38 && e.y < 60)
-                            apply_preset(i);
-                    for (int i = 0; i < ELEMENTS; ++i) {
-                        const int bx = SIDEBAR + 90 + (i % 3) * 78;
-                        const int by = 66 + (i / 3) * 24;
-                        if (e.x >= bx && e.x < bx + 74 &&
-                            e.y >= by && e.y < by + 22)
-                            g_element = i;
-                    }
-                    g_pick_drag = wg_rgb_hit(PICK_X, PICK_Y, PICK_W, e.x, e.y);
-                    if (g_pick_drag >= 0)
-                        set_colour(wg_rgb_move(element_colour(), g_pick_drag,
-                                               PICK_X, PICK_W, e.x));
-                    if (g_ws != 0 && e.y >= 192 && e.y < 214) {
-                        if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 164)
+                    /* The same geometry the page draws itself with: three
+                     * groups, each a heading and its rows. */
+                    const int x = SIDEBAR + 16, w = (int)g_w - SIDEBAR - 32;
+                    const int y1 = 58;
+                    const int y2 = y1 + 2 * WG_ROW_H + 34;
+                    const int y3 = y2 + 2 * WG_ROW_H + 34;
+                    const int inrow = e.y >= 0;
+
+                    if (inrow && e.y >= y1 + 4 && e.y < y1 + 26) {
+                        for (int i = 0; i < PRESETS; ++i) {
+                            const int bx = x + w - 14 - (PRESETS - i) * 80;
+                            if (e.x >= bx && e.x < bx + 76)
+                                apply_preset(i);
+                        }
+                    } else if (inrow && e.y >= y1 + WG_ROW_H + 4 &&
+                               e.y < y1 + WG_ROW_H + 26 && g_ws != 0) {
+                        if (e.x >= x + w - 170 && e.x < x + w - 94)
+                            { g_ws->theme.blur = 0; theme_changed(); }
+                        else if (e.x >= x + w - 90 && e.x < x + w - 14)
+                            { g_ws->theme.blur = 1; theme_changed(); }
+                    } else if (inrow && e.y >= y2 + 4 && e.y < y2 + 26) {
+                        for (int i = 0; i < ELEMENTS && i < 3; ++i) {
+                            const int bx = x + w - 14 - (3 - i) * 84;
+                            if (e.x >= bx && e.x < bx + 80)
+                                g_element = i;
+                        }
+                    } else if (inrow && e.y >= y2 + WG_ROW_H &&
+                               e.y < y2 + WG_ROW_H + WG_RGB_H) {
+                        g_pick_drag = wg_rgb_hit(x + w - 190,
+                                                 y2 + WG_ROW_H + 2, 176,
+                                                 e.x, e.y);
+                        if (g_pick_drag >= 0)
+                            set_colour(wg_rgb_move(element_colour(),
+                                                   g_pick_drag,
+                                                   x + w - 190, 176, e.x));
+                    } else if (inrow && e.y >= y3 + 4 && e.y < y3 + 26 &&
+                               g_ws != 0) {
+                        if (e.x >= x + w - 170 && e.x < x + w - 94)
                             { g_ws->theme.text_scale = 1; theme_changed(); }
-                        else if (e.x >= SIDEBAR + 168 && e.x < SIDEBAR + 242)
+                        else if (e.x >= x + w - 90 && e.x < x + w - 14)
                             { g_ws->theme.text_scale = 2; theme_changed(); }
-                    }
-                    if (g_ws != 0 && e.y >= 220 && e.y < 242) {
-                        int c = g_ws->theme.contrast;
-                        if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 124) c -= 10;
-                        else if (e.x >= SIDEBAR + 126 && e.x < SIDEBAR + 160) c += 10;
-                        if (c < -100) c = -100;
-                        if (c > 100) c = 100;
-                        if (c != g_ws->theme.contrast)
-                            { g_ws->theme.contrast = c; theme_changed(); }
-                    }
-                    if (g_ws != 0 && e.y >= 248 && e.y < 270) {
-                        for (int i = 0; i < WS_PATTERN_COUNT; ++i)
-                            if (e.x >= SIDEBAR + 90 + i * PATTERN_STEP &&
-                                e.x < SIDEBAR + 90 + PATTERN_W +
-                                      i * PATTERN_STEP)
+                    } else if (inrow && e.y >= y3 + WG_ROW_H + 4 &&
+                               e.y < y3 + WG_ROW_H + 26 && g_ws != 0) {
+                        for (int i = 0; i < WS_PATTERN_COUNT && i < 4; ++i) {
+                            const int bx = x + w - 14 - (4 - i) * 62;
+                            if (e.x >= bx && e.x < bx + 58)
                                 { g_ws->theme.pattern = (uint32_t)i;
                                   theme_changed(); }
+                        }
+                    } else if (inrow && e.y >= y3 + WG_ROW_H * 2 + 4 &&
+                               e.y < y3 + WG_ROW_H * 2 + 26) {
+                        if (e.x >= x + w - 200 && e.x < x + w - 84)
+                            dlg_save(PATH_WALLPAPERS, "");
+                        else if (e.x >= x + w - 80 && e.x < x + w - 14)
+                            set_wallpaper("");
                     }
-                    if (g_ws != 0 && e.y >= 276 && e.y < 298) {
-                        if (e.x >= SIDEBAR + 156 && e.x < SIDEBAR + 230)
-                            { g_ws->theme.blur = 0; theme_changed(); }
-                        else if (e.x >= SIDEBAR + 234 && e.x < SIDEBAR + 308)
-                            { g_ws->theme.blur = 1; theme_changed(); }
-                    }
-                    if (e.x >= SIDEBAR + 90 && e.x < SIDEBAR + 220 &&
-                        e.y >= 306 && e.y < 330)
-                        dlg_save(PATH_WALLPAPERS, "");  /* a picker, reused */
-                    else if (e.x >= SIDEBAR + 228 && e.x < SIDEBAR + 324 &&
-                             e.y >= 306 && e.y < 330)
-                        set_wallpaper("");
+
                 } else if (g_page == PAGE_USERS) {
                     if (inside(&g_f_name, e.x, e.y))      g_ufield = 1;
                     else if (inside(&g_f_pass, e.x, e.y)) g_ufield = 2;
