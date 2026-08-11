@@ -21,6 +21,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <proc.h>
+#include <stdlib.h>
 #include <vfsd.h>
 
 /* --- the disk, one level down --------------------------------------------- */
@@ -131,25 +132,69 @@ static int txn_peek(unsigned long block, unsigned char* out);
  * can lose data that was already promised. The one thing that would be wrong
  * is a stale entry, and there is a single place a block is written.
  */
-#define CACHE_SLOTS 512
+/* Sized from the machine rather than written down.
+ *
+ * Five hundred and twelve blocks was two megabytes whatever the machine had,
+ * which is a lot on a small one and nothing on a large one. A sixteenth of
+ * usable memory is a share rather than a number: it leaves the disk cache in
+ * proportion to everything else that has to fit, and it costs nothing on a
+ * machine that does not have the memory to spare because there is none to
+ * take. Bounded at both ends - below, because a cache too small to hold a
+ * directory and its inode table would thrash; above, because past a point the
+ * hit rate stops moving and the memory is better spent on programs. */
+static unsigned char* g_cache;          /* slots * block size, one run       */
+static unsigned long* g_cache_block;
+static unsigned*      g_cache_dev;
+static unsigned char* g_cache_full;
+static unsigned       g_cache_slots;
 
-static unsigned char g_cache[CACHE_SLOTS][8192];
-static unsigned long g_cache_block[CACHE_SLOTS];
-static unsigned      g_cache_dev[CACHE_SLOTS];
-static unsigned char g_cache_full[CACHE_SLOTS];
+static void cache_init(void)
+{
+    if (g_cache_slots != 0 || g_block_size == 0)
+        return;
+
+    struct mem_info mem;
+    unsigned long bytes = mem_info(&mem) == 0 ? (unsigned long)(mem.usable / 16)
+                                              : (1ul << 20);
+    if (bytes < (1ul << 20))  bytes = 1ul << 20;    /* a megabyte at least */
+    if (bytes > (24ul << 20)) bytes = 24ul << 20;   /* and no more than this */
+
+    const unsigned slots = (unsigned)(bytes / g_block_size);
+    if (slots == 0)
+        return;
+
+    g_cache       = (unsigned char*)malloc((size_t)slots * g_block_size);
+    g_cache_block = (unsigned long*)malloc((size_t)slots * sizeof(unsigned long));
+    g_cache_dev   = (unsigned*)malloc((size_t)slots * sizeof(unsigned));
+    g_cache_full  = (unsigned char*)malloc(slots);
+    if (g_cache == 0 || g_cache_block == 0 || g_cache_dev == 0 ||
+        g_cache_full == 0) {
+        /* Without it everything still works, just slower - so this is a note
+         * rather than a failure to start. */
+        g_cache_slots = 0;
+        printf("vfsd: no memory for a block cache; reading straight through\n");
+        return;
+    }
+    memset(g_cache_full, 0, slots);
+    g_cache_slots = slots;
+    printf("vfsd: block cache, %u blocks (%lu KiB)\n",
+           slots, (unsigned long)(slots * g_block_size) / 1024);
+}
 
 static unsigned cache_slot(unsigned long block, unsigned dev)
 {
     /* The low bits of the block number, mixed with the device so that two
      * disks do not collide on every slot at once. */
-    return (unsigned)((block ^ ((unsigned long)dev << 9)) % CACHE_SLOTS);
+    return (unsigned)((block ^ ((unsigned long)dev << 9)) % g_cache_slots);
 }
 
 static void cache_put(unsigned long block, unsigned dev,
                       const unsigned char* data)
 {
+    if (g_cache_slots == 0)
+        return;
     const unsigned i = cache_slot(block, dev);
-    memcpy(g_cache[i], data, g_block_size);
+    memcpy(g_cache + (size_t)i * g_block_size, data, g_block_size);
     g_cache_block[i] = block;
     g_cache_dev[i] = dev;
     g_cache_full[i] = 1;
@@ -157,10 +202,12 @@ static void cache_put(unsigned long block, unsigned dev,
 
 static int cache_get(unsigned long block, unsigned dev, unsigned char* out)
 {
+    if (g_cache_slots == 0)
+        return 0;
     const unsigned i = cache_slot(block, dev);
     if (!g_cache_full[i] || g_cache_block[i] != block || g_cache_dev[i] != dev)
         return 0;
-    memcpy(out, g_cache[i], g_block_size);
+    memcpy(out, g_cache + (size_t)i * g_block_size, g_block_size);
     return 1;
 }
 
@@ -1945,6 +1992,7 @@ static int mount_read_sb(void)
      * was not yet written out is part of this filesystem, and every lookup
      * from here on would otherwise be reading a version of it that the last
      * machine to touch it had already moved past. */
+    cache_init();               /* now that the block size is known */
     journal_open(g_sb);
     if (journal_replay() != 0)
         printf("vfsd: the journal could not be replayed\n");
