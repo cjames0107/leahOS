@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <unistd.h>
 #include <widget.h>
 #include <window.h>
@@ -31,6 +32,9 @@
 #define VIEW_LIST 1
 #define VIEW_TREE 2
 
+/* The sidebar is the window's spine: places above, whatever is mounted below.
+ * Everything else measures from its right edge. */
+#define SIDEBAR_W 140
 #define TOOLBAR_H 30
 #define PATH_H    20
 #define STATUS_H  20
@@ -115,16 +119,42 @@ static int  g_hist_at = -1;
  * three ends - they are the same question asked in three directions - so their
  * boxes are contiguous and they share a pill. The three views are another.
  * Open and Rename do different kinds of job and stand alone. */
-static struct box g_back    = { 8,   5, 28, 22 };
-static struct box g_fwd     = { 36,  5, 28, 22 };
-static struct box g_up      = { 64,  5, 28, 22 };
-static struct box g_vicon   = { 100, 5, 50, 22 };
-static struct box g_vlist   = { 150, 5, 50, 22 };
-static struct box g_vtree   = { 200, 5, 50, 22 };
-static struct box g_open    = { 258, 5, 52, 22 };
-static struct box g_rename  = { 318, 5, 64, 22 };
-static struct box g_upline  = { 390, 5, 24, 22 };
-static struct box g_dnline  = { 414, 5, 24, 22 };
+static struct box g_back    = { SIDEBAR_W + 8,  5, 28, 22 };
+static struct box g_fwd     = { SIDEBAR_W + 36, 5, 28, 22 };
+static struct box g_up      = { SIDEBAR_W + 64, 5, 28, 22 };
+/* The view modes and the file actions are not on the toolbar any more: they
+ * are in the menu behind the button at its right-hand end. A toolbar with
+ * everything on it is a list of everything the program can do, in the place a
+ * person has to look past to get to their files. */
+static struct box g_vicon   = { 0, 0, 0, 0 };   /* menu items now */
+static struct box g_vlist   = { 0, 0, 0, 0 };
+static struct box g_vtree   = { 0, 0, 0, 0 };
+static struct box g_open    = { 0, 0, 0, 0 };
+static struct box g_rename  = { 0, 0, 0, 0 };
+static struct box g_upline  = { 0, 0, 0, 0 };
+static struct box g_dnline  = { 0, 0, 0, 0 };
+static struct box g_menu_btn;
+
+/* The menu: what used to be spread across the toolbar, plus the things this
+ * system can do that the browser had no way to reach. */
+#define MENU_NONE     -1
+#define MENU_ICON      0
+#define MENU_LIST      1
+#define MENU_TREE      2
+#define MENU_OPEN      3
+#define MENU_RENAME    4
+#define MENU_NEWDIR    5
+#define MENU_DELETE    6
+#define MENU_PROPS     7
+#define MENU_UNMOUNT   8
+#define MENU_ITEMS     9
+
+static int g_menu_open;
+static const char* const kMenu[MENU_ITEMS] = {
+    "View as Icons", "View as List", "View as Tree",
+    "Open", "Rename", "New Folder", "Delete",
+    "Properties", "Unmount Volume",
+};
 
 static int inside(const struct box* b, int x, int y)
 {
@@ -295,13 +325,85 @@ static void entry_icon(int x, int y, int i, int size)
     wg_icon_scaled(x, y, px, ICON_SIZE, ICON_SIZE, size, size);
 }
 
+/* --- the sidebar ------------------------------------------------------------
+ *
+ * Two lists in one column. The places are where a person keeps things and are
+ * fixed; the volumes are whatever is mounted right now and are read from
+ * /proc/mounts, because the filesystem server owns that answer and a browser
+ * carrying its own copy would be a second one.
+ */
+#define MAX_PLACES 12
+static struct { char label[24]; char path[192]; int volume; } g_place[MAX_PLACES];
+static int g_places;
+
+static void add_place(const char* label, const char* path, int volume)
+{
+    if (g_places >= MAX_PLACES)
+        return;
+    snprintf(g_place[g_places].label, sizeof(g_place[0].label), "%s", label);
+    snprintf(g_place[g_places].path, sizeof(g_place[0].path), "%s", path);
+    g_place[g_places].volume = volume;
+    ++g_places;
+}
+
+static void places_build(void)
+{
+    const char* home = getenv("HOME");
+    if (home == 0 || home[0] == '\0')
+        home = "/root";
+    char sub[224];
+    g_places = 0;
+    add_place("Home", home, 0);
+    add_place("Applications", "/opt", 0);
+    snprintf(sub, sizeof(sub), "%s/Desktop", home);   add_place("Desktop", sub, 0);
+    snprintf(sub, sizeof(sub), "%s/Documents", home); add_place("Documents", sub, 0);
+    snprintf(sub, sizeof(sub), "%s/Public", home);    add_place("Public", sub, 0);
+    add_place("Computer", "/", 0);
+
+    /* And every filesystem that is mounted somewhere other than the root. */
+    FILE* in = fopen("/proc/mounts", "r");
+    if (in == 0)
+        return;
+    char line[256];
+    while (fgets(line, sizeof(line), in) != 0) {
+        char what[96], at[96], kind[32], how[16];
+        if (sscanf(line, "%95s %95s %31s %15s", what, at, kind, how) != 4)
+            continue;
+        if (strcmp(at, "/") == 0 || strcmp(kind, "procfs") == 0)
+            continue;
+        add_place(at, at, 1);
+    }
+    fclose(in);
+}
+
+static int sidebar_row(int y)
+{
+    const int row = (y - TOOLBAR_H - 8) / 24;
+    return (row >= 0 && row < g_places) ? row : -1;
+}
+
+static void draw_sidebar(void)
+{
+    wg_sidebar(0, 0, SIDEBAR_W, (int)g_h);
+    int y = TOOLBAR_H + 8;
+    for (int i = 0; i < g_places; ++i, y += 24) {
+        const int here = strcmp(g_place[i].path, g_path) == 0;
+        if (here)
+            wg_pill(6, y - 3, SIDEBAR_W - 12, 22, "", 1);
+        wg_text_clipped(16, y, g_place[i].label,
+                        here ? wg_ink_colour() : WG_DIM, SIDEBAR_W - 26);
+    }
+}
+
+static int content_left(void) { return SIDEBAR_W; }
+
 static int content_top(void)  { return TOOLBAR_H + PATH_H; }
 static int content_h(void)    { return (int)g_h - content_top() - STATUS_H; }
 static int bar_x(void)        { return (int)g_w - 4 - WG_SCROLL_W; }
 
 static int icon_cols(void)
 {
-    const int c = ((int)g_w - 8 - WG_SCROLL_W) / CELL_W;
+    const int c = ((int)g_w - content_left() - 8 - WG_SCROLL_W) / CELL_W;
     return c > 0 ? c : 1;
 }
 
@@ -393,19 +495,62 @@ static void draw_toolbar(void)
         arrow_glyph(&g_back, 0, g_hist_at > 0);
         arrow_glyph(&g_fwd,  1, g_hist_at >= 0 && g_hist_at + 1 < g_hist_n);
         arrow_glyph(&g_up,   2, strcmp(g_path, "/") != 0);
-        wg_pill_group(g_vicon.x, g_vicon.y, g_vicon.w, g_vicon.h, 3, view,
-                      g_view);
-        wg_pill(g_open.x, g_open.y, g_open.w, g_open.h, "Open", 0);
-        wg_pill(g_rename.x, g_rename.y, g_rename.w, g_rename.h, "Rename", 0);
-        wg_pill_group(g_upline.x, g_upline.y, g_upline.w, g_upline.h, 2,
-                      line, -1);
+        (void)view; (void)line;
+
+        /* Everything else lives behind this. */
+        g_menu_btn.x = (int)g_w - 42; g_menu_btn.y = 5;
+        g_menu_btn.w = 34; g_menu_btn.h = 22;
+        wg_pill(g_menu_btn.x, g_menu_btn.y, g_menu_btn.w, g_menu_btn.h,
+                "...", g_menu_open);
     }
 
     /* The path, in a sunken well so it reads as a display rather than a
      * control - it is not editable. */
-    wg_container(6, TOOLBAR_H + 1, (int)g_w - 12, PATH_H - 3, 6);
-    wg_bevel(6, TOOLBAR_H + 1, (int)g_w - 12, PATH_H - 3, 0);
-    wg_text_clipped(10, TOOLBAR_H + 2, g_path, WG_INK, (int)g_w - 20);
+    wg_container(content_left() + 6, TOOLBAR_H + 1,
+                 (int)g_w - content_left() - 12, PATH_H - 3, 6);
+    wg_text_clipped(content_left() + 10, TOOLBAR_H + 2, g_path, WG_INK,
+                    (int)g_w - content_left() - 20);
+}
+
+/* The menu itself, drawn over everything when it is open. */
+#define MENU_W  190
+#define MENU_RH 24
+
+static void menu_box(int i, int* x, int* y, int* w, int* h)
+{
+    *x = (int)g_w - MENU_W - 8;
+    *y = TOOLBAR_H + 4 + i * MENU_RH;
+    *w = MENU_W;
+    *h = MENU_RH;
+}
+
+static int menu_hit(int x, int y)
+{
+    for (int i = 0; i < MENU_ITEMS; ++i) {
+        int bx, by, bw, bh;
+        menu_box(i, &bx, &by, &bw, &bh);
+        if (x >= bx && y >= by && x < bx + bw && y < by + bh)
+            return i;
+    }
+    return MENU_NONE;
+}
+
+static void draw_menu(void)
+{
+    if (!g_menu_open)
+        return;
+    int x, y, w, h;
+    menu_box(0, &x, &y, &w, &h);
+    wg_container(x - 6, y - 6, w + 12, MENU_ITEMS * MENU_RH + 12, 12);
+    for (int i = 0; i < MENU_ITEMS; ++i) {
+        menu_box(i, &x, &y, &w, &h);
+        const int on = (i == MENU_ICON && g_view == VIEW_ICON) ||
+                       (i == MENU_LIST && g_view == VIEW_LIST) ||
+                       (i == MENU_TREE && g_view == VIEW_TREE);
+        if (on)
+            wg_pill(x, y, w, h, "", 1);
+        wg_text(x + 12, y + 4, kMenu[i], wg_ink_colour());
+    }
 }
 
 static void draw_icons(void)
@@ -422,7 +567,7 @@ static void draw_icons(void)
         if (being_dragged(i))
             continue;               /* it is in the air, not in the folder */
         const int slot = i - first * cols;
-        const int cx = 8 + (slot % cols) * CELL_W;
+        const int cx = content_left() + 8 + (slot % cols) * CELL_W;
         const int cy = top + 6 + (slot / cols) * CELL_H - shift;
         if (cy >= top + content_h())
             break;
@@ -511,7 +656,8 @@ static void draw(void)
     /* The listing sits in its own sunken well, the way a document area does. */
     /* A container rather than a white sheet: it sits four pixels in from the
      * window's edge, so it gets the small corner that goes with that. */
-    wg_container(4, content_top(), (int)g_w - 8, content_h(), 4);
+    wg_container(content_left() + 4, content_top(),
+                 (int)g_w - content_left() - 8, content_h(), 4);
 
     if (g_view == VIEW_ICON)      draw_icons();
     else if (g_view == VIEW_LIST) draw_list();
@@ -522,7 +668,9 @@ static void draw(void)
      * window, not to the well - so the toolbar has to be painted over it rather
      * than under it. The well's edge is redrawn for the same reason. */
     draw_toolbar();
-    wg_bevel(4, content_top(), (int)g_w - 8, content_h(), 0);
+    draw_sidebar();
+    draw_menu();
+
 
     if (g_band) {
         const int x0 = g_band_x < g_band_x2 ? g_band_x : g_band_x2;
@@ -865,7 +1013,7 @@ static int hit_test(int x, int y)
         const int cols = icon_cols();
         if (x < 8)
             return -1;
-        const int col = (x - 8) / CELL_W;
+        const int col = (x - content_left() - 8) / CELL_W;
         const int rowi = (y - top - 6 + g_scroll) / CELL_H;
         if (col >= cols || rowi < 0)
             return -1;
@@ -946,7 +1094,7 @@ static void settle_on(const char* dest_name, int over_folder, int folder_index)
     win_drop_accept(ox + cx, oy + cy);
 }
 
-static const char* const kMenu[] = {
+static const char* const kContextMenu[] = {
     "Open", "Open with...", "Rename", "Copy", "Select all", "-", "Refresh"
 };
 
@@ -966,6 +1114,119 @@ static void begin_rename(void)
     snprintf(g_status, sizeof(g_status), "rename %s to...",
              g_entries[g_selected].d_name);
 }
+
+/* What the menu does. Most of it was on the toolbar; the last three are
+ * things this system has been able to do for a while and the file browser has
+ * had no way to ask for. */
+static void menu_action(int item)
+{
+    char full[512];
+    switch (item) {
+    case MENU_ICON: g_view = VIEW_ICON; g_scroll = 0; break;
+    case MENU_LIST: g_view = VIEW_LIST; g_scroll = 0; break;
+    case MENU_TREE: g_view = VIEW_TREE; g_scroll = 0; rebuild_tree(); break;
+    case MENU_OPEN:
+        if (g_selected >= 0) {
+            join(g_path, g_entries[g_selected].d_name, full, sizeof(full));
+            open_path(full, g_entries[g_selected].d_type == S_IFDIR);
+        }
+        break;
+    case MENU_RENAME:
+        if (g_selected >= 0)
+            begin_rename();
+        break;
+    case MENU_NEWDIR: {
+        /* A name that is not taken, so this never fails for a reason the
+         * person has to think about. */
+        for (int n = 1; n < 100; ++n) {
+            char name[32];
+            snprintf(name, sizeof(name), n == 1 ? "untitled folder"
+                                                : "untitled folder %d", n);
+            join(g_path, name, full, sizeof(full));
+            struct stat st;
+            if (stat(full, &st) == 0)
+                continue;
+            if (mkdir(full) == 0) {
+                read_dir();
+                snprintf(g_status, sizeof(g_status), "made %s", name);
+            } else {
+                snprintf(g_status, sizeof(g_status), "cannot create a folder here");
+            }
+            break;
+        }
+        break;
+    }
+    case MENU_DELETE:
+        if (g_selected >= 0) {
+            join(g_path, g_entries[g_selected].d_name, full, sizeof(full));
+            const int dir = g_entries[g_selected].d_type == S_IFDIR;
+            const int ok = (unlink(full) == 0);   /* unlink removes both here */
+            snprintf(g_status, sizeof(g_status), ok ? "deleted"
+                     : dir ? "the folder is not empty" : "cannot delete that");
+            (void)dir;
+            if (ok) { g_selected = -1; read_dir(); }
+        }
+        break;
+    case MENU_PROPS:
+        if (g_selected >= 0) {
+            join(g_path, g_entries[g_selected].d_name, full, sizeof(full));
+            struct stat st;
+            if (lstat(full, &st) != 0) {
+                snprintf(g_status, sizeof(g_status), "cannot read it");
+                break;
+            }
+            /* Everything the filesystem knows, including the parts only this
+             * system's own tools could show before: what kind of node it is,
+             * which driver a device names, and where a link points. */
+            const char* kind = st.st_type == S_IFDIR  ? "folder"
+                             : st.st_type == S_IFLNK  ? "symbolic link"
+                             : st.st_type == S_IFIFO  ? "fifo"
+                             : st.st_type == S_IFCHR  ? "character device"
+                             : st.st_type == S_IFBLK  ? "block device"
+                                                      : "file";
+            if (st.st_type == S_IFCHR || st.st_type == S_IFBLK)
+                snprintf(g_status, sizeof(g_status),
+                         "%s  device %u,%u  mode %04o  uid %u",
+                         kind, major(st.st_rdev), minor(st.st_rdev),
+                         st.st_mode & 0777, st.st_uid);
+            else if (st.st_type == S_IFLNK) {
+                char target[128];
+                const long got = readlink(full, target, sizeof(target) - 1);
+                target[got > 0 ? got : 0] = '\0';
+                snprintf(g_status, sizeof(g_status), "%s -> %s", kind,
+                         got > 0 ? target : "(unreadable)");
+            } else
+                snprintf(g_status, sizeof(g_status),
+                         "%s  %lu bytes  mode %04o  uid %u  inode %u",
+                         kind, (unsigned long)st.st_size, st.st_mode & 0777,
+                         st.st_uid, st.st_ino);
+        }
+        break;
+    case MENU_UNMOUNT: {
+        /* Only a volume, and only if we are looking at one. */
+        int found = -1;
+        for (int i = 0; i < g_places; ++i)
+            if (g_place[i].volume && strcmp(g_place[i].path, g_path) == 0)
+                found = i;
+        if (found < 0) {
+            snprintf(g_status, sizeof(g_status),
+                     "go to a mounted volume first");
+            break;
+        }
+        char at[192];
+        snprintf(at, sizeof(at), "%s", g_place[found].path);
+        goto_path("/", 1);
+        if (fs_umount(at) == 0) {
+            places_build();
+            snprintf(g_status, sizeof(g_status), "unmounted %s", at);
+        } else {
+            snprintf(g_status, sizeof(g_status), "%s will not detach", at);
+        }
+        break;
+    }
+    }
+}
+
 
 /* A right-click menu for a bundle: the standard entries, then whatever the
  * application itself declares. This is what makes `menu` in an Info file real
@@ -1014,8 +1275,11 @@ int main(int argc, char** argv)
     }
     const int id = win_create(x, y, g_w, g_h, "Files");
     /* Its pixels carry alpha, so the glass reaches past the title bar. */
-    if (id >= 0)
+    if (id >= 0) {
         win_set_alpha(id);
+        win_set_sidebar(id, SIDEBAR_W);
+    }
+    places_build();
     if (id < 0) {
         printf("browse: no window server\n");
         return 1;
@@ -1201,7 +1465,31 @@ int main(int argc, char** argv)
                     return 1;
                 wg_target(g_px, g_w, g_h);
             } else if (event.type == WIN_EVENT_MOUSE_DOWN) {
-                if (inside(&g_back, event.x, event.y)) {
+                /* The menu is in front of everything, so it answers first and
+                 * a press anywhere else closes it. */
+                if (g_menu_open) {
+                    const int item = menu_hit(event.x, event.y);
+                    g_menu_open = 0;
+                    if (item != MENU_NONE) {
+                        menu_action(item);
+                        draw();
+                        win_present(id);
+                        continue;
+                    }
+                    draw();
+                    win_present(id);
+                    continue;
+                }
+                if (inside(&g_menu_btn, event.x, event.y)) {
+                    g_menu_open = 1;
+                } else if (event.x < SIDEBAR_W) {
+                    const int row = sidebar_row(event.y);
+                    if (row >= 0) {
+                        goto_path(g_place[row].path, 1);
+                        g_scroll = 0;
+                        g_selected = -1;
+                    }
+                } else if (inside(&g_back, event.x, event.y)) {
                     go_history(-1);
                 } else if (inside(&g_fwd, event.x, event.y)) {
                     go_history(1);
@@ -1260,7 +1548,7 @@ int main(int argc, char** argv)
                                       g_app_menu_n);
                             g_app_menu_on = 1;
                         } else {
-                            menu_open(event.x, event.y, kMenu, 7);
+                            menu_open(event.x, event.y, kContextMenu, 7);
                         }
                     } else {
                         menu_open(event.x, event.y, kBlankMenu, 7);
