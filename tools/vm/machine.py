@@ -40,28 +40,30 @@ class Machine:
         for p in (SOCK, LOG):
             if os.path.exists(p):
                 os.remove(p)
-        self.proc = subprocess.Popen([
-            "qemu-system-x86_64", "-machine", "pc,hpet=on",
-            "-drive", f"format=raw,file={ROOT}/build/dist/leahos.img,if=ide",
-            "-drive", f"format=raw,file={ROOT}/build/dist/mnt.img,if=ide",
+        # The machine comes from the Makefile, not from a copy kept here.
+        # Two bugs came out of keeping a copy: the harness spent weeks booting
+        # a machine with no SATA controller, and then passed every check while
+        # `make run` had no root disk at all because a line continuation had
+        # been broken. A test that boots a different machine from the one
+        # people use is testing something nobody runs.
+        # Memory, processors and the sound backend are the machine's, so they
+        # are asked for through make rather than added afterwards - passing
+        # them twice is how you get a QEMU that refuses to start. A test wants
+        # no audio device at all, which is what "none" is for.
+        flags = subprocess.run(
+            ["make", "-s", "print-qemuflags",
+             "AUDIODEV=none", "MEM=%s" % mem, "CPUS=%d" % cpus],
+            cwd=ROOT, capture_output=True, text=True).stdout.split()
+        if not flags:
+            raise RuntimeError("make print-qemuflags said nothing")
 
+        self.proc = subprocess.Popen([
+            "qemu-system-x86_64", *flags,
+            # What a test needs on top: no window, the console somewhere
+            # readable, a monitor to drive it through, and a disk that forgets
+            # everything when the machine stops.
             "-snapshot",
-            "-netdev", "user,id=net0", "-device", "e1000,netdev=net0",
-            "-audiodev", "wav,id=snd0,path=/tmp/leah-audio.wav,"
-                         "out.frequency=48000,out.channels=2,out.format=s16",
-            "-device", "AC97,audiodev=snd0",
-            # The same controllers `make run` gives it. A harness that boots a
-            # different machine from the one people use is checking something
-            # nobody runs - which is how the SATA controller came to be absent
-            # from every check while being present in every real boot.
-            # The root volume lives on the AHCI controller now, so the
-            # harness has to attach it the same way the Makefile does.
-            "-device", "ahci,id=sata0",
-            "-drive", f"format=raw,file={ROOT}/build/dist/ext.img,if=none,id=rootdisk",
-            "-device", "ide-hd,drive=rootdisk,bus=sata0.0",
-            "-drive", f"format=raw,file={ROOT}/build/dist/sata.img,if=none,id=satadisk",
-            "-device", "ide-hd,drive=satadisk,bus=sata0.1",
-            "-m", mem, "-smp", str(cpus), "-display", "none",
+            "-display", "none",
             "-serial", f"file:{LOG}",
             "-monitor", f"unix:{SOCK},server,nowait",
         ])

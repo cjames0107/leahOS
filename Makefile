@@ -350,7 +350,6 @@ $(DIST):
 QEMUFLAGS := -machine pc,hpet=on \
              -drive format=raw,file=$(IMG),if=ide \
              -drive format=raw,file=$(MNT_IMG),if=ide \
-
              -device qemu-xhci,id=xhci0 \
              -drive format=raw,file=$(USB_IMG),if=none,id=usbdisk \
              -device usb-storage,drive=usbdisk,bus=xhci0.0 \
@@ -369,6 +368,14 @@ QEMUFLAGS := -machine pc,hpet=on \
 # The headless check. Boots, drives a shell, and asserts against the serial
 # line rather than against a screenshot - a screenshot needs somebody to look
 # at it, and this needs to be able to fail on its own.
+# What machine this project runs on, for anything that needs to boot the same
+# one. The test harness asks for this rather than keeping its own copy - it
+# kept one, and the two drifted twice: once missing the SATA controller, and
+# once passing while `make run` had no root disk at all.
+.PHONY: print-qemuflags
+print-qemuflags:
+	@echo '$(QEMUFLAGS)'
+
 .PHONY: check
 check: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	@python3 tools/vm/smoke.py
