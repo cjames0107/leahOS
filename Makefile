@@ -312,9 +312,19 @@ $(MNT_IMG): | $(DIST)
 	 rm -f $(DIST)/.mntfile
 	@echo "mnt:    $@ (16 MiB ext4, one directory and one file)"
 
+# An ext4 volume rather than a blank one, so that mounting it is a test of the
+# whole path: the filesystem asks the AHCI driver, which moves the bytes by DMA.
 $(SATA_IMG): | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=16 status=none
-	@echo "sata:   $@ (16 MiB, blank, for the AHCI DMA test)"
+	@E2=$$(ls -d /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin \
+	    2>/dev/null | head -1); \
+	 $$E2/mke2fs -q -t ext4 -b 1024 -O ^has_journal,^resize_inode,^64bit \
+	    -F $@ >/dev/null 2>&1; \
+	 echo "this file came off the SATA disk" > $(DIST)/.satafile; \
+	 printf 'mkdir /sata\ncd /sata\nwrite $(DIST)/.satafile hello.txt\nquit\n' | \
+	    $$E2/debugfs -w $@ >/dev/null 2>&1; \
+	 rm -f $(DIST)/.satafile
+	@echo "sata:   $@ (16 MiB ext4, reached over AHCI)"
 
 $(USB_IMG): | $(DIST)
 	@dd if=/dev/zero of=$@ bs=1048576 count=8 status=none

@@ -28,18 +28,67 @@
 
 static int g_blk;
 static struct blk_shared* g_sectors;
+/* The second driver, if it is there. Optional: a machine with no AHCI
+ * controller has no second port to open, and everything else still works. */
+static int g_blk2 = -1;
+static struct blk_shared* g_sectors2;
+
+/* Which driver has this disk, and what it calls it.
+ *
+ * Two controllers that share nothing are two servers. The numbering runs
+ * across both so that a caller says "disk 4" rather than "the first disk of
+ * the second driver", and the subtraction happens here because this is the
+ * only place that knows about both. */
+static int disk_port(unsigned dev, unsigned* local)
+{
+    if (dev >= BLK_AHCI_BASE) {
+        *local = dev - BLK_AHCI_BASE;
+        /* Connected when first wanted, not at startup: the second driver is
+         * started after this server and may not exist at all, so looking for
+         * it early finds nothing and looking for it once finds nothing
+         * forever. */
+        if (g_blk2 < 0) {
+            g_blk2 = port_open(IPC_PORT_BLOCK2);
+            if (g_blk2 >= 0) {
+                const int id = shm_open(BLK_SHM_KEY2, 0, 0);
+                g_sectors2 = id < 0 ? 0 : (struct blk_shared*)shm_map(id);
+                if (g_sectors2 == 0)
+                    g_blk2 = -1;        /* no buffer, no second driver */
+            }
+        }
+        return g_blk2;
+    }
+    *local = dev;
+    return g_blk;
+}
+
+/* And the buffer that driver publishes, which is where the bytes actually
+ * travel - each driver has its own, because two sharing one would be two
+ * drivers writing over each other's transfers. */
+static struct blk_shared* disk_buffer(unsigned dev)
+{
+    return dev >= BLK_AHCI_BASE ? g_sectors2 : g_sectors;
+}
 
 static int disk_read(unsigned long lba, unsigned count, unsigned dev)
 {
     struct ipc_message q, a;
+    unsigned local = 0;
+    const int port = disk_port(dev, &local);
+    if (port < 0)
+        return -1;
     memset(&q, 0, sizeof(q));
     memset(&a, 0, sizeof(a));
     q.tag = BLK_READ;
     q.word[0] = (long)lba;
     q.word[1] = (long)count;
-    q.word[2] = (long)dev;
-    if (ipc_call(g_blk, &q, &a) != 0 || a.word[0] != 0)
+    q.word[2] = (long)local;
+    if (ipc_call(port, &q, &a) != 0 || a.word[0] != 0)
         return -1;
+    /* Bring it into this server's own buffer, so everything above here reads
+     * from one place regardless of which driver answered. */
+    if (dev >= BLK_AHCI_BASE)
+        memcpy(g_sectors->data, g_sectors2->data, count * BLK_SECTOR);
     return 0;
 }
 
@@ -352,11 +401,17 @@ static int disk_write(unsigned long lba, unsigned count, unsigned dev)
     struct ipc_message q, a;
     memset(&q, 0, sizeof(q));
     memset(&a, 0, sizeof(a));
+    unsigned local = 0;
+    const int port = disk_port(dev, &local);
+    if (port < 0)
+        return -1;
+    if (dev >= BLK_AHCI_BASE)
+        memcpy(g_sectors2->data, g_sectors->data, count * BLK_SECTOR);
     q.tag = BLK_WRITE;
     q.word[0] = (long)lba;
     q.word[1] = (long)count;
-    q.word[2] = (long)dev;
-    if (ipc_call(g_blk, &q, &a) != 0 || a.word[0] != 0)
+    q.word[2] = (long)local;
+    if (ipc_call(port, &q, &a) != 0 || a.word[0] != 0)
         return -1;
     return 0;
 }
@@ -2365,6 +2420,7 @@ int main(void)
 {
     for (int i = 0; i < 400 && g_blk <= 0; ++i) {
         g_blk = port_open(IPC_PORT_BLOCK);
+
         if (g_blk < 0) msleep(10);
     }
     if (g_blk < 0) {

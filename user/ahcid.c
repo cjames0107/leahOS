@@ -17,7 +17,10 @@
  * puts them in memory rather than in the I/O space the old controller used.
  */
 
+#include <blk.h>
 #include <driver.h>
+#include <ipc.h>
+#include <shm.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -89,6 +92,7 @@ static void cfg_write(unsigned bus, unsigned slot, unsigned fn, unsigned off,
 
 static volatile unsigned* g_hba;        /* the controller's registers */
 static unsigned g_port;                 /* the one with a disk on it  */
+static unsigned long g_sectors;         /* how many it holds          */
 
 /* The structures the controller reads out of memory, so they have to be where
  * it can reach them: allocated once, physically contiguous, and never moved.
@@ -229,6 +233,61 @@ static int transfer(unsigned long lba, unsigned sectors, int write)
     return 0;
 }
 
+/* Ask the disk how big it is.
+ *
+ * IDENTIFY returns 512 bytes rather than moving sectors, but over AHCI it is
+ * issued exactly like a read - the difference is entirely in the command byte
+ * and in what comes back. */
+static int identify(void)
+{
+    if (wait_ready() != 0)
+        return -1;
+    const unsigned base = PORT_BASE(g_port);
+    hba_set(base + PORT_IS, hba(base + PORT_IS));
+
+    volatile unsigned* header = (volatile unsigned*)g_cmd_list;
+    header[0] = 5u | (1u << 16);
+    header[1] = 0;
+    header[2] = (unsigned)(g_cmd_table_phys & 0xFFFFFFFFu);
+    header[3] = (unsigned)(g_cmd_table_phys >> 32);
+    header[4] = header[5] = header[6] = header[7] = 0;
+
+    memset((void*)g_cmd_table, 0, 256);
+    volatile unsigned char* fis = g_cmd_table;
+    fis[0] = 0x27;
+    fis[1] = 0x80;
+    fis[2] = 0xEC;                      /* IDENTIFY DEVICE */
+    fis[7] = 0;                         /* not an LBA command */
+
+    volatile unsigned* prdt = (volatile unsigned*)(g_cmd_table + 0x80);
+    prdt[0] = (unsigned)(g_buffer_phys & 0xFFFFFFFFu);
+    prdt[1] = (unsigned)(g_buffer_phys >> 32);
+    prdt[2] = 0;
+    prdt[3] = 511u;
+
+    hba_set(base + PORT_CI, 1u);
+    for (int spin = 0; spin < 5000000; ++spin) {
+        if ((hba(base + PORT_CI) & 1u) == 0)
+            break;
+        if ((hba(base + PORT_IS) & IS_TFES) != 0)
+            return -1;
+    }
+    if ((hba(base + PORT_CI) & 1u) != 0)
+        return -1;
+
+    /* Words 100 to 103: the 48-bit count, which is the one to trust on any
+     * disk large enough for the 28-bit one to have been rounded down. */
+    const volatile unsigned char* id = g_buffer;
+    unsigned long sectors = 0;
+    for (int i = 0; i < 8; ++i)
+        sectors |= (unsigned long)id[200 + i] << (8 * i);
+    if (sectors == 0)
+        for (int i = 0; i < 4; ++i)     /* fall back to the 28-bit count */
+            sectors |= (unsigned long)id[120 + i] << (8 * i);
+    g_sectors = sectors;
+    return sectors != 0 ? 0 : -1;
+}
+
 int main(void)
 {
     if (io_permit(PCI_ADDRESS, 8) != 0) {
@@ -350,6 +409,11 @@ int main(void)
         return 1;
     }
 
+    if (identify() != 0) {
+        printf("ahcid: the disk would not say how big it is\n");
+        return 1;
+    }
+
     /* Both directions, against a sector far enough into a disk that holds
      * nothing else. Writing a pattern and reading it back is the only way to
      * know the command path works: a read alone proves the controller answers,
@@ -372,7 +436,76 @@ int main(void)
         if (g_buffer[i] != (unsigned char)(i * 7u + 13u))
             same = 0;
 
-    printf("ahcid: port %u, DMA read and write %s\n", g_port,
+    printf("ahcid: port %u, %lu sectors, DMA read and write %s\n",
+           g_port, g_sectors,
            same ? "verified" : "DISAGREED");
-    return same ? 0 : 1;
+    if (!same)
+        return 1;
+
+    /* Now serve. The protocol is the one the other driver speaks, on a port of
+     * its own: a client that wants this disk asks here, and the disk index it
+     * uses is the one this driver knows rather than the one the system does -
+     * the subtraction is the caller's, because the caller is the only one that
+     * knows about both. */
+    const int shm = shm_open(BLK_SHM_KEY2, sizeof(struct blk_shared),
+                             SHM_PUBLIC);
+    struct blk_shared* shared = shm < 0 ? 0 : (struct blk_shared*)shm_map(shm);
+    if (shared == 0) {
+        printf("ahcid: cannot publish the transfer buffer\n");
+        return 1;
+    }
+
+    const int port = port_create(IPC_PORT_BLOCK2);
+    if (port < 0) {
+        printf("ahcid: a driver already has this port\n");
+        return 1;
+    }
+    printf("ahcid: serving disk %u on port %d\n", BLK_AHCI_BASE, IPC_PORT_BLOCK2);
+
+    for (;;) {
+        struct ipc_message m, r;
+        unsigned from = 0;
+        const int handle = ipc_recv(port, &m, &from);
+        if (handle < 0)
+            continue;
+
+        memset(&r, 0, sizeof(r));
+        r.tag = m.tag;
+        r.word[0] = -1;
+
+        /* One disk, so anything other than zero is a question about a disk
+         * this driver does not have. */
+        if (m.word[2] != 0) {
+            ipc_reply(handle, &r);
+            continue;
+        }
+
+        if (m.tag == BLK_INFO) {
+            r.word[0] = (long)g_sectors;
+            r.word[1] = BLK_SECTOR;
+            unsigned n = 0;
+            while (n < sizeof(r.data) - 1 && "AHCI DISK"[n] != '\0') {
+                r.data[n] = (unsigned char)"AHCI DISK"[n];
+                ++n;
+            }
+            r.bytes = n;
+        } else if (m.tag == BLK_READ || m.tag == BLK_WRITE) {
+            const unsigned long lba = (unsigned long)m.word[0];
+            unsigned count = (unsigned)m.word[1];
+            if (count == 0 || count > BLK_MAX_COUNT ||
+                count * BLK_SECTOR > BUFFER_BYTES) {
+                ipc_reply(handle, &r);
+                continue;
+            }
+            if (m.tag == BLK_WRITE)
+                memcpy((void*)g_buffer, shared->data, count * BLK_SECTOR);
+            if (transfer(lba, count, m.tag == BLK_WRITE) == 0) {
+                if (m.tag == BLK_READ)
+                    memcpy(shared->data, (const void*)g_buffer,
+                           count * BLK_SECTOR);
+                r.word[0] = 0;
+            }
+        }
+        ipc_reply(handle, &r);
+    }
 }

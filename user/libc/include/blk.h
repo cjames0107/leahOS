@@ -12,6 +12,15 @@
  */
 
 #define BLK_SHM_KEY   0x424Cu       /* "BL" */
+/* The second driver publishes its own segment: two drivers sharing one buffer
+ * would be two drivers writing over each other's transfers. */
+#define BLK_SHM_KEY2  0x424Du       /* "BM" */
+
+/* Disks are numbered across both drivers. The first BLK_MAX_DISKS belong to
+ * the programmed-I/O driver on the legacy controller; anything at or above
+ * that is on the AHCI controller, and a client subtracts to get the index the
+ * second driver knows it by. */
+#define BLK_AHCI_BASE BLK_MAX_DISKS
 #define BLK_SECTOR    512
 #define BLK_MAX_COUNT 64            /* 32 KiB in one request */
 

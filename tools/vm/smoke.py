@@ -45,6 +45,13 @@ def body(t):
         raise Failure("AHCI read/write did not verify")
     t.checks += 1
 
+    # The whole path: the filesystem mounts a disk on the other controller, so
+    # every block of this read crossed to a second driver and came back by DMA.
+    t.expect("mount 4 /sata", "")
+    t.expect("cat /sata/sata/hello.txt", "came off the SATA disk")
+    t.expect("mount", "on /sata type ext4")
+    t.expect("mount -u /sata; echo detached", "detached")
+
     # And the in-guest suite, which is the deep one.
     t.expect("tests", "0 failure(s)", timeout=600)
 
