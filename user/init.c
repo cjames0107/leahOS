@@ -81,27 +81,77 @@ static void splash_progress(const char* what)
  * machine waits longer and a fast one does not wait at all. */
 /* Start something that does not own a port, so there is nothing to wait for
  * and nothing to report if it is late. */
-static void spawn(const char* path, const char* name)
+/* --- what is running, and what to do when it stops ---------------------------
+ *
+ * A microkernel's argument for putting drivers in ring 3 is that one of them
+ * dying is survivable. It has not been true here: everything started was
+ * forgotten as soon as it was started, so a driver that died stayed dead and
+ * whatever needed it waited forever. The promise was in the architecture and
+ * not in the code.
+ *
+ * So this remembers them, and waits. A child that stops is started again, and
+ * the port it owns is the same port, so the clients that were waiting on it
+ * find it there when they next look.
+ *
+ * Not everything can be handled this way. blockd, ahcid and the filesystem are
+ * started by the kernel from images it carries, because they are what makes
+ * loading possible - restarting those means the kernel doing it, and every
+ * client holding a handle to the old one finding out. That is a larger change
+ * and is not this one.
+ */
+#define MAX_SERVICES 12
+#define MAX_RESTARTS 5
+
+struct service {
+    const char* path;
+    const char* name;
+    unsigned    port;       /* zero when it serves nobody */
+    pid_t       pid;
+    int         restarts;
+    int         given_up;
+};
+
+static struct service g_service[MAX_SERVICES];
+static int g_services;
+
+static pid_t launch(const char* path, const char* name)
 {
-    if (fork() == 0) {
+    const pid_t pid = fork();
+    if (pid == 0) {
         char* argv[2];
         argv[0] = (char*)name;
         argv[1] = 0;
         execve(path, argv, 0);
         exit(127);
     }
+    return pid;
+}
+
+static struct service* remember(const char* path, const char* name,
+                                unsigned port, pid_t pid)
+{
+    if (g_services >= MAX_SERVICES)
+        return 0;
+    struct service* s = &g_service[g_services++];
+    s->path = path;
+    s->name = name;
+    s->port = port;
+    s->pid = pid;
+    s->restarts = 0;
+    s->given_up = 0;
+    return s;
+}
+
+static void spawn(const char* path, const char* name)
+{
+    remember(path, name, 0, launch(path, name));
 }
 
 static void start(const char* path, const char* name, unsigned port)
 {
     splash_progress(name);
-    if (fork() == 0) {
-        char* argv[2];
-        argv[0] = (char*)name;
-        argv[1] = 0;
-        execve(path, argv, 0);
-        exit(127);
-    }
+    const pid_t pid = launch(path, name);
+    remember(path, name, port, pid);
     for (int i = 0; i < 500; ++i) {
         if (port_open(port) >= 0) {
             ++g_done;
@@ -140,11 +190,40 @@ int main(void)
 
     splash_progress("starting login");
 
-    // login owns the screen from here: it authenticates, starts a shell as
-    // whoever logged in, and comes back to its prompt when that shell exits.
-    char* login_args[] = { "login", 0 };
-    execve("/sbin/login", login_args, 0);
+    /* Forked rather than exec'd. This used to become login, which meant
+     * nothing was left to notice anything dying - the supervisor replaced
+     * itself with the thing it should have been supervising. */
+    if (remember("/sbin/login", "login", 0, launch("/sbin/login", "login")) == 0) {
+        printf("init: could not launch login\n");
+        return 1;
+    }
 
-    printf("init: could not launch login\n");
-    return 1;
+    /* And from here it does one thing: waits, and starts again whatever
+     * stopped. A driver that dies takes its port with it, so the restart puts
+     * the same port back and the clients waiting on it carry on. */
+    for (;;) {
+        int status = 0;
+        const pid_t gone = wait(&status);
+        if (gone < 0)
+            continue;
+
+        struct service* s = 0;
+        for (int i = 0; i < g_services; ++i)
+            if (g_service[i].pid == gone)
+                s = &g_service[i];
+        if (s == 0 || s->given_up)
+            continue;           /* somebody else's child, or already given up */
+
+        if (++s->restarts > MAX_RESTARTS) {
+            /* Something that will not stay up is not helped by starting it
+             * again, and a machine spending itself on that is worse off than
+             * one missing a driver. Said once, and then left alone. */
+            printf("init: %s died %d times; leaving it stopped\n",
+                   s->name, s->restarts - 1);
+            s->given_up = 1;
+            continue;
+        }
+        printf("init: %s stopped; starting it again\n", s->name);
+        s->pid = launch(s->path, s->name);
+    }
 }

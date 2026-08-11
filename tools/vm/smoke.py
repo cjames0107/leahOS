@@ -57,6 +57,12 @@ def body(t):
     t.expect("cat /sata/sata/hello.txt", "came off the SATA disk")
     t.expect("mount -u /sata; echo detached", "detached")
 
+    # There is no check here that a driver restarts, and the reason is worth
+    # writing down: nothing this suite can do will stop one. A server sitting
+    # in ipc_recv survives a terminate and survives a kill - it wakes, and goes
+    # back to waiting - so the only thing that ends one is a fault, which is
+    # not something to induce on purpose in a running system.
+
     # Something is actually on the screen. Every other check here would pass
     # on a machine that draws nothing at all.
     colours = t.m.screen_colours("smoke")
