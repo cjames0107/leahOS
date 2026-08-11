@@ -160,10 +160,15 @@ class Test:
     line rather than to a screen nobody is watching."""
 
     def __init__(self, cpus=2, boot_timeout=420):
+        start = time.time()
         self.m = Machine(cpus=cpus)
         self.checks = 0
         self.allowed = []
         self.m.wait_for_serial("login", boot_timeout)
+        # Worth recording rather than asserting: it moves with the host's load
+        # as much as with the guest's code, so it is a number to watch and not
+        # a threshold to fail on.
+        self.boot_seconds = time.time() - start
         time.sleep(3)
         self.m.type("root\n"); time.sleep(0.5); self.m.type("toor\n")
         time.sleep(55)
@@ -247,7 +252,7 @@ def main(name, body):
         t.stop()
         sys.exit(1)
 
-    print("ok    %s (%d checks, %d expected fault(s))"
-          % (name, t.checks, len(t.allowed)))
+    print("ok    %s (%d checks, %d expected fault(s), boot %.1fs)"
+          % (name, t.checks, len(t.allowed), t.boot_seconds))
     t.stop()
     sys.exit(0)

@@ -170,6 +170,11 @@ static int read_block(unsigned long block, unsigned char* out)
         return 0;
     if (cache_get(block, g_cur->dev, out))
         return 0;
+    /* One block, not a run of them. Reading eight at a time to save seven
+     * round trips measured slower - 13.5 seconds to boot against 8.5 - and the
+     * reason is that this driver moves data with programmed I/O a word at a
+     * time, so the bytes cost more than the messages do. Trading round trips
+     * for bytes is the wrong way round on this machine. */
     const unsigned sectors = g_block_size / BLK_SECTOR;
     if (disk_read(block * sectors, sectors, g_cur->dev) != 0)
         return -1;
