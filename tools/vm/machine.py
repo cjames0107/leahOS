@@ -162,6 +162,7 @@ class Test:
     def __init__(self, cpus=2, boot_timeout=420):
         self.m = Machine(cpus=cpus)
         self.checks = 0
+        self.allowed = []
         self.m.wait_for_serial("login", boot_timeout)
         time.sleep(3)
         self.m.type("root\n"); time.sleep(0.5); self.m.type("toor\n")
@@ -196,6 +197,26 @@ class Test:
         if needle not in tail:
             raise Failure("%r did not appear after: %s" % (needle, command))
 
+    def allow_fault(self, pattern, why):
+        """Say that a fault matching `pattern` is meant to happen.
+
+        Every other one fails the run. A test that deliberately makes a
+        process die has to say so here, which means the list doubles as the
+        record of which crashes this system expects to see."""
+        self.allowed.append((pattern, why))
+
+    def faults(self):
+        """Faults and panics nobody asked for."""
+        out = []
+        for line in self.m.serial().splitlines():
+            low = line.lower()
+            if "faulted" not in low and "panic" not in low:
+                continue
+            if any(p in line for p, _ in self.allowed):
+                continue
+            out.append(line.strip())
+        return out
+
     def stop(self):
         self.m.stop()
 
@@ -215,6 +236,18 @@ def main(name, body):
         print("ERROR %s: %s" % (name, e))        # broken guest
         if t: t.stop()
         sys.exit(2)
-    print("ok    %s (%d checks)" % (name, t.checks))
+    # A run can pass every assertion and still have killed something on the
+    # way through. Demand paging landed with two faults in the log and a green
+    # result, which is how this check came to exist.
+    stray = t.faults()
+    if stray:
+        print("FAIL  %s: %d unexpected fault(s)" % (name, len(stray)))
+        for line in stray[:8]:
+            print("        %s" % line)
+        t.stop()
+        sys.exit(1)
+
+    print("ok    %s (%d checks, %d expected fault(s))"
+          % (name, t.checks, len(t.allowed)))
     t.stop()
     sys.exit(0)

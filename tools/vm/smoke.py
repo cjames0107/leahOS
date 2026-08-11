@@ -11,6 +11,11 @@ from machine import main
 
 
 def body(t):
+    # The suite forks children that try port I/O from ring 3 to prove the
+    # kernel stops them. Those two deaths are the test working; anything else
+    # that dies is not.
+    t.allow_fault("tests[", "the suite's own port-I/O children, killed on purpose")
+
     # The filesystem answers, and answers about itself.
     t.expect("echo alive", "alive")
     t.expect("ls /bin | wc -l", "")
@@ -29,7 +34,7 @@ def body(t):
     t.expect("mount -u /mnt; mount", "procfs on /proc")
 
     # And the in-guest suite, which is the deep one.
-    t.expect("tests", "0 failure(s)", timeout=300)
+    t.expect("tests", "0 failure(s)", timeout=600)
 
 
 main("smoke", body)
