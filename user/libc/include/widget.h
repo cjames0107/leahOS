@@ -107,6 +107,11 @@ void wg_button(int x, int y, int w, int h, const char* label, int down);
 
 /* What a window's background is, which is also what its title bar is - the
  * server paints the frame this colour so the two meet without a seam. */
+/* Whether the server is drawing frosted glass. A window that paints its own
+ * surface - a terminal writing cell backgrounds, say - needs to know, because
+ * a surface that is opaque under glass is a hole in it. */
+int wg_glass_on(void);
+
 uint32_t wg_base_colour(void);
 
 /* Paint the window's background. With the glass on this leaves alpha in the
@@ -128,6 +133,13 @@ void wg_sidebar(int x, int y, int w, int h);
 void wg_pill_group(int x, int y, int seg_w, int h, int count,
                    const char* const* labels, int selected);
 void wg_pill(int x, int y, int w, int h, const char* label, int down);
+
+/* A checkbox, a radio button and a text field, in the same vocabulary. The
+ * sunken white squares with bevels round them were the last controls that gave
+ * the interface's age away whatever was redrawn around them. */
+void wg_check(int x, int y, int size, int on);
+void wg_radio(int x, int y, int size, int on);
+void wg_field(int x, int y, int w, int h, const char* text, int focused);
 
 #endif /* _WIDGET_H */
 

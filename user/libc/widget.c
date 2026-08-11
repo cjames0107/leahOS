@@ -383,6 +383,13 @@ void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w)
  * what it sits on or it is invisible.
  */
 
+static int glass_on(void);
+
+int wg_glass_on(void)
+{
+    return glass_on();
+}
+
 static int glass_on(void)
 {
     return g_ws != 0 && g_ws->magic == WS_MAGIC && g_ws->theme.blur != 0;
@@ -484,10 +491,16 @@ static void glass_fill(int x, int y, int w, int h, int radius, uint32_t argb)
     for (int py = y; py < y + h; ++py) {
         if (py < 0 || (unsigned)py >= g_h)
             continue;
+        /* Only the rows level with a corner are curved. Everything between
+         * them is a straight run at full coverage, and asking for the
+         * distance to a rounded rectangle once per pixel of a window-sized
+         * box was most of what this cost. */
+        const int straight = py >= y + radius && py < y + h - radius;
         for (int px = x; px < x + w; ++px) {
             if (px < 0 || (unsigned)px >= g_w)
                 continue;
-            const int cov = draw_round_coverage(px, py, x, y, w, h, radius);
+            const int cov = straight ? 255
+                          : draw_round_coverage(px, py, x, y, w, h, radius);
             if (cov == 0)
                 continue;
             /* Composited onto the background, not written over it. Writing
@@ -809,4 +822,75 @@ int wg_scroll_drag_h(int x, int bx, int bw, int page, int span)
     if (at < 0) at = 0;
     if (at > usable) at = usable;
     return clamp_first(at * (span - page) / usable, page, span);
+}
+
+/* --- the controls that were still 1991 --------------------------------------
+ *
+ * A checkbox drawn as a sunken white square with a bevel round it, and a radio
+ * button drawn as the same square with a dot in it, are the two things that
+ * gave the whole interface away however carefully everything around them was
+ * redrawn. These are the same controls in the vocabulary the rest of it uses:
+ * a rounded well, a wash, a bright lip, and the accent colour to say yes.
+ */
+
+/* A tick, drawn rather than loaded: two strokes, thickened by drawing each of
+ * them three times a pixel apart. */
+static void tick(int x, int y, int size, uint32_t ink)
+{
+    const int a = size / 4, b = size / 2;
+    for (int t = 0; t < 2; ++t)
+        for (int i = 0; i <= a; ++i) {
+            blend_px(x + b - a + i + t, y + b + i, 0xFF000000u | ink);
+            blend_px(x + b + i + t, y + b + a - i, 0xFF000000u | ink);
+        }
+}
+
+void wg_check(int x, int y, int size, int on)
+{
+    const struct surface c = canvas();
+    const int r = size / 3;
+    if (on) {
+        draw_round_rect(&c, x, y, size, size, r, 0xFF000000u | wg_sel_colour());
+        tick(x, y, size, 0xFFFFFF);
+    } else if (glass_on()) {
+        glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
+    } else {
+        draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 12));
+    }
+    inner_glow(x, y, size, size, r);
+}
+
+void wg_radio(int x, int y, int size, int on)
+{
+    const struct surface c = canvas();
+    const int r = size / 2;
+    if (glass_on())
+        glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
+    else
+        draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 12));
+    if (on) {
+        const int inset = size / 4;
+        draw_round_rect(&c, x + inset, y + inset, size - inset * 2,
+                        size - inset * 2, (size - inset * 2) / 2,
+                        0xFF000000u | wg_sel_colour());
+    }
+    inner_glow(x, y, size, size, r);
+}
+
+/* A field is a container that has been pressed in rather than raised: the same
+ * shape, darker instead of lighter, and no bright lip along the top - light
+ * does not collect on the upper edge of something recessed. */
+void wg_field(int x, int y, int w, int h, const char* text, int focused)
+{
+    const struct surface c = canvas();
+    const int r = h / 3 > 8 ? 8 : h / 3;
+    if (glass_on())
+        glass_fill(x, y, w, h, r, 0x1FFFFFFFu);
+    else
+        draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 22));
+    if (focused)
+        draw_round_rect_outline(&c, x, y, w, h, r, 1,
+                                0xCC000000u | wg_sel_colour());
+    if (text != 0)
+        wg_text(x + 8, y + (h - wg_text_height()) / 2, text, wg_ink_colour());
 }

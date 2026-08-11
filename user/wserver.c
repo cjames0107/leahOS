@@ -859,8 +859,27 @@ contents:
     for (int y = y0; y < y1; ++y) {
         const uint32_t* row = &px[(unsigned long)(y - content_y) * g_width[slot]];
         if (translucent && y < curved_from) {
-            for (int x = x0; x < x1; ++x)
+            /* Most pixels of most windows are opaque even here: the wash is
+             * only the background, and everything drawn on it is solid. So a
+             * run of opaque pixels is copied rather than blended, which is
+             * what stops this costing a blend per pixel of every window that
+             * carries alpha - including in opaque mode, where all of them are.
+             */
+            int x = x0;
+            while (x < x1) {
+                int run = x;
+                while (run < x1 && (row[run - content_x] >> 24) == 0xFFu)
+                    ++run;
+                if (run > x) {
+                    memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x],
+                           &row[x - content_x],
+                           (size_t)(run - x) * sizeof(uint32_t));
+                    x = run;
+                    continue;
+                }
                 back_blend(x, y, row[x - content_x]);
+                ++x;
+            }
             continue;
         }
         if (y < curved_from) {

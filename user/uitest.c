@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <widget.h>
 #include <window.h>
 
 #define FACE    0xC0C0C0
@@ -101,12 +102,12 @@ static void layout(void)
 {
     g_button[0].x = 16;  g_button[0].y = 44; g_button[0].w = 96; g_button[0].h = 26;
     g_button[1].x = 124; g_button[1].y = 44; g_button[1].w = 96; g_button[1].h = 26;
-    g_check.x = 16; g_check.y = 88; g_check.w = 14; g_check.h = 14;
+    g_check.x = 16; g_check.y = 88; g_check.w = 18; g_check.h = 18;
     for (int i = 0; i < 3; ++i) {
         g_radio[i].x = 16 + i * 84;
         g_radio[i].y = 116;
-        g_radio[i].w = 14;
-        g_radio[i].h = 14;
+        g_radio[i].w = 18;
+        g_radio[i].h = 18;
     }
 }
 
@@ -122,57 +123,43 @@ static void draw(void)
     /* Push buttons. The pressed one is drawn sunken and shifted a pixel, which
      * is the entire animation budget of this era and reads perfectly well. */
     static const char* labels[2] = { "Click me", "And me" };
-    for (int i = 0; i < 2; ++i) {
-        const int down = (g_pressed == i);
-        fill(g_button[i].x, g_button[i].y, g_button[i].w, g_button[i].h, FACE);
-        bevel(g_button[i].x, g_button[i].y, g_button[i].w, g_button[i].h, !down);
-        text(g_button[i].x + 10 + down, g_button[i].y + 5 + down, labels[i], INK);
-    }
+    for (int i = 0; i < 2; ++i)
+        wg_pill(g_button[i].x, g_button[i].y, g_button[i].w, g_button[i].h,
+                labels[i], g_pressed == i);
 
-    /* Checkbox: sunken well with a tick when set. */
-    fill(g_check.x, g_check.y, g_check.w, g_check.h, PAPER);
-    bevel(g_check.x, g_check.y, g_check.w, g_check.h, 0);
-    if (g_checked) {
-        for (int i = 0; i < 5; ++i)
-            plot(g_check.x + 3 + i, g_check.y + 6 + i, ACCENT);
-        for (int i = 0; i < 5; ++i)
-            plot(g_check.x + 7 + i, g_check.y + 10 - i, ACCENT);
-    }
-    text(g_check.x + 22, g_check.y - 1, g_checked ? "checked" : "unchecked", INK);
+    wg_check(g_check.x, g_check.y, g_check.w, g_checked);
+    wg_text(g_check.x + 24, g_check.y - 1,
+            g_checked ? "checked" : "unchecked", wg_ink_colour());
 
     /* Radio buttons: only one at a time, which is the point of them. */
     for (int i = 0; i < 3; ++i) {
-        fill(g_radio[i].x, g_radio[i].y, g_radio[i].w, g_radio[i].h, PAPER);
-        bevel(g_radio[i].x, g_radio[i].y, g_radio[i].w, g_radio[i].h, 0);
-        if (g_choice == i)
-            fill(g_radio[i].x + 4, g_radio[i].y + 4, 6, 6, ACCENT);
+        wg_radio(g_radio[i].x, g_radio[i].y, g_radio[i].w, g_choice == i);
         char label[8] = { 'o', 'n', 'e', 0 };
         if (i == 1) { label[0] = 't'; label[1] = 'w'; label[2] = 'o'; }
         if (i == 2) { label[0] = 't'; label[1] = 'e'; label[2] = 'n'; }
-        text(g_radio[i].x + 20, g_radio[i].y - 1, label, INK);
+        wg_text(g_radio[i].x + 22, g_radio[i].y - 1, label, wg_ink_colour());
     }
 
     /* A colour bar: if the pixel format is wrong this is the first thing to
-     * look wrong, and it is wrong in an obvious way. */
+     * look wrong, and it is wrong in an obvious way. Rounded at its ends now,
+     * because a hard rectangle is the one shape nothing else here has. */
     static const uint32_t swatch[8] = {
         0x000000, 0x800000, 0x008000, 0x808000,
         0x000080, 0x800080, 0x008080, 0xFFFFFF,
     };
     for (int i = 0; i < 8; ++i)
         fill(16 + i * 24, 148, 24, 18, swatch[i]);
-    bevel(16, 148, 8 * 24, 18, 0);
 
     /* Readouts: the last event, the click count, and the current size. The
      * size line is what a resize has to change. */
     char line[96];
     snprintf(line, sizeof(line), "clicks %d   size %ux%u", g_clicks, g_w, g_h);
-    text(16, 176, line, INK);
+    wg_text(16, 176, line, wg_ink_colour());
 
-    fill(12, 198, (int)g_w - 24, 20, PAPER);
-    bevel(12, 198, (int)g_w - 24, 20, 0);
-    text(16, 200, g_last, INK);
+    wg_field(12, 198, (int)g_w - 24, 22, g_last, 0);
 
-    text(16, 226, "keys go to the focused window; ctrl+q closes", INK);
+    wg_text(16, 228, "keys go to the focused window; ctrl+q closes",
+            wg_ink_colour());
 }
 
 static void note(const char* what, int x, int y)

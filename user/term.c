@@ -44,7 +44,15 @@
  * gone past by the time anybody looks. */
 #define HISTORY_ROWS 1024
 
-#define BG      0x000000
+/* Smoked rather than solid when the glass is on: the terminal keeps its dark
+ * surface and its colours mean what they meant, but the blur behind it shows
+ * through instead of the window being an opaque tile laid on the desktop. */
+#define BG_SOLID 0xFF000000u
+static uint32_t term_bg(void)
+{
+    return wg_glass_on() ? 0xA8000000u : BG_SOLID;
+}
+#define BG      term_bg()
 #define FG      0xC0C0C0
 #define CURSOR  0x00A000
 
@@ -418,7 +426,7 @@ static void draw_glyph(int col, int row, char ch, uint32_t fg, uint32_t bg)
         uint32_t* out = &g_px[(unsigned long)(y0 + r) * g_win_w + x0];
         const unsigned char bits = glyph[r];
         for (int c = 0; c < GLYPH_W; ++c)
-            out[c] = (bits & (0x80 >> c)) ? fg : bg;
+            out[c] = (bits & (0x80 >> c)) ? (0xFF000000u | fg) : bg;
     }
 }
 
@@ -438,7 +446,8 @@ static void repaint(int id)
         for (int c = 0; c < g_cols; ++c)
             draw_glyph(c, r, row[c],
                        kPalette[ATTR_FG(attr[c])],
-                       kPalette[ATTR_BG(attr[c])]);
+                       ATTR_BG(attr[c]) == 0 ? BG
+                                             : 0xFF000000u | kPalette[ATTR_BG(attr[c])]);
     }
 
     /* A block cursor, drawn last so it sits over whatever is under it - and
@@ -454,10 +463,20 @@ static void repaint(int id)
      * row. Without these the window keeps whatever was there before. */
     const int used_w = g_cols * GLYPH_W, used_h = g_rows * GLYPH_H;
     wg_target(g_px, g_win_w, g_win_h);
-    if (used_w < text_width())
-        wg_fill(used_w, 0, text_width() - used_w, (int)g_win_h, BG);
-    if (used_h < (int)g_win_h)
-        wg_fill(0, used_h, text_width(), (int)g_win_h - used_h, BG);
+    {
+        /* Written directly: wg_fill forces an opaque byte, which is right for
+         * a control and wrong for the terminal's own surface. */
+        const uint32_t bg = BG;
+        for (unsigned yy = 0; yy < g_win_h; ++yy) {
+            uint32_t* r = &g_px[(unsigned long)yy * g_win_w];
+            if (used_w < text_width())
+                for (int xx = used_w; xx < text_width(); ++xx)
+                    r[xx] = bg;
+            if ((int)yy >= used_h)
+                for (int xx = 0; xx < text_width(); ++xx)
+                    r[xx] = bg;
+        }
+    }
 
     wg_scrollbar_v((int)g_win_w - WG_SCROLL_W, 0, (int)g_win_h,
                    (int)(g_view - g_first), g_rows, (int)line_count());
@@ -648,6 +667,10 @@ int main(int argc, char** argv)
     g_win_w = 80 * GLYPH_W + WG_SCROLL_W;
     g_win_h = 24 * GLYPH_H;
     const int id = win_create(x, y, g_win_w, g_win_h, "Terminal");
+    /* Every pixel of this window is written by the glyph loop or the strips
+     * beside it, so it is safe to have the server read the alpha byte. */
+    if (id >= 0)
+        win_set_alpha(id);
     if (id < 0) {
         printf("term: no window server\n");
         return 1;
