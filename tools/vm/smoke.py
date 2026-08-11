@@ -35,9 +35,14 @@ def body(t):
 
     # The SATA controller is found and its port enumerated. Reading the serial
     # line directly, because this is printed at boot before there is a shell.
+    from machine import Failure
     if "ahcid: AHCI" not in t.m.serial():
-        from machine import Failure
         raise Failure("the AHCI controller was not found at boot")
+    t.checks += 1
+    # And that its command path moves data both ways: the driver writes a
+    # pattern to a spare sector, reads it back and compares.
+    if "DMA read and write verified" not in t.m.serial():
+        raise Failure("AHCI read/write did not verify")
     t.checks += 1
 
     # And the in-guest suite, which is the deep one.

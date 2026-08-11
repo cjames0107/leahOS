@@ -170,6 +170,11 @@ class Test:
         start = time.time()
         self.m = Machine(cpus=cpus)
         self.checks = 0
+        # Markers are counted separately from checks. They were the same
+        # number until a check that runs no command was added, and then the
+        # slice below started looking for a marker nobody had printed - which
+        # reads as the last command having failed when it had passed.
+        self.marks = 0
         self.allowed = []
         self.m.wait_for_serial("login", boot_timeout)
         # Worth recording rather than asserting: it moves with the host's load
@@ -189,7 +194,8 @@ class Test:
         Output goes to /dev/console, which is the serial line, so the harness
         can read it. The marker is what makes "finished" observable - without
         it there is no way to tell a slow command from a hung one."""
-        mark = "==done-%d==" % self.checks
+        mark = "==done-%d==" % self.marks
+        self.marks += 1
         # No 2>&1: this shell does not join the streams, and writing it puts
         # a stray "1" in the output rather than an error message in it.
         self.m.type("%s > /dev/console; echo %s > /dev/console\n"
@@ -204,8 +210,9 @@ class Test:
     def expect(self, command, needle, timeout=90):
         out = self.run(command, timeout)
         self.checks += 1
-        tail = out[out.rfind("==done-%d==" % (self.checks - 2)):] \
-            if self.checks > 1 else out
+        # Everything since the previous command finished.
+        tail = out[out.rfind("==done-%d==" % (self.marks - 2)):] \
+            if self.marks > 1 else out
         if needle not in tail:
             raise Failure("%r did not appear after: %s" % (needle, command))
 

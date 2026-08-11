@@ -41,8 +41,31 @@
 
 /* And per port, at 0x100 + port * 0x80. */
 #define PORT_BASE(n)  (0x100u + (unsigned)(n) * 0x80u)
-#define PORT_SSTS     0x28  /* device detection and speed          */
+#define PORT_CLB      0x00  /* command list, and its high half     */
+#define PORT_CLBU     0x04
+#define PORT_FB       0x08  /* where the device's replies land     */
+#define PORT_FBU      0x0C
+#define PORT_IS       0x10  /* what happened                       */
+#define PORT_CMD      0x18  /* start, stop, and whether it is going*/
+#define PORT_TFD      0x20  /* the device's status and error       */
 #define PORT_SIG      0x24  /* what kind of device it is           */
+#define PORT_SSTS     0x28  /* device detection and speed          */
+#define PORT_SERR     0x30
+#define PORT_CI       0x38  /* set a bit to issue that slot        */
+
+#define CMD_ST        (1u << 0)     /* run the command list        */
+#define CMD_FRE       (1u << 4)     /* accept replies              */
+#define CMD_FR        (1u << 14)    /* replies are being accepted  */
+#define CMD_CR        (1u << 15)    /* the list is running         */
+
+#define TFD_ERR       (1u << 0)
+#define TFD_DRQ       (1u << 3)
+#define TFD_BSY       (1u << 7)
+
+#define IS_TFES       (1u << 30)    /* the device refused it       */
+
+#define ATA_READ_DMA_EX  0x25
+#define ATA_WRITE_DMA_EX 0x35
 
 #define SIG_ATA       0x00000101u
 #define SIG_ATAPI     0xEB140101u
@@ -65,6 +88,19 @@ static void cfg_write(unsigned bus, unsigned slot, unsigned fn, unsigned off,
 }
 
 static volatile unsigned* g_hba;        /* the controller's registers */
+static unsigned g_port;                 /* the one with a disk on it  */
+
+/* The structures the controller reads out of memory, so they have to be where
+ * it can reach them: allocated once, physically contiguous, and never moved.
+ * dma_alloc hands back both addresses because the controller needs the
+ * physical one and this program needs the virtual one. */
+static volatile unsigned char* g_cmd_list;      /* 32 headers, 1 KiB    */
+static volatile unsigned char* g_fis;           /* replies, 256 bytes   */
+static volatile unsigned char* g_cmd_table;     /* one command's detail */
+static volatile unsigned char* g_buffer;        /* the data itself      */
+static uint64_t g_cmd_list_phys, g_fis_phys, g_cmd_table_phys, g_buffer_phys;
+
+#define BUFFER_BYTES 4096
 
 static unsigned hba(unsigned off)
 {
@@ -74,6 +110,123 @@ static unsigned hba(unsigned off)
 static void hba_set(unsigned off, unsigned value)
 {
     g_hba[off / 4] = value;
+}
+
+static void wr32(volatile unsigned char* at, unsigned off, unsigned value)
+{
+    *(volatile unsigned*)(at + off) = value;
+}
+
+/* Wait for the device to stop being busy. Returns 0 when it is ready. */
+static int wait_ready(void)
+{
+    for (int spin = 0; spin < 2000000; ++spin) {
+        const unsigned tfd = hba(PORT_BASE(g_port) + PORT_TFD);
+        if ((tfd & (TFD_BSY | TFD_DRQ)) == 0)
+            return 0;
+    }
+    return -1;
+}
+
+/* Stop the port, point it at our structures, and start it again.
+ *
+ * The order is the controller's, not a preference: it will not accept new
+ * addresses while it is running, and it will not start until it has stopped -
+ * so both waits are real and skipping either leaves it reading whatever the
+ * firmware left behind. */
+static int port_start(void)
+{
+    const unsigned base = PORT_BASE(g_port);
+
+    hba_set(base + PORT_CMD, hba(base + PORT_CMD) & ~CMD_ST);
+    for (int spin = 0; spin < 1000000; ++spin)
+        if ((hba(base + PORT_CMD) & CMD_CR) == 0)
+            break;
+    hba_set(base + PORT_CMD, hba(base + PORT_CMD) & ~CMD_FRE);
+    for (int spin = 0; spin < 1000000; ++spin)
+        if ((hba(base + PORT_CMD) & CMD_FR) == 0)
+            break;
+    if ((hba(base + PORT_CMD) & (CMD_CR | CMD_FR)) != 0)
+        return -1;
+
+    hba_set(base + PORT_CLB,  (unsigned)(g_cmd_list_phys & 0xFFFFFFFFu));
+    hba_set(base + PORT_CLBU, (unsigned)(g_cmd_list_phys >> 32));
+    hba_set(base + PORT_FB,   (unsigned)(g_fis_phys & 0xFFFFFFFFu));
+    hba_set(base + PORT_FBU,  (unsigned)(g_fis_phys >> 32));
+
+    hba_set(base + PORT_SERR, hba(base + PORT_SERR));   /* write to clear */
+    hba_set(base + PORT_IS, hba(base + PORT_IS));
+
+    hba_set(base + PORT_CMD, hba(base + PORT_CMD) | CMD_FRE);
+    hba_set(base + PORT_CMD, hba(base + PORT_CMD) | CMD_ST);
+    return 0;
+}
+
+/* One transfer, in or out, of up to BUFFER_BYTES from the shared buffer.
+ *
+ * Slot zero every time: this issues one command and waits for it, so there is
+ * never a second in flight to collide with. Thirty-two slots are for a driver
+ * that keeps several going, which this is not yet. */
+static int transfer(unsigned long lba, unsigned sectors, int write)
+{
+    if (sectors == 0 || sectors * 512u > BUFFER_BYTES)
+        return -1;
+    if (wait_ready() != 0)
+        return -1;
+
+    const unsigned base = PORT_BASE(g_port);
+    hba_set(base + PORT_IS, hba(base + PORT_IS));
+
+    /* The header: a five-dword command FIS, one region to scatter into, and
+     * the direction. */
+    volatile unsigned* header = (volatile unsigned*)g_cmd_list;
+    header[0] = (5u) | (write ? (1u << 6) : 0u) | (1u << 16);
+    header[1] = 0;                                  /* bytes moved so far */
+    header[2] = (unsigned)(g_cmd_table_phys & 0xFFFFFFFFu);
+    header[3] = (unsigned)(g_cmd_table_phys >> 32);
+    header[4] = header[5] = header[6] = header[7] = 0;
+
+    memset((void*)g_cmd_table, 0, 256);
+
+    /* The command itself, as a host-to-device register FIS. */
+    volatile unsigned char* fis = g_cmd_table;
+    fis[0] = 0x27;                                  /* register FIS, h2d */
+    fis[1] = 0x80;                                  /* this is a command */
+    fis[2] = write ? ATA_WRITE_DMA_EX : ATA_READ_DMA_EX;
+    fis[3] = 0;
+    fis[4] = (unsigned char)(lba);
+    fis[5] = (unsigned char)(lba >> 8);
+    fis[6] = (unsigned char)(lba >> 16);
+    fis[7] = 0x40;                                  /* LBA, not CHS      */
+    fis[8] = (unsigned char)(lba >> 24);
+    fis[9] = (unsigned char)(lba >> 32);
+    fis[10] = (unsigned char)(lba >> 40);
+    fis[11] = 0;
+    fis[12] = (unsigned char)(sectors);
+    fis[13] = (unsigned char)(sectors >> 8);
+
+    /* And where the data is. The count is written one short of the length,
+     * which is the controller's convention and not a mistake. */
+    volatile unsigned* prdt = (volatile unsigned*)(g_cmd_table + 0x80);
+    prdt[0] = (unsigned)(g_buffer_phys & 0xFFFFFFFFu);
+    prdt[1] = (unsigned)(g_buffer_phys >> 32);
+    prdt[2] = 0;
+    prdt[3] = (sectors * 512u) - 1u;
+
+    hba_set(base + PORT_CI, 1u);                    /* slot zero, go */
+
+    for (int spin = 0; spin < 5000000; ++spin) {
+        if ((hba(base + PORT_CI) & 1u) == 0)
+            break;
+        if ((hba(base + PORT_IS) & IS_TFES) != 0)
+            return -1;
+    }
+    if ((hba(base + PORT_CI) & 1u) != 0)
+        return -1;                                  /* never finished */
+    if ((hba(base + PORT_IS) & IS_TFES) != 0 ||
+        (hba(base + PORT_TFD) & TFD_ERR) != 0)
+        return -1;
+    return 0;
 }
 
 int main(void)
@@ -157,6 +310,69 @@ int main(void)
                                 : "something that is not a disk");
     }
 
-    /* Nothing to serve yet, so nothing to wait for. */
-    return 0;
+    /* The one port with a disk on it. */
+    int have_port = 0;
+    for (unsigned port = 0; port < 32 && !have_port; ++port) {
+        if ((implemented & (1u << port)) == 0)
+            continue;
+        const unsigned ssts = hba(PORT_BASE(port) + PORT_SSTS);
+        if ((ssts & 0xFu) != 3 || ((ssts >> 8) & 0xFu) != 1)
+            continue;
+        if (hba(PORT_BASE(port) + PORT_SIG) != SIG_ATA)
+            continue;
+        g_port = port;
+        have_port = 1;
+    }
+    if (!have_port) {
+        printf("ahcid: no disk to drive\n");
+        return 1;
+    }
+
+    /* One allocation, carved up. Each piece has an alignment the controller
+     * insists on - a kilobyte for the command list, 256 bytes for the reply
+     * area, 128 for the command table - and a page satisfies all of them, so
+     * the pieces are simply put on page boundaries rather than arithmetic
+     * being done to prove each one. */
+    uint64_t phys = 0;
+    unsigned char* dma = (unsigned char*)dma_alloc(16384, &phys);
+    if (dma == 0) {
+        printf("ahcid: no memory the controller can reach\n");
+        return 1;
+    }
+    memset(dma, 0, 16384);
+    g_cmd_list   = dma;              g_cmd_list_phys  = phys;
+    g_fis        = dma + 4096;       g_fis_phys       = phys + 4096;
+    g_cmd_table  = dma + 8192;       g_cmd_table_phys = phys + 8192;
+    g_buffer     = dma + 12288;      g_buffer_phys    = phys + 12288;
+
+    if (port_start() != 0) {
+        printf("ahcid: port %u will not start\n", g_port);
+        return 1;
+    }
+
+    /* Both directions, against a sector far enough into a disk that holds
+     * nothing else. Writing a pattern and reading it back is the only way to
+     * know the command path works: a read alone proves the controller answers,
+     * not that it answered with the right thing. */
+    const unsigned long test_lba = 2048;
+    for (unsigned i = 0; i < 512; ++i)
+        g_buffer[i] = (unsigned char)(i * 7u + 13u);
+
+    if (transfer(test_lba, 1, 1) != 0) {
+        printf("ahcid: the write did not complete\n");
+        return 1;
+    }
+    memset((void*)g_buffer, 0, 512);
+    if (transfer(test_lba, 1, 0) != 0) {
+        printf("ahcid: the read did not complete\n");
+        return 1;
+    }
+    int same = 1;
+    for (unsigned i = 0; i < 512 && same; ++i)
+        if (g_buffer[i] != (unsigned char)(i * 7u + 13u))
+            same = 0;
+
+    printf("ahcid: port %u, DMA read and write %s\n", g_port,
+           same ? "verified" : "DISAGREED");
+    return same ? 0 : 1;
 }
