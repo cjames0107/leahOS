@@ -184,7 +184,16 @@ class Machine:
             if needle in self.serial():
                 return True
             time.sleep(0.5)
-        raise TimeoutError(f"never saw {needle!r} on the serial console")
+        # With the tail of the log, because without it this says only that the
+        # machine did not finish and leaves the one question that matters -
+        # where it stopped - to be answered by running it again and hoping it
+        # fails the same way. An intermittent boot stall was pinned for weeks
+        # on the strength of this message alone; the line it stopped after was
+        # in the log the whole time and thrown away here.
+        tail = self.serial().strip().splitlines()[-25:]
+        raise TimeoutError(
+            "never saw %r on the serial console; it stopped after:\n%s"
+            % (needle, "\n".join("    " + line for line in tail)))
 
     def stop(self):
         try:
