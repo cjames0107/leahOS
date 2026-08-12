@@ -575,10 +575,16 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             frame->rax = static_cast<u64>(-1);
             break;
         }
+        // r10 is a wait in milliseconds, zero for "as long as it takes" -
+        // the same convention, and the same conversion, as IpcRecv below.
+        const u64 call_ms = frame->r10;
+        const u64 call_deadline = call_ms == 0 ? 0
+            : timer::ticks() + (call_ms * timer::kFrequencyHz + 999) / 1000;
         frame->rax = static_cast<u64>(
             ipc::call(static_cast<i32>(frame->rdi),
                       reinterpret_cast<const ipc::Message*>(frame->rsi),
-                      reinterpret_cast<ipc::Message*>(frame->rdx)));
+                      reinterpret_cast<ipc::Message*>(frame->rdx),
+                      call_deadline));
         break;
     }
 

@@ -1,4 +1,5 @@
 #include <leah/interrupts.hpp>
+#include <leah/percpu.hpp>
 #include <leah/io.hpp>
 #include <leah/pic.hpp>
 #include <leah/scheduler.hpp>
@@ -23,9 +24,27 @@ u32 g_frequency = kFrequencyHz;
 
 void on_tick(interrupts::Frame&)
 {
+    // One CPU keeps the clock, and it is the same one every time.
+    //
+    // Every processor arms its own local APIC timer, because that is how each
+    // one preempts whatever it is running - a CPU with no timer interrupt
+    // never switches tasks. They all deliver the same vector, so they all
+    // arrived here, and they were all counting into this one variable. The
+    // tick rate was therefore the machine's CPU count times the rate anyone
+    // asked for, and every conversion from milliseconds into ticks came out
+    // short by exactly that factor: on two CPUs a 200 ms deadline expired in
+    // 97, on four it would have been 50.
+    //
+    // Nothing complained, because the two clocks disagreed in the one
+    // direction nobody looks at. uptime_ms prefers the HPET, which is real
+    // time and was always right, so every timestamp a program could print
+    // stayed correct while the counter that decides when a sleeper wakes ran
+    // fast underneath it.
+    //
     // Spelled out rather than ++: a compound operation on a volatile is
     // deprecated because it hides that this is a separate load and store.
-    g_ticks = g_ticks + 1;
+    if (percpu::current().slot == 0)
+        g_ticks = g_ticks + 1;
 
     // The USB controller used to be polled from here, and being polled from
     // here was the only reason it had to be in the kernel at all. usbd has its

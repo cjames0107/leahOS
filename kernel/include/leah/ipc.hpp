@@ -70,7 +70,15 @@ i64 reply(i32 handle, const Message* msg);
 
 // Client side. open finds a port by name; call sends and blocks for the answer.
 i64 port_open(u32 name);
-i64 call(i32 port, const Message* request, Message* reply_out);
+// A deadline of 0 waits as long as it takes, which is what every caller did
+// before there was a choice. Anything else returns -2 when the time runs out.
+//
+// A client with no deadline is a client that trusts a server completely: one
+// that never answers stops the caller forever, and a caller stopped inside a
+// server that others depend on stops them too. That is how a single wedged
+// driver became a wedged machine, with nothing in the log to say so.
+i64 call(i32 port, const Message* request, Message* reply_out,
+         u64 deadline_ticks = 0);
 
 // Every request a dying task was waiting on, and every request it had accepted
 // and not answered, has to be unstuck - otherwise a server that crashes takes

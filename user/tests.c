@@ -770,6 +770,47 @@ static void test_ipc(void)
     ipc_call(port, &bye, &done);
     wait(0);
     check("the port goes when its server does", port_open(IPC_TEST_PORT) < 0);
+
+    /* A call that nobody will ever answer.
+     *
+     * The port is this process's own, so the request is queued and then left:
+     * the only task that could take it is the one sitting in the call. That is
+     * the shape of the failure this deadline exists for - a server that has
+     * stopped answering, rather than one that is merely slow - and without a
+     * deadline this line would never return.
+     */
+    const int deaf = port_create(IPC_TEST_PORT + 1);
+    check("a port with nobody listening on it", deaf >= 0);
+    if (deaf < 0)
+        return;
+
+    struct ipc_message q2, a2;
+    memset(&q2, 0, sizeof(q2));
+    memset(&a2, 0, sizeof(a2));
+    const unsigned long before = uptime_ms();
+    const int gave_up = ipc_call_timeout(deaf, &q2, &a2, 200);
+    const unsigned long waited = uptime_ms() - before;
+    check("a call with a deadline gives up rather than waiting forever",
+          gave_up == -2);
+    /* Measured against the HPET, which is real time, rather than against the
+     * tick counter that decides when this wakes - the two ran at different
+     * speeds until the clock stopped being counted once per CPU, and a
+     * deadline checked against its own fast clock would have agreed with
+     * itself all the way through that. */
+    check("and gives up when it said it would, not sooner",
+          waited >= 150 && waited < 400);
+
+    /* The slot has to come back, and this is the part that is easy to get
+     * wrong quietly: a leak of one request per timeout is invisible until the
+     * table is full, and then every call in the system fails at once with no
+     * hint of which one spent the slots. Sixty-four is the whole table, so a
+     * hundred timeouts pass only if each one returned what it took. */
+    int all_gave_up = 1;
+    for (int i = 0; i < 100 && all_gave_up; ++i)
+        if (ipc_call_timeout(deaf, &q2, &a2, 20) != -2)
+            all_gave_up = 0;
+    check("a timed-out call returns its slot to the table", all_gave_up);
+    port_destroy(deaf);
 }
 
 /* The driver ABI: what a program in ring 3 can be given so that it can be a

@@ -19,6 +19,21 @@ enum class State : u8 {
     Taken,          // a server has it and owes an answer
     Answered,       // the answer is here; the caller has not collected it yet
     Abandoned,      // the other end died; collect an error and move on
+    // The caller stopped waiting - it ran out of time, or a signal arrived -
+    // while a server still holds the request and still owes an answer.
+    //
+    // This is not Abandoned with the ends swapped. Abandoned is addressed to
+    // the caller, which is still asleep on the channel and which frees the
+    // slot when it wakes and finds it. Here the caller has already gone, so
+    // there is nobody to read the state or return the slot, and the server is
+    // about to write an answer into a request nothing is waiting for. The slot
+    // belongs to the server from here: it is freed when the answer arrives and
+    // is thrown away, or when the server dies still owing it.
+    //
+    // Without the distinction a timeout would leak a slot every time, because
+    // the caller cannot free what the server may still be writing to, and the
+    // server would refuse an unfamiliar state and leave it as it found it.
+    Dropped,
 };
 
 struct Request {
@@ -99,7 +114,34 @@ i64 port_destroy(i32 port)
     return 0;
 }
 
-i64 call(i32 port, const Message* request, Message* reply_out)
+// How long to sleep to reach a given moment.
+//
+// block_on_until takes the length of a nap, not the moment to wake up at, and
+// the difference is not visible at the call site because both are counts of
+// ticks. Handing it a deadline asks for a nap of however many ticks the
+// machine has been up - a wake at roughly twice the uptime, which is to say
+// never. recv did this from the day it grew a deadline: a port with traffic
+// on it still returned -2, because a message woke the task and the clock was
+// checked on the way round, and an idle port - the only kind whose timeout
+// matters - waited forever.
+static u64 nap_until(u64 deadline_ticks)
+{
+    const u64 now = timer::ticks();
+    return deadline_ticks > now ? deadline_ticks - now : 1;
+}
+
+// Stop waiting for an answer, and leave the slot in whichever hand can still
+// account for it. Queued means no server ever took it, so nothing will write
+// here and it goes straight back. Taken means one is working on it and will
+// write into this body, so it stays reserved until that write happens.
+static i64 stop_waiting(Request& r, i64 code)
+{
+    r.state = r.state == State::Taken ? State::Dropped : State::Free;
+    return code;
+}
+
+i64 call(i32 port, const Message* request, Message* reply_out,
+         u64 deadline_ticks)
 {
     if (!valid_port(port) || request == nullptr || reply_out == nullptr)
         return -1;
@@ -127,15 +169,24 @@ i64 call(i32 port, const Message* request, Message* reply_out)
     // going to sleep on it.
     scheduler::wake(port_channel(port));
     while (r.state != State::Answered && r.state != State::Abandoned) {
-        scheduler::block_on(request_channel(handle));
-        if (scheduler::signal_pending()) {
-            // Abandoned rather than left queued: the server may still answer,
-            // and it must not write into a slot this caller has stopped
-            // watching. Freeing it here would let the next caller take the
-            // same slot and receive the previous one's reply.
-            r.state = State::Abandoned;
-            return -1;
+        if (deadline_ticks == 0) {
+            scheduler::block_on(request_channel(handle));
+        } else {
+            if (timer::ticks() >= deadline_ticks)
+                return stop_waiting(r, -2);
+            scheduler::block_on_until(request_channel(handle),
+                                      nap_until(deadline_ticks));
         }
+        // The answer first, before either reason for giving up. A reply that
+        // landed in the same instant the clock ran out is a completed exchange,
+        // and throwing it away to report a timeout would be a lie about a
+        // request that was actually served.
+        if (r.state == State::Answered || r.state == State::Abandoned)
+            break;
+        if (deadline_ticks != 0 && timer::ticks() >= deadline_ticks)
+            return stop_waiting(r, -2);
+        if (scheduler::signal_pending())
+            return stop_waiting(r, -1);
     }
 
     const bool ok = r.state == State::Answered;
@@ -196,7 +247,8 @@ i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
         } else {
             if (timer::ticks() >= deadline_ticks)
                 return -2;      // the wait ran out; the caller has work to do
-            scheduler::block_on_until(port_channel(port), deadline_ticks);
+            scheduler::block_on_until(port_channel(port),
+                                      nap_until(deadline_ticks));
             if (!valid_port(port))
                 return -1;
             // Take before deciding the wait expired, and *return* what was
@@ -221,6 +273,16 @@ i64 reply(i32 handle, const Message* msg)
     if (handle < 0 || handle >= static_cast<i32>(kMaxRequests) || msg == nullptr)
         return -1;
     Request& r = g_requests[handle];
+    if (r.state == State::Dropped && r.server_pid == scheduler::current_pid()) {
+        // The caller gave up while this was being worked on. The slot was held
+        // open only so this write had somewhere safe to land; now that the
+        // answer is here and unwanted, it can go back. Reported as a failure
+        // because that is what it is - the work was done and delivered to
+        // nobody - and a server that only ever ignored this value carries on
+        // exactly as before.
+        r.state = State::Free;
+        return -1;
+    }
     if (r.state != State::Taken || r.server_pid != scheduler::current_pid())
         return -1;
     memcpy(&r.body, msg, sizeof(Message));
@@ -242,11 +304,18 @@ void abandon(u32 pid)
         // A server that died owing an answer, or a caller that died waiting for
         // one. Either way the exchange cannot complete, and leaving it in place
         // would hold a slot and a sleeping task forever.
-        if (r.server_pid == pid && r.state == State::Taken) {
+        if (r.server_pid == pid && r.state == State::Dropped) {
+            r.state = State::Free;      // held for an answer that will not come
+        } else if (r.server_pid == pid && r.state == State::Taken) {
             r.state = State::Abandoned;
             scheduler::wake(request_channel(static_cast<i32>(i)));
         } else if (r.caller_pid == pid) {
-            r.state = State::Free;
+            // Freeing this outright was wrong while a server still held it.
+            // The slot would go back to the pool with a reply still coming,
+            // and if the next request landed in it and went to the same
+            // server, that server's stale answer would arrive with a handle
+            // that now names somebody else's request.
+            r.state = r.state == State::Taken ? State::Dropped : State::Free;
         }
     }
 }

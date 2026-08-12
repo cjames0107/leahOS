@@ -22,6 +22,13 @@ int ipc_call(int port, const struct ipc_message* request,
     return (int)__syscall(SYS_ipccall, port, (long)request, (long)reply, 0, 0);
 }
 
+int ipc_call_timeout(int port, const struct ipc_message* request,
+                     struct ipc_message* reply, unsigned long ms)
+{
+    return (int)__syscall(SYS_ipccall, port, (long)request, (long)reply,
+                          (long)ms, 0);
+}
+
 int ipc_recv(int port, struct ipc_message* out, unsigned* caller_pid)
 {
     return (int)__syscall(SYS_ipcrecv, port, (long)out, (long)caller_pid, 0, 0);

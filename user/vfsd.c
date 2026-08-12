@@ -81,6 +81,10 @@ static struct blk_shared* disk_buffer(unsigned dev)
     return dev >= BLK_AHCI_BASE ? g_sectors2 : g_sectors;
 }
 
+/* Long enough that no working transfer reaches it, short enough that a driver
+ * which has stopped answering is reported rather than waited on. */
+#define DISK_TIMEOUT_MS 5000
+
 static int disk_read(unsigned long lba, unsigned count, unsigned dev)
 {
     struct ipc_message q, a;
@@ -95,7 +99,12 @@ static int disk_read(unsigned long lba, unsigned count, unsigned dev)
     q.word[1] = (long)count;
     q.word[2] = (long)local;
     q.word[3] = (long)disk_slot();
-    if (ipc_call(port, &q, &a) != 0 || a.word[0] != 0)
+    /* Bounded, because this server is what everything else waits on. A disk
+     * driver that stops answering used to stop this loop, and stopping this
+     * loop stops every process with a file open - a machine that is idle,
+     * silent, and faulting nowhere, which is the hardest kind of failure to
+     * read. Reaching the limit means the driver is gone, not slow. */
+    if (ipc_call_timeout(port, &q, &a, DISK_TIMEOUT_MS) != 0 || a.word[0] != 0)
         return -1;
     /* Bring it into this server's own buffer, so everything above here reads
      * from one place regardless of which driver answered. */
@@ -426,7 +435,7 @@ static int disk_write(unsigned long lba, unsigned count, unsigned dev)
     q.word[1] = (long)count;
     q.word[2] = (long)local;
     q.word[3] = (long)disk_slot();
-    if (ipc_call(port, &q, &a) != 0 || a.word[0] != 0)
+    if (ipc_call_timeout(port, &q, &a, DISK_TIMEOUT_MS) != 0 || a.word[0] != 0)
         return -1;
     return 0;
 }

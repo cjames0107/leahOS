@@ -59,5 +59,11 @@ int port_open(unsigned name);
 /* Sends and blocks until the answer arrives. -1 if the server died first. */
 int ipc_call(int port, const struct ipc_message* request,
              struct ipc_message* reply);
+/* The same, but gives up after `ms` and returns -2 rather than waiting on a
+ * server that may never answer. Worth using wherever the caller is itself a
+ * server: waiting forever there does not stall one process, it stalls every
+ * process that was waiting on that one. */
+int ipc_call_timeout(int port, const struct ipc_message* request,
+                     struct ipc_message* reply, unsigned long ms);
 
 #endif
