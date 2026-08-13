@@ -72,6 +72,13 @@ static unsigned checksum(const uint8_t* data, unsigned length)
     return (~sum) & 0xFFFF;
 }
 
+/* Long enough that no working card reaches it, short enough that a driver
+ * which has stopped answering is reported rather than waited on. Sending is
+ * the hot path, so this is the one that decides whether a dead card takes the
+ * network stack down with it; attaching happens once, and can afford longer. */
+#define NIC_SEND_TIMEOUT_MS   2000
+#define NIC_ATTACH_TIMEOUT_MS 5000
+
 static int send_frame(const uint8_t* frame, unsigned length)
 {
     memcpy((void*)g_net->tx.data, frame, length);
@@ -80,7 +87,13 @@ static int send_frame(const uint8_t* frame, unsigned length)
     memset(&a, 0, sizeof(a));
     q.tag = NIC_SEND;
     q.word[0] = (long)length;
-    if (ipc_call(g_nic_port, &q, &a) != 0 || a.word[0] != 0)
+    /* Bounded, because this server is what every program's network is made
+     * of. A card driver that stops answering used to stop this loop, and
+     * stopping this loop stops every socket in the system - which looks like
+     * the network being down rather than like one process being stuck, and
+     * leaves nothing in the log to say which it was. */
+    if (ipc_call_timeout(g_nic_port, &q, &a, NIC_SEND_TIMEOUT_MS) != 0 ||
+        a.word[0] != 0)
         return -1;
     ++g_out;
     return 0;
@@ -1598,7 +1611,11 @@ int main(void)
     memset(&q, 0, sizeof(q));
     memset(&a, 0, sizeof(a));
     q.tag = NIC_ATTACH;
-    if (ipc_call(g_nic_port, &q, &a) != 0) {
+    /* The startup handshake. Without a bound, a driver that claimed the port
+     * and then died before answering would leave this here forever, and the
+     * message below - which is the whole point of checking - would never be
+     * printed. */
+    if (ipc_call_timeout(g_nic_port, &q, &a, NIC_ATTACH_TIMEOUT_MS) != 0) {
         printf("netd: the driver would not attach\n");
         return 1;
     }
