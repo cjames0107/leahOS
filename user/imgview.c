@@ -191,7 +191,11 @@ static void draw(void)
                 const double sx = left + (double)x * step;
                 if (sx < 0.0 || sx >= (double)g_iw)
                     continue;
-                dst[x] = src[(unsigned)sx] & 0xFFFFFF;
+                /* Opaque, explicitly. Stripping the alpha byte used to mean
+                 * "there is no alpha here"; since the server began reading
+                 * that byte it means "this pixel is not there", so every
+                 * picture became a hole the shape of itself. */
+                dst[x] = 0xFF000000u | (src[(unsigned)sx] & 0xFFFFFF);
             }
         }
     }

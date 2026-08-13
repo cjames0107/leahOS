@@ -54,7 +54,7 @@ static uint32_t term_bg(void)
 }
 #define BG      term_bg()
 #define FG      0xC0C0C0
-#define CURSOR  0x00A000
+#define CURSOR  0xFF00A000
 
 /* The sixteen colours every terminal has had since the VT100's descendants,
  * in the shades the PC text mode used - which is what anything sending these
