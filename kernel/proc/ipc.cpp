@@ -185,8 +185,12 @@ i64 call(i32 port, const Message* request, Message* reply_out,
             break;
         if (deadline_ticks != 0 && timer::ticks() >= deadline_ticks)
             return stop_waiting(r, -2);
+        // -3, the same as recv uses, rather than -1. A signal arriving is not
+        // the server having died, and the caller can tell them apart only if
+        // they arrive as different numbers - one is worth retrying and the
+        // other is not.
         if (scheduler::signal_pending())
-            return stop_waiting(r, -1);
+            return stop_waiting(r, -3);
     }
 
     const bool ok = r.state == State::Answered;

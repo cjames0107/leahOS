@@ -77,6 +77,10 @@ i64 port_open(u32 name);
 // that never answers stops the caller forever, and a caller stopped inside a
 // server that others depend on stops them too. That is how a single wedged
 // driver became a wedged machine, with nothing in the log to say so.
+//
+// 0 on success. -2 when the deadline passes, -3 when a signal arrives, -1 when
+// the server is gone or there was never one. The three are separate because
+// only the first two leave anything worth retrying.
 i64 call(i32 port, const Message* request, Message* reply_out,
          u64 deadline_ticks = 0);
 

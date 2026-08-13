@@ -810,6 +810,40 @@ static void test_ipc(void)
         if (ipc_call_timeout(deaf, &q2, &a2, 20) != -2)
             all_gave_up = 0;
     check("a timed-out call returns its slot to the table", all_gave_up);
+
+    /* A signal arriving mid-call, told apart from the two other ways to fail.
+     *
+     * All three used to be -1, which meant a caller could not tell "the server
+     * is gone" from "you were interrupted" from "you ran out of time" - and
+     * only the first of those is worth giving up on. The child signals a
+     * handler that does nothing, so this process survives the signal and can
+     * report what the call returned rather than dying with the answer. */
+    signal(SIGUSR1, catcher);
+    const unsigned me = getpid();       /* carried across the fork in memory,
+                                           this libc having no getppid */
+    const int helper = fork();
+    if (helper == 0) {
+        msleep(300);
+        kill((int)me, SIGUSR1);
+        exit(0);
+    }
+    struct ipc_message q3, a3;
+    memset(&q3, 0, sizeof(q3));
+    memset(&a3, 0, sizeof(a3));
+    /* Ten seconds, so a return here is the signal and not the deadline. */
+    const int interrupted = ipc_call_timeout(deaf, &q3, &a3, 10000);
+    wait(0);
+    signal(SIGUSR1, SIG_DFL);
+    check("a signal during a call is reported apart from a deadline",
+          interrupted == -3);
+
+    /* And the slot survives that too: an interrupted call that kept its slot
+     * would be a leak on every Ctrl-C. */
+    int still_working = 1;
+    for (int i = 0; i < 100 && still_working; ++i)
+        if (ipc_call_timeout(deaf, &q3, &a3, 20) != -2)
+            still_working = 0;
+    check("an interrupted call returns its slot too", still_working);
     port_destroy(deaf);
 }
 

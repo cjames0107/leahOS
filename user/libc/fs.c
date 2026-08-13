@@ -200,9 +200,17 @@ static int vfs_call(unsigned tag, const char* path, long w1, long w2,
     memset(reply, 0, sizeof(*reply));
     /* A filesystem that has stopped answering is an I/O error, and reporting
      * it as one is the whole point: every caller above here already handles a
-     * failed read, and none of them handles never returning from one. */
-    if (ipc_call_timeout(port, &q, reply, vfs_deadline(tag)) != 0) {
-        errno = EIO;
+     * failed read, and none of them handles never returning from one.
+     *
+     * Which kind of failure it was is kept, though, because the two say
+     * opposite things about trying again. A deadline means vfsd is there and
+     * did not finish in time - the request may well succeed on a second ask.
+     * Anything else means it is gone, and asking again is asking nobody. They
+     * were both EIO until now, which threw that away at the only point where
+     * it is still known. */
+    const int r = ipc_call_timeout(port, &q, reply, vfs_deadline(tag));
+    if (r != 0) {
+        errno = r == -2 ? ETIMEDOUT : r == -3 ? EINTR : EIO;
         return -1;
     }
     return 0;
@@ -1197,8 +1205,9 @@ static int vfs_pair(unsigned tag, const char* first, const char* second)
     q.shm_bytes = sizeof(struct vfs_shared);
 
     memset(&a, 0, sizeof(a));
-    if (ipc_call_timeout(g_vfs, &q, &a, VFS_TIMEOUT_MS) != 0) {
-        errno = EIO;
+    const int two_names = ipc_call_timeout(g_vfs, &q, &a, VFS_TIMEOUT_MS);
+    if (two_names != 0) {
+        errno = two_names == -2 ? ETIMEDOUT : two_names == -3 ? EINTR : EIO;
         return -1;
     }
     return from_vfs(a.word[0]) < 0 ? -1 : 0;
@@ -1451,8 +1460,12 @@ int rename(const char* oldpath, const char* newpath)
     q.bytes = at;
 
     memset(&a, 0, sizeof(a));
-    return ipc_call_timeout(g_vfs, &q, &a, VFS_TIMEOUT_MS) == 0 &&
-           a.word[0] >= 0 ? 0 : -1;
+    const int sent = ipc_call_timeout(g_vfs, &q, &a, VFS_TIMEOUT_MS);
+    if (sent != 0) {
+        errno = sent == -2 ? ETIMEDOUT : sent == -3 ? EINTR : EIO;
+        return -1;
+    }
+    return a.word[0] >= 0 ? 0 : -1;
 }
 
 int chmod(const char* path, unsigned mode)
