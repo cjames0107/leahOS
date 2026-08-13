@@ -43,7 +43,7 @@ EXT_MIB         := 1024           # the ext4 root filesystem on disk 1
 # Override on the command line, e.g. `make run MEM=2G` or
 # `make headless TIMEOUT=15`.
 MEM        ?= 1024M
-CPUS       ?= 1
+CPUS       ?= 2
 TIMEOUT    ?= 6
 # Where the AC'97 controller's output goes. `coreaudio` is the host's speakers;
 # `none` still presents the device to the guest but throws the samples away,
@@ -131,7 +131,7 @@ USRBIN_PROGRAMS := hello gui tone lspci ping ping6 arp nslookup fetch fetch6 env
                  screenshot tests fsbench ipctest nictest nettest blktest vfstest \
                  mvtest v6test churn
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player \
-                diskutil netutil calendar resmon console
+                diskutil netutil calendar resmon console web
 USER_PROGRAMS := $(SBIN_PROGRAMS) $(BIN_PROGRAMS) $(USRBIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
 STAGE1_BIN := $(BUILD)/stage1.bin
