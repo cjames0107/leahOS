@@ -1248,6 +1248,25 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             files::open_fifo(frame->rdi, frame->rsi != 0, frame->rdx != 0));
         break;
 
+    case KLog: {
+        // rdi is where the caller keeps its position - read and written, so
+        // that "everything new since last time" costs one call and no search.
+        // The length is clamped rather than refused: a caller asking for more
+        // than it has room for is a bug, but truncating is a better answer
+        // than a failure it will not check.
+        const u64 max = frame->rdx > 4096 ? 4096 : frame->rdx;
+        if (!user_range_ok(frame->rdi, sizeof(u64)) ||
+            !user_range_ok(frame->rsi, max)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = static_cast<u64>(console::log_read(
+            reinterpret_cast<u64*>(frame->rdi),
+            reinterpret_cast<char*>(frame->rsi),
+            static_cast<usize>(max)));
+        break;
+    }
+
     case LoadAvg: {
         if (!user_range_ok(frame->rdi, sizeof(u64) * 3)) {
             frame->rax = static_cast<u64>(-1);

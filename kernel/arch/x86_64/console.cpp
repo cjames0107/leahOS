@@ -60,10 +60,29 @@ void serial_put(char c)
 // Everything inside this file goes through here; the public entry points take
 // the lock, once, at the outermost call - taking it again further in would
 // deadlock, since a plain spinlock has no notion of already owning it.
+// What the machine has said, kept so that something can read it back.
+//
+// Until now every kernel message went to the serial line and the screen and
+// then ceased to exist: a fault reported during boot could be read only by
+// whoever was watching at the time. That is the whole reason a system log
+// exists, and the reason there was no Console to show one.
+//
+// A flat ring of bytes rather than a list of lines, because this is written to
+// from inside the console lock at interrupt time, and a byte ring needs no
+// allocation and cannot fail. Readers are given a position rather than a
+// pointer, so one that falls behind is fast-forwarded to the oldest byte still
+// held instead of reading memory that has since been overwritten.
+constexpr usize kLogSize = 32768;               // a power of two, for the mask
+char g_log[kLogSize];
+u64  g_log_head;                                // bytes ever written, not bytes held
+
 void put_locked(char c)
 {
     if (c == '\n')
         serial_put('\r');
+    // Recorded before the wire, so a message is in the log even if the serial
+    // port is absent or wedged mid-character.
+    g_log[g_log_head++ & (kLogSize - 1)] = c;
     serial_put(c);
 }
 
@@ -124,6 +143,26 @@ void clear() {}
 void suspend_display(bool) {}
 void grant_display_to(u32) {}
 void reclaim_display(u32) {}
+
+// Read out what was said, from `*from` onwards.
+//
+// The position is the caller's and is a count of bytes since boot, which makes
+// "what is new since I last looked" a subtraction rather than a search. A
+// reader that has fallen further behind than the ring is long gets the oldest
+// byte still held: losing the middle of a log is unavoidable once it wraps,
+// and silently returning stale bytes instead would be worse.
+usize log_read(u64* from, char* out, usize max)
+{
+    sync::IrqScopedLock guard(g_console_lock);
+    const u64 head = g_log_head;
+    const u64 oldest = head > kLogSize ? head - kLogSize : 0;
+    u64 at = *from < oldest ? oldest : *from;
+    usize n = 0;
+    while (at < head && n < max)
+        out[n++] = g_log[at++ & (kLogSize - 1)];
+    *from = at;
+    return n;
+}
 
 void put(char c)
 {

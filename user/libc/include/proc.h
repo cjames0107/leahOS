@@ -55,4 +55,14 @@ int cpu_info(struct cpu_stat* out, int max);
  * keeps them has no floating point; the caller can divide. */
 int load_average(unsigned long out[3]);
 
+/* The kernel's own messages, read back from the ring it keeps.
+ *
+ * `from` is a byte position since boot, kept by the caller: start at 0 for the
+ * oldest still held, and pass back what this leaves to get only what is new.
+ * A reader that falls further behind than the ring is long is fast-forwarded,
+ * so this can never return bytes that have been overwritten. Returns how many
+ * bytes were copied, which is 0 when nothing has been said since last time. */
+unsigned long klog_read(unsigned long long* from, char* out,
+                        unsigned long max);
+
 #endif /* _PROC_H */

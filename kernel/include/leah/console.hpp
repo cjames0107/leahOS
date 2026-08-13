@@ -38,6 +38,11 @@ void grant_display_to(u32 tgid);
 // desktop that died must not leave the machine with no visible console.
 void reclaim_display(u32 tgid);
 
+// The kernel's own messages, kept in a ring so they can be read back after the
+// moment they were printed. `from` is a byte position since boot: pass 0 to
+// start at the oldest still held, and pass back what it leaves to continue.
+usize log_read(u64* from, char* out, usize max);
+
 void put(char c);
 void write(const char* str);
 

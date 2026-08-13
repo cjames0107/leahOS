@@ -20,3 +20,9 @@ int load_average(unsigned long out[3])
 {
     return (int)__syscall(SYS_loadavg, (long)out, 0, 0, 0, 0);
 }
+
+unsigned long klog_read(unsigned long long* from, char* out, unsigned long max)
+{
+    const long n = __syscall(SYS_klog, (long)from, (long)out, (long)max, 0, 0);
+    return n < 0 ? 0 : (unsigned long)n;
+}

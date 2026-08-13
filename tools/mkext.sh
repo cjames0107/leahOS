@@ -171,6 +171,7 @@ stage_app "Disk Utility"    diskutil ""      ""              "Verify" "Repair"
 stage_app "Network Utility" netutil  ""      ""              "Ping" "Look up"
 stage_app Calendar  calendar ""         ""              "Today"
 stage_app "Resource Monitor" resmon  ""      ""              ""
+stage_app Console   console  ""         ""              "Jump to end"
 
 # The manual. Plain text: troff is a typesetting language, and the reason
 # manual pages are written in it is that in 1971 the same source had to drive a

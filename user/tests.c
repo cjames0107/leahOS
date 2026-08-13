@@ -24,6 +24,7 @@
 #include <driver.h>
 #include <image.h>
 #include <ipc.h>
+#include <proc.h>
 #include <math.h>
 #include <paths.h>
 #include <time.h>
@@ -834,6 +835,30 @@ static void test_ipc(void)
     const int interrupted = ipc_call_timeout(deaf, &q3, &a3, 10000);
     wait(0);
     signal(SIGUSR1, SIG_DFL);
+    /* The kernel's message ring.
+     *
+     * Read from position zero, which is the oldest byte still held. The
+     * machine says a great deal while it boots, so a ring that works has
+     * something in it by the time this runs - and it must contain a line the
+     * kernel actually printed, not merely be non-empty, or a ring of zeroes
+     * would pass. */
+    {
+        static char log[4096];
+        unsigned long long at = 0;
+        const unsigned long got = klog_read(&at, log, sizeof(log) - 1);
+        log[got < sizeof(log) ? got : sizeof(log) - 1] = '\0';
+        check("the kernel keeps what it has said", got > 0);
+        check("and it reads back as the messages it printed",
+              strstr(log, "leahOS") != 0 || strstr(log, "vfsd") != 0 ||
+              strstr(log, "ahci") != 0);
+        /* The position advances, so "what is new" is a subtraction. A reader
+         * that got the same bytes twice would double every line on screen. */
+        const unsigned long long was = at;
+        char again[64];
+        klog_read(&at, again, sizeof(again));
+        check("a reader's position only moves forward", at >= was);
+    }
+
     check("a signal during a call is reported apart from a deadline",
           interrupted == -3);
 
