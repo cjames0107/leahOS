@@ -167,6 +167,10 @@ stage_app Tasks     taskman  tasks      ""              "End task"
 stage_app Clock     clock    ""         ""              ""
 stage_app Elements  uitest   elements   ""              ""
 stage_app Music     player   ""         ".WAV .MP3 .OGG" "Open sound..."
+stage_app "Disk Utility"    diskutil ""      ""              "Verify" "Repair"
+stage_app "Network Utility" netutil  ""      ""              "Ping" "Look up"
+stage_app Calendar  calendar ""         ""              "Today"
+stage_app "Resource Monitor" resmon  ""      ""              ""
 
 # The manual. Plain text: troff is a typesetting language, and the reason
 # manual pages are written in it is that in 1971 the same source had to drive a

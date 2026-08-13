@@ -53,7 +53,15 @@ def body(t):
 
     # And a second disk on the same controller, which is what multi-port
     # support is for: disk 5 is the AHCI driver's second port.
-    t.expect("mount 5 /sata", "")
+    # Asserting the mount happened, rather than that the command printed
+    # nothing. An empty expectation passes when the command fails: mount
+    # reports its failures on stderr, which this shell does not send to the
+    # serial line, so a disk that would not attach looked exactly like one
+    # that did.
+    t.expect("mount 5 /sata; mount", "on /sata")
+    # Two reads, so a failure says which half is broken: the same cat on the
+    # root filesystem, then the one on the newly mounted disk.
+    t.expect("ls /sata/sata", "hello.txt")
     t.expect("cat /sata/sata/hello.txt", "came off the SATA disk")
     t.expect("mount -u /sata; echo detached", "detached")
 

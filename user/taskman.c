@@ -9,6 +9,13 @@
  * duty cycle: this system has no per-task clock, and the slice count is the
  * honest thing it does have. It is labelled as such rather than dressed up as
  * a percentage of wall time.
+ *
+ * The strip charts and the memory meter that used to sit above the list are in
+ * the Resource Monitor now. They answered a different question - "is the
+ * machine busy, and with what kind of work" rather than "what is running and
+ * can I stop it" - and keeping both here meant the list was always short and
+ * the charts were always small. What is left is the list, with the window to
+ * itself.
  */
 
 #include <dialog.h>
@@ -22,7 +29,7 @@
 #include <widget.h>
 #include <window.h>
 
-#define HEAD_H  84
+#define HEAD_H  30
 #define ROW_H   16
 #define MAX_P   96
 
@@ -37,19 +44,8 @@ static uint64_t g_delta[MAX_P];
 static uint64_t g_delta_total;
 static int g_sel = -1;
 static int g_scroll;
-static struct mem_info g_mem;
 static char g_note[96] = "right-click a task for actions";
 
-/* A history per processor, drawn as one strip chart each - which is the whole
- * reason for showing them separately. One combined line cannot tell "every core
- * half busy" from "one core pinned and the rest asleep", and those are different
- * problems. */
-#define HIST 120
-#define MAX_CPU 8
-static unsigned char g_hist[MAX_CPU][HIST];
-static int g_hist_at;
-static int g_cpus;
-static struct cpu_stat g_cpu[MAX_CPU], g_cpu_last[MAX_CPU];
 static int g_bar_drag;
 
 static const char* state_name(uint32_t s)
@@ -69,7 +65,6 @@ static void refresh(void)
 {
     const int n = proc_list(g_procs, MAX_P);
     g_n = n < 0 ? 0 : n;
-    mem_info(&g_mem);
 
     /* Match this sample against the last one by pid, so a task that exits does
      * not make its successor look enormously busy. */
@@ -85,22 +80,6 @@ static void refresh(void)
         g_last_pid[i] = i < g_n ? g_procs[i].pid : 0;
         g_last_ticks[i] = i < g_n ? g_procs[i].ticks : 0;
     }
-
-    /* Per processor, from the kernel's own counters rather than inferred from
-     * the task list: a slice is attributed where it was actually run. */
-    g_cpus = cpu_info(g_cpu, MAX_CPU);
-    if (g_cpus < 0)
-        g_cpus = 0;
-    for (int c = 0; c < g_cpus; ++c) {
-        const uint64_t db = g_cpu[c].busy > g_cpu_last[c].busy
-                          ? g_cpu[c].busy - g_cpu_last[c].busy : 0;
-        const uint64_t di = g_cpu[c].idle > g_cpu_last[c].idle
-                          ? g_cpu[c].idle - g_cpu_last[c].idle : 0;
-        const uint64_t tot = db + di;
-        g_hist[c][g_hist_at] = (unsigned char)(tot > 0 ? db * 100 / tot : 0);
-        g_cpu_last[c] = g_cpu[c];
-    }
-    g_hist_at = (g_hist_at + 1) % HIST;
 }
 
 static int rows_visible(void)
@@ -120,19 +99,6 @@ static void scroll_to(int first)
     g_scroll = first;
 }
 
-static void meter(int x, int y, int w, int h, uint64_t part, uint64_t whole,
-                  const char* label)
-{
-    wg_fill(x, y, w, h, WG_PAPER);
-    wg_bevel(x, y, w, h, 0);
-    if (whole > 0) {
-        int fill = (int)((part * (uint64_t)(w - 2)) / whole);
-        if (fill > w - 2) fill = w - 2;
-        wg_fill(x + 1, y + 1, fill, h - 2, WG_ACCENT);
-    }
-    wg_text(x + w + 8, y + (h - WG_GLYPH_H) / 2, label, WG_INK);
-}
-
 static void draw(void)
 {
     wg_theme();
@@ -140,40 +106,7 @@ static void draw(void)
 
     char line[96];
     snprintf(line, sizeof(line), "%d tasks", g_n);
-    wg_text(10, 8, line, WG_INK);
-
-    /* Memory, as a proportion of what the machine actually has. */
-    snprintf(line, sizeof(line), "%llu of %llu KiB",
-             (unsigned long long)(g_mem.used / 1024),
-             (unsigned long long)(g_mem.usable / 1024));
-    meter(10, 26, 160, 14, g_mem.used, g_mem.usable, line);
-
-    /* One strip chart per processor, side by side and oldest on the left. They
-     * are narrower the more there are, which keeps the header one height
-     * whatever the machine turns out to have. */
-    const int n = g_cpus > 0 ? g_cpus : 1;
-    const int total_w = HIST + 60;
-    const int each = (total_w / n) - 4;
-    const int cy = 8, ch = 46;
-    for (int c = 0; c < n; ++c) {
-        const int cx = (int)g_w - total_w - 10 + c * (each + 4);
-        if (each < 8)
-            break;
-        wg_fill(cx, cy, each, ch, 0x101820);
-        wg_bevel(cx, cy, each, ch, 0);
-        for (int i = 0; i < each; ++i) {
-            /* Take the most recent `each` samples, so a narrow chart shows the
-             * recent past rather than a squashed whole history. */
-            const int s_i = (g_hist_at - each + i + 2 * HIST) % HIST;
-            const int v = g_hist[c][s_i];
-            const int bar = v * (ch - 2) / 100;
-            if (bar > 0)
-                wg_fill(cx + i, cy + ch - 1 - bar, 1, bar, 0x40D040);
-        }
-        char lab[16];
-        snprintf(lab, sizeof(lab), "cpu %d", c);
-        wg_text(cx, cy + ch + 2, lab, WG_DIM);
-    }
+    wg_text(10, 8, line, WG_DIM);
 
     const int top = HEAD_H;
     wg_text(10, top - 16, "pid", WG_DIM);
