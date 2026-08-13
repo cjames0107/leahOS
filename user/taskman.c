@@ -128,7 +128,7 @@ static void draw(void)
             break;
         const int y = top + 2 + r * ROW_H;
         if (i == g_sel)
-            wg_fill(6, y, (int)g_w - 12, ROW_H, wg_sel_colour());
+            wg_row_select(6, y, (int)g_w - 12, ROW_H);
 
         snprintf(line, sizeof(line), "%u", g_procs[i].pid);
         wg_text(10, y, line, WG_INK);

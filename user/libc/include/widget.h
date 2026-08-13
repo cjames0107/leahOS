@@ -128,6 +128,11 @@ void wg_container(int x, int y, int w, int h, int pad);
 /* Full height, square, a shade apart from the content beside it. */
 void wg_sidebar(int x, int y, int w, int h);
 
+/* The selected row of a list. One shape for every list in the system: a
+ * brighter pane of the same material on the glass, the accent colour without
+ * it. Lists used to each draw their own and no two agreed. */
+void wg_row_select(int x, int y, int w, int h);
+
 /* Controls that belong together share one pill; anything doing a different
  * kind of job gets its own. `selected` is the pressed segment, or -1. */
 void wg_pill_group(int x, int y, int seg_w, int h, int count,

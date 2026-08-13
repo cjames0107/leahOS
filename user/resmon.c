@@ -289,7 +289,7 @@ static void draw(void)
     for (int i = 0; i < PANE_COUNT; ++i) {
         const int y = 34 + i * ROW_H;
         if (i == g_pane)
-            wg_fill(6, y - 4, SIDE_W - 12, ROW_H, wg_sel_colour());
+            wg_row_select(6, y - 4, SIDE_W - 12, ROW_H);
         wg_text(14, y, kPanes[i], wg_ink_colour());
     }
 

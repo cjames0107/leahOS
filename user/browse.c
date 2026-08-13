@@ -581,7 +581,7 @@ static void draw_icons(void)
         if (cy + CELL_H < top)
             continue;
         if (i == g_selected || g_marked[i])
-            wg_fill(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6, wg_sel_colour());
+            wg_row_select(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6);
         /* A bundle is drawn as the application it is, not as the directory it
          * happens to be made of. */
         entry_icon(cx + 26, cy, i, ICON_SIZE);
@@ -607,7 +607,7 @@ static void draw_list(void)
         if (y + ROW_H < top + ROW_H)
             continue;               /* under the column headings */
         if (i == g_selected || g_marked[i])
-            wg_fill(8, y, (int)g_w - 16, ROW_H, wg_sel_colour());
+            wg_row_select(8, y, (int)g_w - 16, ROW_H);
         const int dir = (g_entries[i].d_type == S_IFDIR) &&
                         !bundle_is_app(g_entries[i].d_name);
         entry_icon(11, y + 1, i, 16);
@@ -640,7 +640,7 @@ static void draw_tree(void)
         const struct row* r = &g_rows[i];
         const int x = 10 + r->depth * 16;
         if (i == g_selected)
-            wg_fill(8, y, (int)g_w - 16, ROW_H, wg_sel_colour());
+            wg_row_select(8, y, (int)g_w - 16, ROW_H);
         if (r->is_dir) {
             /* A twisty: a box with a minus when open, a plus when shut. */
             wg_fill(x, y + 4, 9, 9, WG_PAPER);

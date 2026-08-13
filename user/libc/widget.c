@@ -401,7 +401,14 @@ static int glass_on(void)
 uint32_t wg_base_colour(void)
 {
     const uint32_t face = g_ws != 0 ? (g_ws->theme.face & 0x00FFFFFFu) : WG_FACE;
-    return draw_over(0xFF000000u | face, 0x66FFFFFFu);
+    /* A quarter of a coat of white rather than two thirds.
+     *
+     * The heavier wash took every theme to within a few points of pure white,
+     * so a window was white whatever the desktop behind it looked like and the
+     * theme colour may as well not have existed. Left mostly alone, the face
+     * shows through as a tint - still light enough to read black text on, and
+     * recognisably the colour the theme asked for. */
+    return draw_over(0xFF000000u | face, 0x2AFFFFFFu);
 }
 
 /* Shift a colour toward black by `amount` out of 255, which is what "slightly
@@ -433,6 +440,29 @@ static void inner_glow(int x, int y, int w, int h, int radius)
 
     c.cy = y + h - band; c.ch = band;
     draw_round_rect_outline(&c, x, y, w, h, radius, 1, 0x24FFFFFFu);
+}
+
+/* A soft shadow under a floating control, for the glass only.
+ *
+ * On the glass a control is a pane of frosted white on a blurred backdrop, and
+ * without a shadow it has no depth - it reads as a lighter patch rather than as
+ * something sitting above. Opaque mode gets none: there is no depth to imply
+ * when every surface is the same flat sheet, and a drop shadow there just
+ * makes a crisp panel look smudged.
+ *
+ * Drawn as a few rings, each fainter and one pixel further out, which is a
+ * blur cheap enough to do per control per frame. */
+static void soft_shadow(int x, int y, int w, int h, int r)
+{
+    if (!glass_on())
+        return;
+    const struct surface c = canvas();
+    static const unsigned kRing[3] = { 0x26u, 0x16u, 0x0Au };
+    for (int i = 2; i >= 0; --i) {
+        const unsigned a = kRing[i];
+        draw_round_rect_outline(&c, x - i, y - i + 1, w + 2 * i, h + 2 * i,
+                                r + i, 1, (a << 24));
+    }
 }
 
 /* Source-over onto a buffer that may itself be see-through.
@@ -561,6 +591,29 @@ void wg_container(int x, int y, int w, int h, int pad)
     inner_glow(x, y, w, h, r);
 }
 
+/* The selected row, wherever a list has one.
+ *
+ * This exists because there were as many answers as there were lists: a white
+ * pill here, a flat blue rectangle there, a square-cornered wash somewhere
+ * else - each app reaching for wg_fill and picking its own shape. They were
+ * all "the selected thing", and they should look like it, so the shape lives
+ * here now and the lists ask for it by name.
+ *
+ * On the glass it is a brighter pane of the same frosted material, because a
+ * solid colour there would punch a hole in the blur. Opaque, it is the accent
+ * colour, which is the one place a strong colour belongs. */
+void wg_row_select(int x, int y, int w, int h)
+{
+    const struct surface c = canvas();
+    const int r = h / 2 > WG_RADIUS ? WG_RADIUS : h / 2;
+    if (glass_on()) {
+        glass_fill(x, y, w, h, r, 0x59FFFFFFu);
+        draw_round_rect_outline(&c, x, y, w, h, r, 1, 0x4DFFFFFFu);
+    } else {
+        draw_round_rect(&c, x, y, w, h, r, 0xFF000000u | g_sel);
+    }
+}
+
 /* A sidebar: full height, and a shade apart from the content beside it.
  *
  * Square on the outside because it runs into the window's own edges, which
@@ -597,10 +650,13 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
     const int w = seg_w * count;
     const int r = h / 2;
 
+    soft_shadow(x, y, w, h, r);
     if (glass_on())
         draw_round_rect(&c, x, y, w, h, r, 0x38FFFFFFu);
     else
-        draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 10));
+        /* Darker than it was: at ten counts off the base this was a control
+         * you had to look for against the window behind it. */
+        draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 26));
 
     /* The chosen segment, inside the pill rather than instead of it. */
     if (selected >= 0 && selected < count) {
@@ -615,8 +671,13 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
         draw_rect(&c, x + i * seg_w, y + 3, 1, h - 6,
                   glass_on() ? 0x24FFFFFFu : 0x18000000u);
 
-    draw_round_rect_outline(&c, x, y, w, h, r, 1,
-                            glass_on() ? 0x3AFFFFFFu : 0x22000000u);
+    /* An outline on the glass and none without it. The translucent white one
+     * is what gives a frosted pane an edge when the thing behind it could be
+     * any colour; the dark one it used to draw when opaque was a drawn border
+     * on a design that otherwise has none, and it made every control look
+     * stuck onto the window rather than part of it. */
+    if (glass_on())
+        draw_round_rect_outline(&c, x, y, w, h, r, 1, 0x3AFFFFFFu);
     inner_glow(x, y, w, h, r);
 
     for (int i = 0; i < count; ++i) {
@@ -624,7 +685,8 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
             continue;
         const int tw = wg_text_width(labels[i]);
         wg_text(x + i * seg_w + (seg_w - tw) / 2,
-                y + (h - wg_text_height()) / 2, labels[i], 0xF0101810u);
+                y + (h - wg_text_height()) / 2, labels[i],
+                glass_on() ? 0xF0101810u : wg_ink_colour());
     }
 }
 
@@ -643,13 +705,23 @@ void wg_button(int x, int y, int w, int h, const char* label, int down)
      * by a pixel when pressed - the old chrome shifted its label down and
      * right to fake the button going in, and a change of tone says it without
      * the text jumping. */
-    draw_round_rect(&c, x, y, w, h, WG_RADIUS,
-                    down ? 0x8CFFFFFFu : 0x4DFFFFFFu);
-    draw_round_rect_outline(&c, x, y, w, h, WG_RADIUS, 1, 0x40FFFFFFu);
+    soft_shadow(x, y, w, h, WG_RADIUS);
+    if (glass_on()) {
+        draw_round_rect(&c, x, y, w, h, WG_RADIUS,
+                        down ? 0x8CFFFFFFu : 0x4DFFFFFFu);
+        draw_round_rect_outline(&c, x, y, w, h, WG_RADIUS, 1, 0x40FFFFFFu);
+    } else {
+        /* A wash of white over a window that is already almost white is not a
+         * button, it is a rumour of one. Opaque, it gets a tone of its own and
+         * no outline: the tone is the edge. */
+        draw_round_rect(&c, x, y, w, h, WG_RADIUS,
+                        darken(wg_base_colour(), down ? 46 : 26));
+    }
+    inner_glow(x, y, w, h, WG_RADIUS);
 
     const int tw = wg_text_width(label);
     wg_text(x + (w - tw) / 2, y + (h - wg_text_height()) / 2, label,
-            0xF0101810u);
+            glass_on() ? 0xF0101810u : wg_ink_colour());
 }
 
 /* --- scrollbars ----------------------------------------------------------- */

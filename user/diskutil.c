@@ -147,7 +147,7 @@ static void draw(void)
     for (int i = 0; i < g_n; ++i) {
         const int y = 34 + i * ROW_H;
         if (i == g_sel)
-            wg_fill(6, y - 4, SIDE_W - 12, ROW_H, wg_sel_colour());
+            wg_row_select(6, y - 4, SIDE_W - 12, ROW_H);
         wg_text_clipped(14, y, g_vol[i].at, wg_ink_colour(), SIDE_W - 28);
         wg_text_clipped(14, y + 14, g_vol[i].device, WG_DIM, SIDE_W - 28);
     }
