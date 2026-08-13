@@ -141,6 +141,39 @@ static int vfs_port(void)
     return g_vfs;
 }
 
+/* How long to wait on the filesystem before calling it dead.
+ *
+ * Two tiers, because one number cannot be right for both kinds of request.
+ * Most of them are about a single file and take about as long as the disk
+ * reads they need. A few - checking the filesystem, flushing it, mounting one,
+ * truncating a large file - do work proportional to the whole disk, and a
+ * caller that asked for those is expecting to wait.
+ *
+ * Measured before they were chosen. On this machine the slowest of them
+ * finished in 4.6 seconds end to end, and most of that was the shell round
+ * trip around it; the limits below sit far above anything real, because their
+ * job is to tell a working system from a stopped one, not to police latency.
+ *
+ * Both tiers are finite. An unbounded wait is what this is here to remove, and
+ * leaving one operation without a limit leaves the hole open for that one.
+ */
+#define VFS_TIMEOUT_MS      30000
+#define VFS_TIMEOUT_LONG_MS 300000
+
+static unsigned long vfs_deadline(unsigned tag)
+{
+    switch (tag) {
+    case VFS_FSCK:                  /* every inode and every block */
+    case VFS_SYNC:                  /* every dirty block held back */
+    case VFS_MOUNT:
+    case VFS_UMOUNT:
+    case VFS_TRUNC:                 /* every block of what may be a huge file */
+        return VFS_TIMEOUT_LONG_MS;
+    default:
+        return VFS_TIMEOUT_MS;
+    }
+}
+
 static int vfs_call(unsigned tag, const char* path, long w1, long w2,
                     struct ipc_message* reply)
 {
@@ -165,7 +198,14 @@ static int vfs_call(unsigned tag, const char* path, long w1, long w2,
     q.bytes = n + 1;
 
     memset(reply, 0, sizeof(*reply));
-    return ipc_call(port, &q, reply);
+    /* A filesystem that has stopped answering is an I/O error, and reporting
+     * it as one is the whole point: every caller above here already handles a
+     * failed read, and none of them handles never returning from one. */
+    if (ipc_call_timeout(port, &q, reply, vfs_deadline(tag)) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
 }
 
 /* --- paths -------------------------------------------------------------------
@@ -1157,7 +1197,7 @@ static int vfs_pair(unsigned tag, const char* first, const char* second)
     q.shm_bytes = sizeof(struct vfs_shared);
 
     memset(&a, 0, sizeof(a));
-    if (ipc_call(g_vfs, &q, &a) != 0) {
+    if (ipc_call_timeout(g_vfs, &q, &a, VFS_TIMEOUT_MS) != 0) {
         errno = EIO;
         return -1;
     }
@@ -1411,7 +1451,8 @@ int rename(const char* oldpath, const char* newpath)
     q.bytes = at;
 
     memset(&a, 0, sizeof(a));
-    return ipc_call(g_vfs, &q, &a) == 0 && a.word[0] >= 0 ? 0 : -1;
+    return ipc_call_timeout(g_vfs, &q, &a, VFS_TIMEOUT_MS) == 0 &&
+           a.word[0] >= 0 ? 0 : -1;
 }
 
 int chmod(const char* path, unsigned mode)
