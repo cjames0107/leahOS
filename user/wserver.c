@@ -151,6 +151,8 @@ static struct rect g_clip;
 static int g_cursor_x, g_cursor_y;
 static int g_last_cursor_x = -1, g_last_cursor_y = -1;
 static int g_dragging = -1, g_drag_dx, g_drag_dy;
+/* The last move_request seen per window, so a bump is noticed once. */
+static uint32_t g_move_seen[WS_MAX_WINDOWS];
 /* Resizing draws a rubber-band outline and commits on release, rather than
  * reallocating the client's segment on every pixel of pointer movement. */
 static int g_resizing = -1;
@@ -400,10 +402,28 @@ static unsigned frame_width(int slot)
 {
     return is_desktop(slot) ? g_width[slot] : g_width[slot] + BORDER * 2;
 }
+/* Whether this window's own pixels cover the title strip. When they do, the
+ * client's buffer is TITLE_HEIGHT taller and everything that measured from
+ * below the chrome measures from the top of the frame instead. */
+static int client_title(int slot)
+{
+    return !is_desktop(slot) &&
+           (g_control->windows[slot].flags & WS_FLAG_CLIENT_TITLE) != 0;
+}
+
+/* Where the client's pixels begin, relative to the frame's top. */
+static int content_offset(int slot)
+{
+    return client_title(slot) ? BORDER : BORDER + TITLE_HEIGHT;
+}
+
 static unsigned frame_height(int slot)
 {
-    return is_desktop(slot) ? g_height[slot]
-                            : g_height[slot] + BORDER * 2 + TITLE_HEIGHT + GRIP_H;
+    if (is_desktop(slot))
+        return g_height[slot];
+    /* The client's own height already includes the strip when it draws it. */
+    return g_height[slot] + BORDER * 2 + GRIP_H +
+           (client_title(slot) ? 0 : TITLE_HEIGHT);
 }
 
 /* The whole window, frame included, as a rectangle - which is what damage is
@@ -690,7 +710,7 @@ static void draw_window(int slot, int focused)
         const uint32_t panel = opaque_panel(focused);
         if (px != 0) {
             const int cx0 = w->x + BORDER;
-            const int cy0 = w->y + BORDER + TITLE_HEIGHT;
+            const int cy0 = w->y + content_offset(slot);
             const int cw = (int)g_width[slot], ch = (int)g_height[slot];
             fill_band(c, w->x, w->y, (int)fw, cy0 - w->y,
                       w->x, w->y, (int)fw, (int)fh, panel);
@@ -724,6 +744,11 @@ static void draw_window(int slot, int focused)
     const int bar_bottom = w->y + BORDER + TITLE_HEIGHT;
     if (g_clip.y >= bar_bottom || g_clip.y + g_clip.h <= w->y)
         goto contents;
+    /* A client that draws its own strip has already drawn the tint and the
+     * title; all that is left for the server is its window controls, which go
+     * on afterwards so they sit above whatever the client put there. */
+    if (client_title(slot))
+        goto controls;
 
     /* A sidebar's tint, carried up through the title bar so that the column is
      * one surface from the top of the window. The client paints the rest of it;
@@ -749,7 +774,12 @@ static void draw_window(int slot, int focused)
     /* One pill holding all three. Close, minimise and maximise are three ways
      * of saying what happens to this window, so they are one control with
      * three ends rather than three controls that happen to be adjacent - and
-     * the pill is what tells the eye which of those it is looking at. */
+     * the pill is what tells the eye which of those it is looking at.
+     *
+     * A client that draws its own title strip arrives here directly: it has
+     * already painted that line, and these go on top of it, because closing a
+     * window must never depend on the application having drawn a close box. */
+controls:
     {
         int px0, py0, px2, ignored;
         control_box(w, 0, &px0, &py0);
@@ -820,7 +850,7 @@ static void draw_window(int slot, int focused)
         least += CONTROL_SIZE + 10;
         if (tx < least)
             tx = least;
-        if (tw > 0 && tx + tw < w->x + (int)fw - 8)
+        if (tw > 0 && tx + tw < w->x + (int)fw - 8 && !client_title(slot))
             draw_string(tx, w->y + BORDER + TITLE_HEIGHT / 2 + 5, 13, title,
                         focused ? 0xF0101810u : 0x90101810u);
     }
@@ -840,7 +870,7 @@ contents:
     if (px == 0)
         return;
     const int content_x = w->x + BORDER;
-    const int content_y = w->y + BORDER + TITLE_HEIGHT;
+    const int content_y = w->y + content_offset(slot);
     const int x0 = imax(content_x, g_clip.x), y0 = imax(content_y, g_clip.y);
     const int x1 = imin(content_x + (int)g_width[slot], g_clip.x + g_clip.w);
     const int y1 = imin(content_y + (int)g_height[slot], g_clip.y + g_clip.h);
@@ -1447,11 +1477,32 @@ static void handle_input(void)
             struct ws_window* w = &g_control->windows[slot];
             const int ox = is_desktop(slot) ? w->x : w->x + BORDER;
             const int oy = is_desktop(slot) ? w->y
-                                            : w->y + BORDER + TITLE_HEIGHT;
+                                            : w->y + content_offset(slot);
             push_event(slot, WIN_EVENT_MOUSE_DOWN, x - ox, y - oy, 2, 0);
         }
     }
     g_last_right = right;
+
+    /* A client that decided a press on its own title strip was not one of its
+     * controls. Compared against what was last seen rather than cleared, so
+     * the client never has to wait for the server to acknowledge it. */
+    for (int slot = 0; slot < WS_MAX_WINDOWS; ++slot) {
+        if (g_control->windows[slot].state != WS_SLOT_LIVE)
+            continue;
+        const uint32_t asked =
+            __atomic_load_n(&g_control->windows[slot].move_request,
+                            __ATOMIC_ACQUIRE);
+        if (asked == g_move_seen[slot])
+            continue;
+        g_move_seen[slot] = asked;
+        if (g_dragging < 0 && g_resizing < 0) {
+            struct ws_window* w = &g_control->windows[slot];
+            g_dragging = slot;
+            g_drag_dx = x - w->x;
+            g_drag_dy = y - w->y;
+            g_mouse_grab = -1;      /* the drag owns the pointer now */
+        }
+    }
 
     if (pressed) {
         const int slot = window_at(x, y);
@@ -1463,7 +1514,11 @@ static void handle_input(void)
             close_box(w, &cx, &cy);
             const int on_close = x >= cx && y >= cy &&
                                  x < cx + CLOSE_SIZE && y < cy + CLOSE_SIZE;
-            const int on_title = y < w->y + BORDER + TITLE_HEIGHT;
+            /* Not a title press when the client owns those pixels: it gets
+             * the event, and hands the drag back with win_move_begin if it
+             * turns out not to have been one of its controls. */
+            const int on_title = !client_title(slot) &&
+                                 y < w->y + BORDER + TITLE_HEIGHT;
 
             int gx, gy;
             grow_box(slot, &gx, &gy);
@@ -1491,7 +1546,7 @@ static void handle_input(void)
             } else {
                 push_event(slot, WIN_EVENT_MOUSE_DOWN,
                            x - (w->x + BORDER),
-                           y - (w->y + BORDER + TITLE_HEIGHT), 1, 0);
+                           y - (w->y + content_offset(slot)), 1, 0);
                 g_mouse_grab = slot;
             }
         }
@@ -1504,7 +1559,7 @@ static void handle_input(void)
         struct ws_window* w = &g_control->windows[g_mouse_grab];
         push_event(g_mouse_grab, WIN_EVENT_MOUSE_MOVE,
                    x - (w->x + BORDER),
-                   y - (w->y + BORDER + TITLE_HEIGHT), 1, 0);
+                   y - (w->y + content_offset(g_mouse_grab)), 1, 0);
     }
 
     if (released && g_resizing >= 0) {

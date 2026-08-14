@@ -64,7 +64,7 @@ trap 'rm -rf "$STAGING"' EXIT
 # again. The exceptions are noted where they are made.
 mkdir -p "$STAGING/bin" "$STAGING/sbin" "$STAGING/etc" "$STAGING/dev" \
          "$STAGING/boot" "$STAGING/lib" "$STAGING/media" "$STAGING/mnt" \
-         "$STAGING/opt" "$STAGING/srv" "$STAGING/run" "$STAGING/tmp" \
+         "$STAGING/Applications" "$STAGING/opt" "$STAGING/srv" "$STAGING/run" "$STAGING/tmp" \
          "$STAGING/proc" "$STAGING/sys" \
          "$STAGING/usr/bin" "$STAGING/usr/sbin" "$STAGING/usr/lib" \
          "$STAGING/usr/include" "$STAGING/usr/src" "$STAGING/usr/local/bin" \
@@ -96,12 +96,12 @@ mkdir -p "$STAGING/bin" "$STAGING/sbin" "$STAGING/etc" "$STAGING/dev" \
 #   stage_bundle <Name> <src.elf> <icon> <opens> <menu...>
 stage_bundle() {
     local app="$1"; local src="$2"; local icon="$3"; local opens="$4"; shift 4
-    local dir="$STAGING/opt/$app.app"
+    local dir="$STAGING/Applications/$app.app"
     local exe
     # Without the .elf. That extension is a fact about the build directory -
     # it is how the Makefile tells a linked binary from an object file - and it
     # has no business being visible in an installed system. Nothing else here
-    # carries it: /bin/ls is ls, and /opt/Calendar.app should hold Calendar's
+    # carries it: /bin/ls is ls, and Calendar.app should hold Calendar's
     # program, not Calendar's build artefact. The Info file names the
     # executable, so the bundle stays self-describing either way.
     exe="$(basename "$src")"
@@ -272,8 +272,8 @@ stage_desktop() {                   # <home>
     # needs explaining: it is the one other people may look in.
     mkdir -p "$STAGING/$home/Desktop" "$STAGING/$home/Documents" \
              "$STAGING/$home/Apps" "$STAGING/$home/Public"
-    printf '/opt/Files.app\n' > "$STAGING/$home/Desktop/Files.alias"
-    printf '/opt/Edit.app\n'  > "$STAGING/$home/Desktop/Notepad.alias"
+    printf '/Applications/Files.app\n' > "$STAGING/$home/Desktop/Files.alias"
+    printf '/Applications/Edit.app\n'  > "$STAGING/$home/Desktop/Notepad.alias"
     printf '/usr/share/doc/readme.md\n' > "$STAGING/$home/Desktop/Readme.alias"
 }
 stage_desktop root

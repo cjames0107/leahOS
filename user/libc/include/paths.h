@@ -26,9 +26,17 @@
 #define PATH_USR_BIN    "/usr/bin"
 #define PATH_LOCAL_BIN  "/usr/local/bin"
 
-/* Application bundles. FHS reserves /opt for add-on software packages, each in
- * its own directory, which is what a .app is. */
-#define PATH_APPS       "/opt"
+/* Application bundles.
+ *
+ * This was /opt, on the reading that the FHS reserves it for add-on software
+ * packages each in its own directory - which a .app technically is. But /opt
+ * is where a system administrator puts third-party software; these are the
+ * system's own applications, and the directory a person opens to see what
+ * they can run should be named for what it holds rather than for the standard
+ * that has a slot the shape of it.
+ *
+ * /opt is still created, still empty, and still means what it always did. */
+#define PATH_APPS       "/Applications"
 
 /* Read-only data shared between programs. */
 #define PATH_SHARE      "/usr/share"

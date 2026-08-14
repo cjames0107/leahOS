@@ -303,6 +303,27 @@ void win_set_alpha(int id)
     block->windows[id].flags |= WS_FLAG_ALPHA;
 }
 
+/* The client draws its own title strip, and its buffer is that much taller. */
+void win_set_client_title(int id)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+        return;
+    block->windows[id].flags |= WS_FLAG_CLIENT_TITLE;
+}
+
+/* "That press was not one of my controls - move the window instead."
+ *
+ * Only meaningful from a window that owns its title strip; anywhere else the
+ * server is already handling the drag itself. */
+void win_move_begin(int id)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+        return;
+    __atomic_add_fetch(&block->windows[id].move_request, 1, __ATOMIC_RELEASE);
+}
+
 void win_set_desktop(int id)
 {
     struct ws_shared* block = control();

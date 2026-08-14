@@ -34,6 +34,18 @@ void win_set_min_size(int id, unsigned width, unsigned height);
  * draggable. Call before drawing; see WS_FLAG_DESKTOP in <wproto.h>. */
 void win_set_desktop(int id);
 
+/* Draw the title bar yourself. The window's pixel buffer then covers the whole
+ * frame - its height includes WS_TITLE_HEIGHT - and the application's controls
+ * share that line with the title instead of sitting in a second band below it.
+ * The server still draws its own window controls over the top, and still owns
+ * moving the window; see win_move_begin. */
+void win_set_client_title(int id);
+
+/* Ask the server to move this window with the pointer, as though the press had
+ * landed on a title bar it owned. Call it when a press in your title strip was
+ * not on one of your controls. */
+void win_move_begin(int id);
+
 /* Say that this window's pixels carry alpha, so the server blends them onto
  * the blurred backdrop instead of copying over it. A window that says this
  * must fill its alpha byte everywhere - zero means invisible, not opaque. */

@@ -1641,7 +1641,8 @@ static void test_layout(void)
      * something, and a missing one is a decision they have to make again. */
     static const char* const kDirs[] = {
         "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/media", "/mnt",
-        "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp",
+        "/Applications", "/opt", "/proc", "/root", "/run", "/sbin",
+        "/srv", "/sys", "/tmp",
         "/usr", "/usr/bin", "/usr/include", "/usr/lib", "/usr/local",
         "/usr/local/bin", "/usr/sbin", "/usr/share", "/usr/share/doc",
         "/usr/share/icons", "/usr/src", "/var", "/var/cache", "/var/lib",

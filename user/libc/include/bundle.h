@@ -63,9 +63,7 @@ void bundle_exec(const struct bundle* b, char* out, int max);
 
 /* Where the system's applications live. A single place, so that "which
  * application is called Edit" has one answer rather than one per caller. */
-/* Where application bundles live. PATH_APPS is /opt, which is what the FHS
- * reserves for add-on software packages each in its own directory - which is
- * exactly what a .app is. */
+/* Where application bundles live: PATH_APPS, which is /Applications. */
 #define BUNDLE_DIR PATH_APPS
 
 /* The bundle named `name` (its Info `name`, or its directory), or -1. This is

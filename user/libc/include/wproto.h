@@ -78,6 +78,22 @@
  * alpha byte leaves it zero, and zero here means invisible. */
 #define WS_FLAG_ALPHA   2u
 
+/* The client's pixels start at the top of the frame, title bar included.
+ *
+ * A window has two bars otherwise: the server's title bar, and whatever band
+ * of controls the application puts directly beneath it. They are the same
+ * height, they touch, and they are about the same thing - what this window is
+ * and what you can do with it - so they read as one bar drawn twice.
+ *
+ * With this the client owns those pixels and draws its controls on the same
+ * line as the title. The server still draws its own window controls on top,
+ * because closing a window must not depend on the application, and it still
+ * owns the drag: a press in that strip goes to the client, and a client that
+ * did not want it calls win_move_begin to hand it back. That way the client
+ * decides what is a control and the server decides what a drag is, which is
+ * the only division that leaves neither guessing about the other. */
+#define WS_FLAG_CLIENT_TITLE 4u
+
 /* Slot states. A client walks 0 -> CLAIMED -> LIVE and finally back to FREE. */
 #define WS_SLOT_FREE    0u
 #define WS_SLOT_CLAIMED 1u   /* won by a client, not yet filled in           */
@@ -167,6 +183,12 @@ struct ws_window {
     volatile uint32_t pixels_gen;   /* client bumps once the new segment is up  */
     volatile uint32_t min_width, min_height;  /* the client's floor            */
     volatile uint32_t flags;
+
+    /* Bumped by a client that wants the window moved with the pointer - what a
+     * press on its own title strip means when it was not on one of its
+     * controls. The server compares against what it last saw, so a missed
+     * poll delays a drag rather than losing it. */
+    volatile uint32_t move_request;
 
     /* Event ring. The server writes at head, the client reads at tail. One
      * writer and one reader, so no lock is needed - only the ordering of the

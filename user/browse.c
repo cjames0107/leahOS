@@ -35,12 +35,20 @@
 /* The sidebar is the window's spine: places above, whatever is mounted below.
  * Everything else measures from its right edge. */
 #define SIDEBAR_W 140
-/* One band, not two. The navigation, the path and the menu button are all
- * answers to "where am I and what can I do here", and stacking them put a
- * strip of nothing between the chrome and the files. */
-#define TOOLBAR_H 34
+/* One band, and now genuinely one: the window's title strip is this window's
+ * to draw, so the navigation, the path, the search box and the menus share the
+ * line the title used to have to itself. Before this there were two bars of
+ * almost the same height touching each other, saying the same kind of thing.
+ *
+ * The height is the chrome's, because that is the strip being taken over. */
+#define TOOLBAR_H WS_TITLE_HEIGHT
 #define PATH_H    0
-#define STATUS_H  20
+/* No status bar. It said "14 items", which is a number you can see by looking,
+ * and it cost twenty pixels of every window forever to say it. The messages
+ * that used to share it - "moved to /tmp", "cannot create a folder here" -
+ * were worth more than the count and are now shown in the toolbar, where
+ * there is already a band and they cost nothing. */
+#define STATUS_H  0
 #define ROW_H     18
 #define CELL_W    92
 #define CELL_H    64
@@ -122,9 +130,12 @@ static int  g_hist_at = -1;
  * three ends - they are the same question asked in three directions - so their
  * boxes are contiguous and they share a pill. The three views are another.
  * Open and Rename do different kinds of job and stand alone. */
-static struct box g_back    = { SIDEBAR_W + 8,  5, 28, 22 };
-static struct box g_fwd     = { SIDEBAR_W + 36, 5, 28, 22 };
-static struct box g_up      = { SIDEBAR_W + 64, 5, 28, 22 };
+/* Clear of the window's own close/minimise/maximise pill, which the server
+ * draws at the left of this same strip. The sidebar is wider than that pill,
+ * so measuring from its edge already leaves the room. */
+static struct box g_back    = { SIDEBAR_W + 8,  3, 28, 22 };
+static struct box g_fwd     = { SIDEBAR_W + 36, 3, 28, 22 };
+static struct box g_up      = { SIDEBAR_W + 64, 3, 28, 22 };
 /* The view modes and the file actions are not on the toolbar any more: they
  * are in the menu behind the button at its right-hand end. A toolbar with
  * everything on it is a list of everything the program can do, in the place a
@@ -136,28 +147,69 @@ static struct box g_open    = { 0, 0, 0, 0 };
 static struct box g_rename  = { 0, 0, 0, 0 };
 static struct box g_upline  = { 0, 0, 0, 0 };
 static struct box g_dnline  = { 0, 0, 0, 0 };
-static struct box g_menu_btn;
+static struct box g_search_box;
 
-/* The menu: what used to be spread across the toolbar, plus the things this
- * system can do that the browser had no way to reach. */
-#define MENU_NONE     -1
-#define MENU_ICON      0
-#define MENU_LIST      1
-#define MENU_TREE      2
-#define MENU_OPEN      3
-#define MENU_RENAME    4
-#define MENU_NEWDIR    5
-#define MENU_DELETE    6
-#define MENU_PROPS     7
-#define MENU_UNMOUNT   8
-#define MENU_ITEMS     9
+/* Three menus rather than one list of nine.
+ *
+ * The single menu held everything the browser could do, which meant reading
+ * past "View as Tree" to reach "Delete" - two unrelated kinds of thing in one
+ * column, sorted by nothing. Split by the question being asked: what do I do
+ * to this file, how do I look at this folder, and where do I want to be.
+ *
+ * A row whose label is "-" is a separator, drawn as a line and not selectable,
+ * which is how a menu groups without needing a second level. */
+#define MENU_NONE -1
 
-static int g_menu_open;
-static const char* const kMenu[MENU_ITEMS] = {
-    "View as Icons", "View as List", "View as Tree",
-    "Open", "Rename", "New Folder", "Delete",
-    "Properties", "Unmount Volume",
+enum { M_FILE, M_VIEW, M_GO, M_COUNT };
+
+static const char* const kFileItems[] = {
+    "Open", "Rename", "-", "New Folder", "Delete", "-", "Properties",
 };
+static const char* const kViewItems[] = {
+    "as Icons", "as List", "as Tree", "-", "Refresh", "Rebuild Search Index",
+};
+static const char* const kGoItems[] = {
+    "Back", "Forward", "Up", "-",
+    "Home", "Applications", "Computer", "-", "Unmount Volume",
+};
+
+static const struct {
+    const char*        title;
+    const char* const* items;
+    int                count;
+} kMenus[M_COUNT] = {
+    { "File", kFileItems, (int)(sizeof(kFileItems) / sizeof(kFileItems[0])) },
+    { "View", kViewItems, (int)(sizeof(kViewItems) / sizeof(kViewItems[0])) },
+    { "Go",   kGoItems,   (int)(sizeof(kGoItems)   / sizeof(kGoItems[0]))   },
+};
+
+/* Which menu is down, or -1. */
+static int g_menu_open = -1;
+
+/* Each menu's button in the toolbar. They sit together in the order they are
+ * declared, so the buttons and the menus cannot drift apart. */
+#define MENU_BTN_W 56
+static int menu_btn_x(int m) { return (int)g_w - 8 - (M_COUNT - m) * MENU_BTN_W; }
+static int menu_btn_y(void)  { return 5; }
+static int menu_btn_h(void)  { return 22; }
+
+#define INDEX_MAX   2048
+#define INDEX_PATH  192
+#define INDEX_DEPTH 8
+
+static char g_index[INDEX_MAX][INDEX_PATH];
+static int  g_index_n;
+static int  g_index_ready;
+
+static char g_query[64];
+static int  g_query_focus;
+static int  g_results[INDEX_MAX];
+static int  g_results_n;
+static int  g_searching;        /* the content area is showing results */
+
+static void index_build(int force);
+static void search_run(void);
+
 
 static int inside(const struct box* b, int x, int y)
 {
@@ -199,14 +251,13 @@ static void parent_of(const char* path, char* out, int max)
 
 static void read_dir(void)
 {
+    g_status[0] = '\0';         /* the last message was about the last folder */
     g_count = getdents(g_path, g_entries, MAX_ENTRIES);
     if (g_count < 0)
         g_count = 0;
     g_selected = -1;
     memset(g_marked, 0, sizeof(g_marked));
     g_scroll = 0;
-    snprintf(g_status, sizeof(g_status), "%d item%s", g_count,
-             g_count == 1 ? "" : "s");
 }
 
 static int is_expanded(const char* path)
@@ -335,9 +386,17 @@ static void entry_icon(int x, int y, int i, int size)
  * /proc/mounts, because the filesystem server owns that answer and a browser
  * carrying its own copy would be a second one.
  */
-#define MAX_PLACES 12
-static struct { char label[24]; char path[192]; int volume; } g_place[MAX_PLACES];
+#define MAX_PLACES 24
+#define PLACE_H    26
+#define PLACES_TOP 12
+
+/* A place in the sidebar. `volume` marks the ones read from /proc/mounts,
+ * which are facts about the system rather than choices - they appear and
+ * vanish with the disk and cannot be pinned or unpinned. Everything else is
+ * the person's own list. */
+static struct { char label[32]; char path[192]; int volume; } g_place[MAX_PLACES];
 static int g_places;
+static int g_volumes_from;      /* where the mounted volumes start */
 
 static void add_place(const char* label, const char* path, int volume)
 {
@@ -349,21 +408,99 @@ static void add_place(const char* label, const char* path, int volume)
     ++g_places;
 }
 
-static void places_build(void)
+/* The last component of a path, which is what a pinned folder is called. */
+static const char* leaf_of(const char* path)
+{
+    const char* leaf = path;
+    for (const char* p = path; *p != '\0'; ++p)
+        if (*p == '/' && p[1] != '\0')
+            leaf = p + 1;
+    return leaf;
+}
+
+static void sidebar_path(char* out, int max)
+{
+    const char* home = getenv("HOME");
+    if (home == 0 || home[0] == '\0')
+        home = "/root";
+    snprintf(out, (unsigned)max, "%s/.sidebar", home);
+}
+
+/* What the sidebar holds when nobody has said otherwise.
+ *
+ * Five, and each earns its place: the applications, where you are, the two
+ * folders a desktop system puts things in by default, and the root - which is
+ * the way out of all of them. */
+static void places_defaults(void)
 {
     const char* home = getenv("HOME");
     if (home == 0 || home[0] == '\0')
         home = "/root";
     char sub[224];
-    g_places = 0;
+    add_place("Applications", PATH_APPS, 0);
     add_place("Home", home, 0);
-    add_place("Applications", "/opt", 0);
     snprintf(sub, sizeof(sub), "%s/Desktop", home);   add_place("Desktop", sub, 0);
     snprintf(sub, sizeof(sub), "%s/Documents", home); add_place("Documents", sub, 0);
-    snprintf(sub, sizeof(sub), "%s/Public", home);    add_place("Public", sub, 0);
     add_place("Computer", "/", 0);
+}
 
-    /* And every filesystem that is mounted somewhere other than the root. */
+static void places_save(void)
+{
+    char path[256];
+    sidebar_path(path, sizeof(path));
+    FILE* out = fopen(path, "w");
+    if (out == 0)
+        return;
+    /* Only the pinned ones: the volumes are read from the system every time
+     * and writing them down would mean remembering a disk that is not there. */
+    for (int i = 0; i < g_places; ++i)
+        if (!g_place[i].volume)
+            fprintf(out, "%s\t%s\n", g_place[i].path, g_place[i].label);
+    fclose(out);
+}
+
+/* Read the pinned list, or fall back to the defaults.
+ *
+ * An empty file means "I unpinned everything", which is a choice and is kept.
+ * A missing file means nobody has ever chosen, which is when the defaults
+ * apply - so the two cases have to be told apart, and that is why this looks
+ * at whether the file opened rather than at how many lines it had. */
+static void places_load(void)
+{
+    g_places = 0;
+    char path[256];
+    sidebar_path(path, sizeof(path));
+    FILE* in = fopen(path, "r");
+    if (in == 0) {
+        places_defaults();
+        return;
+    }
+    char line[256];
+    while (g_places < MAX_PLACES && fgets(line, sizeof(line), in) != 0) {
+        unsigned n = (unsigned)strlen(line);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+            line[--n] = '\0';
+        if (n == 0)
+            continue;
+        char* tab = strchr(line, '\t');
+        if (tab != 0) {
+            *tab = '\0';
+            add_place(tab + 1, line, 0);
+        } else {
+            add_place(leaf_of(line), line, 0);
+        }
+    }
+    fclose(in);
+}
+
+static void places_build(void)
+{
+    places_load();
+    g_volumes_from = g_places;
+
+    /* And every filesystem that is mounted somewhere other than the root -
+     * read from /proc/mounts, because the filesystem server owns that answer
+     * and a browser carrying its own copy would be a second one. */
     FILE* in = fopen("/proc/mounts", "r");
     if (in == 0)
         return;
@@ -379,22 +516,77 @@ static void places_build(void)
     fclose(in);
 }
 
+/* Pin a folder, unless it is already there. */
+static int place_pin(const char* path)
+{
+    for (int i = 0; i < g_places; ++i)
+        if (strcmp(g_place[i].path, path) == 0)
+            return 0;               /* already pinned; saying so is not an error */
+    if (g_places >= MAX_PLACES)
+        return -1;
+    /* Inserted before the volumes, so the person's list stays one block and
+     * the disks stay another. */
+    for (int i = g_places; i > g_volumes_from; --i)
+        g_place[i] = g_place[i - 1];
+    snprintf(g_place[g_volumes_from].label, sizeof(g_place[0].label),
+             "%s", leaf_of(path));
+    snprintf(g_place[g_volumes_from].path, sizeof(g_place[0].path), "%s", path);
+    g_place[g_volumes_from].volume = 0;
+    ++g_volumes_from;
+    ++g_places;
+    places_save();
+    return 0;
+}
+
+static void place_unpin(int i)
+{
+    if (i < 0 || i >= g_places || g_place[i].volume)
+        return;                     /* a mounted disk is not a pin */
+    for (int k = i; k + 1 < g_places; ++k)
+        g_place[k] = g_place[k + 1];
+    --g_places;
+    if (i < g_volumes_from)
+        --g_volumes_from;
+    places_save();
+}
+
 static int sidebar_row(int y)
 {
-    const int row = (y - 10) / 24;
+    const int row = (y - PLACES_TOP) / PLACE_H;
     return (row >= 0 && row < g_places) ? row : -1;
 }
+
+static int sidebar_row_y(int i) { return PLACES_TOP + i * PLACE_H; }
+
+/* Which place is being dragged out of the sidebar, and how far. */
+static int g_pin_drag = -1;
+static int g_pin_out;
 
 static void draw_sidebar(void)
 {
     wg_sidebar(0, 0, SIDEBAR_W, (int)g_h);
-    int y = 10;
-    for (int i = 0; i < g_places; ++i, y += 24) {
+    for (int i = 0; i < g_places; ++i) {
+        const int y = sidebar_row_y(i);
+        if (y + PLACE_H > (int)g_h)
+            break;
         const int here = strcmp(g_place[i].path, g_path) == 0;
-        if (here)
-            wg_pill(6, y - 3, SIDEBAR_W - 12, 22, "", 1);
-        wg_text_clipped(16, y, g_place[i].label,
-                        here ? wg_ink_colour() : WG_DIM, SIDEBAR_W - 26);
+        /* The one being dragged out is shown on its way: dimmed, so releasing
+         * it is visibly the thing that removes it rather than a surprise. */
+        const int leaving = (i == g_pin_drag && g_pin_out);
+        if (here && !leaving)
+            wg_row_select(6, y - 2, SIDEBAR_W - 12, PLACE_H - 2);
+
+        /* A folder icon, because that is what every one of these is. The
+         * current one is shown open, which is the same distinction the icon
+         * set already draws for a directory you are inside. */
+        const uint32_t* px = icon_by_name(here ? "folder-opened"
+                                               : "folder-populated");
+        if (px != 0)
+            wg_icon_scaled(10, y, px, ICON_SIZE, ICON_SIZE, 16, 16);
+        wg_text_clipped(32, y + 1, g_place[i].label,
+                        leaving ? WG_DIM
+                                : (here ? wg_ink_colour() : WG_DIM),
+                        SIDEBAR_W - 42);
     }
 }
 
@@ -415,7 +607,9 @@ static int icon_cols(void)
 static int content_span(void)
 {
     int h;
-    if (g_view == VIEW_ICON)
+    if (g_searching)
+        h = 2 + g_results_n * ROW_H;
+    else if (g_view == VIEW_ICON)
         h = ((g_count + icon_cols() - 1) / icon_cols()) * CELL_H + 12;
     else if (g_view == VIEW_LIST)
         h = ROW_H + 2 + g_count * ROW_H;
@@ -500,22 +694,35 @@ static void draw_toolbar(void)
         arrow_glyph(&g_up,   2, strcmp(g_path, "/") != 0);
         (void)view; (void)line;
 
-        /* Everything else lives behind this. */
-        g_menu_btn.x = (int)g_w - 42; g_menu_btn.y = 5;
-        g_menu_btn.w = 34; g_menu_btn.h = 22;
-        wg_pill(g_menu_btn.x, g_menu_btn.y, g_menu_btn.w, g_menu_btn.h,
-                "...", g_menu_open);
+        /* Three menus, as one conjoined pill: they are the same kind of
+         * control and sit together, which is what the pill group is for. */
+        static const char* const titles[M_COUNT] = { "File", "View", "Go" };
+        wg_pill_group(menu_btn_x(0), menu_btn_y(), MENU_BTN_W, menu_btn_h(),
+                      M_COUNT, titles, g_menu_open);
     }
 
-    /* The path, in a sunken well so it reads as a display rather than a
-     * control - it is not editable. */
+    /* The path, then the search box. The path is a display and not a control -
+     * it is not editable - so it sits in a well; the search box is a field,
+     * and looks like one. */
     {
         const int px = content_left() + 104;
-        const int pw = (int)g_w - px - 50;
+        const int sw = 150;
+        const int pw = (int)g_w - px - sw - 16 - M_COUNT * MENU_BTN_W;
         if (pw > 40) {
             wg_container(px, 6, pw, 22, 6);
-            wg_text_clipped(px + 10, 9, g_path, WG_INK, pw - 20);
+            /* A message, when there is one, in place of the path: it is about
+             * what just happened here, which is more use for the moment after
+             * it happens than the path you can see in the title bar. */
+            wg_text_clipped(px + 10, 9, g_status[0] != '\0' ? g_status : g_path,
+                            g_status[0] != '\0' ? WG_DIM : WG_INK, pw - 20);
         }
+        g_search_box.x = px + (pw > 40 ? pw : 0) + 8;
+        g_search_box.y = 6;
+        g_search_box.w = sw;
+        g_search_box.h = 22;
+        wg_field(g_search_box.x, g_search_box.y, g_search_box.w,
+                 g_search_box.h,
+                 g_query[0] != '\0' ? g_query : "Search", g_query_focus);
     }
 }
 
@@ -523,40 +730,65 @@ static void draw_toolbar(void)
 #define MENU_W  190
 #define MENU_RH 24
 
-static void menu_box(int i, int* x, int* y, int* w, int* h)
+static void menu_box(int m, int i, int* x, int* y, int* w, int* h)
 {
-    *x = (int)g_w - MENU_W - 8;
-    *y = TOOLBAR_H + 4 + i * MENU_RH;
     *w = MENU_W;
+    /* Dropped from its button, and pulled left when that would run it off the
+     * right-hand edge. */
+    *x = menu_btn_x(m);
+    if (*x + MENU_W > (int)g_w - 8)
+        *x = (int)g_w - 8 - MENU_W;
+    *y = TOOLBAR_H + 4 + i * MENU_RH;
     *h = MENU_RH;
+}
+
+static int menu_is_sep(int m, int i)
+{
+    return kMenus[m].items[i][0] == '-' && kMenus[m].items[i][1] == '\0';
 }
 
 static int menu_hit(int x, int y)
 {
-    for (int i = 0; i < MENU_ITEMS; ++i) {
+    if (g_menu_open < 0)
+        return MENU_NONE;
+    for (int i = 0; i < kMenus[g_menu_open].count; ++i) {
         int bx, by, bw, bh;
-        menu_box(i, &bx, &by, &bw, &bh);
+        menu_box(g_menu_open, i, &bx, &by, &bw, &bh);
         if (x >= bx && y >= by && x < bx + bw && y < by + bh)
-            return i;
+            return menu_is_sep(g_menu_open, i) ? MENU_NONE : i;
     }
     return MENU_NONE;
 }
 
+/* Whether an item is the one currently in force - the view that is showing.
+ * Only the View menu has any, which is why this is a function rather than a
+ * flag on the table. */
+static int menu_item_on(int m, int i)
+{
+    if (m != M_VIEW)
+        return 0;
+    return (i == 0 && g_view == VIEW_ICON) ||
+           (i == 1 && g_view == VIEW_LIST) ||
+           (i == 2 && g_view == VIEW_TREE);
+}
+
 static void draw_menu(void)
 {
-    if (!g_menu_open)
+    if (g_menu_open < 0)
         return;
+    const int m = g_menu_open;
     int x, y, w, h;
-    menu_box(0, &x, &y, &w, &h);
-    wg_container(x - 6, y - 6, w + 12, MENU_ITEMS * MENU_RH + 12, 12);
-    for (int i = 0; i < MENU_ITEMS; ++i) {
-        menu_box(i, &x, &y, &w, &h);
-        const int on = (i == MENU_ICON && g_view == VIEW_ICON) ||
-                       (i == MENU_LIST && g_view == VIEW_LIST) ||
-                       (i == MENU_TREE && g_view == VIEW_TREE);
-        if (on)
+    menu_box(m, 0, &x, &y, &w, &h);
+    wg_container(x - 6, y - 6, w + 12, kMenus[m].count * MENU_RH + 12, 12);
+    for (int i = 0; i < kMenus[m].count; ++i) {
+        menu_box(m, i, &x, &y, &w, &h);
+        if (menu_is_sep(m, i)) {
+            wg_fill(x + 8, y + MENU_RH / 2, w - 16, 1, WG_DIM);
+            continue;
+        }
+        if (menu_item_on(m, i))
             wg_pill(x, y, w, h, "", 1);
-        wg_text(x + 12, y + 4, kMenu[i], wg_ink_colour());
+        wg_text(x + 12, y + 4, kMenus[m].items[i], wg_ink_colour());
     }
 }
 
@@ -592,10 +824,16 @@ static void draw_icons(void)
 static void draw_list(void)
 {
     const int top = content_top();
-    wg_text(10, top + 2, "Name", WG_DIM);
-    wg_text(300, top + 2, "Size", WG_DIM);
-    wg_text(400, top + 2, "Kind", WG_DIM);
-    wg_fill(8, top + ROW_H, (int)g_w - 16, 1, WG_DIM);
+    /* Every x here is measured from the content's left edge rather than from
+     * the window's. They were window coordinates, so a row began at x=8 -
+     * eight pixels into a sidebar a hundred and forty wide - and the sidebar
+     * was only drawn afterwards, on top. With the glass on, the sidebar is
+     * translucent and the rows showed straight through it. */
+    const int L = content_left();
+    wg_text(L + 10, top + 2, "Name", WG_DIM);
+    wg_text(L + 300, top + 2, "Size", WG_DIM);
+    wg_text(L + 400, top + 2, "Kind", WG_DIM);
+    wg_fill(L + 8, top + ROW_H, (int)g_w - L - 16, 1, WG_DIM);
 
     const int first = (g_scroll > ROW_H + 2) ? (g_scroll - ROW_H - 2) / ROW_H : 0;
     for (int i = first; i < g_count; ++i) {
@@ -607,19 +845,19 @@ static void draw_list(void)
         if (y + ROW_H < top + ROW_H)
             continue;               /* under the column headings */
         if (i == g_selected || g_marked[i])
-            wg_row_select(8, y, (int)g_w - 16, ROW_H);
+            wg_row_select(L + 8, y, (int)g_w - L - 16, ROW_H);
         const int dir = (g_entries[i].d_type == S_IFDIR) &&
                         !bundle_is_app(g_entries[i].d_name);
-        entry_icon(11, y + 1, i, 16);
-        wg_text_clipped(32, y + 1, g_entries[i].d_name, WG_INK, 260);
+        entry_icon(L + 11, y + 1, i, 16);
+        wg_text_clipped(L + 32, y + 1, g_entries[i].d_name, WG_INK, 260);
         char size[24];
         if (dir)
             snprintf(size, sizeof(size), "--");
         else
             snprintf(size, sizeof(size), "%llu",
                      (unsigned long long)g_entries[i].d_size);
-        wg_text(300, y + 1, size, WG_INK);
-        wg_text(400, y + 1,
+        wg_text(L + 300, y + 1, size, WG_INK);
+        wg_text(L + 400, y + 1,
                 bundle_is_app(g_entries[i].d_name) ? "application"
                     : dir ? "folder"
                     : (S_ISEXEC(g_entries[i].d_mode) ? "program" : "document"),
@@ -630,6 +868,7 @@ static void draw_list(void)
 static void draw_tree(void)
 {
     const int top = content_top();
+    const int L = content_left();       /* as in draw_list, and for the same reason */
     const int first = g_scroll / ROW_H;
     for (int i = first; i < g_row_count; ++i) {
         const int y = top + 2 + i * ROW_H - g_scroll;
@@ -638,9 +877,9 @@ static void draw_tree(void)
         if (y + ROW_H < top)
             continue;
         const struct row* r = &g_rows[i];
-        const int x = 10 + r->depth * 16;
+        const int x = L + 10 + r->depth * 16;
         if (i == g_selected)
-            wg_row_select(8, y, (int)g_w - 16, ROW_H);
+            wg_row_select(L + 8, y, (int)g_w - L - 16, ROW_H);
         if (r->is_dir) {
             /* A twisty: a box with a minus when open, a plus when shut. */
             wg_fill(x, y + 4, 9, 9, WG_PAPER);
@@ -655,6 +894,33 @@ static void draw_tree(void)
     }
 }
 
+/* Results are shown as paths rather than as names, because the answer to
+ * "where is my file" is the path - a list of bare names would make you open
+ * each one to find out which is which. */
+static void draw_results(void)
+{
+    const int top = content_top();
+    const int L = content_left();
+    const int first = g_scroll / ROW_H;
+    for (int i = first; i < g_results_n; ++i) {
+        const int y = top + 2 + i * ROW_H - g_scroll;
+        if (y >= top + content_h())
+            break;
+        if (y + ROW_H < top)
+            continue;
+        const char* path = g_index[g_results[i]];
+        if (i == g_selected)
+            wg_row_select(L + 8, y, (int)g_w - L - 16, ROW_H);
+        /* The name in ink and the folder it is in dimmed after it: two facts
+         * at different weights rather than one long line at one weight. */
+        const char* name = leaf_of(path);
+        wg_text_clipped(L + 12, y + 1, name, wg_ink_colour(), 220);
+        wg_text_clipped(L + 240, y + 1, path, WG_DIM, (int)g_w - L - 256);
+    }
+    if (g_results_n == 0)
+        wg_text(L + 12, top + 8, "nothing matched", WG_DIM);
+}
+
 static void draw(void)
 {
     wg_theme();                 /* whatever settings last chose */
@@ -666,7 +932,8 @@ static void draw(void)
     wg_container(content_left() + 4, content_top(),
                  (int)g_w - content_left() - 8, content_h(), 4);
 
-    if (g_view == VIEW_ICON)      draw_icons();
+    if (g_searching)              draw_results();
+    else if (g_view == VIEW_ICON) draw_icons();
     else if (g_view == VIEW_LIST) draw_list();
     else                          draw_tree();
 
@@ -692,8 +959,6 @@ static void draw(void)
     wg_scrollbar_v(bar_x(), content_top(), content_h(),
                    g_scroll, content_h(), content_span());
 
-    wg_fill(0, (int)g_h - STATUS_H, (int)g_w, STATUS_H, WG_FACE);
-    wg_text_clipped(8, (int)g_h - STATUS_H + 2, g_status, WG_INK, (int)g_w - 16);
 }
 
 /* --- opening things ------------------------------------------------------ */
@@ -1016,10 +1281,12 @@ static int hit_test(int x, int y)
     const int top = content_top();
     if (y < top || y >= top + content_h())
         return -1;
+    /* A press in the sidebar is the sidebar's, in every view. Rows are drawn
+     * from the content's left edge, so they are hit from there too. */
+    if (x < content_left())
+        return -1;
     if (g_view == VIEW_ICON) {
         const int cols = icon_cols();
-        if (x < 8)
-            return -1;
         const int col = (x - content_left() - 8) / CELL_W;
         const int rowi = (y - top - 6 + g_scroll) / CELL_H;
         if (col >= cols || rowi < 0)
@@ -1125,24 +1392,212 @@ static void begin_rename(void)
 /* What the menu does. Most of it was on the toolbar; the last three are
  * things this system has been able to do for a while and the file browser has
  * had no way to ask for. */
-static void menu_action(int item)
+/* The three menus, dispatched by which one is down. The item numbers are
+ * positions in the tables above, separators included, so the two stay in step
+ * by being read from the same place. */
+/* --- searching ---------------------------------------------------------------
+ *
+ * Walking the tree for every search would mean reading every directory on the
+ * disk each time somebody typed a letter, which on a cold cache is seconds and
+ * on a warm one is still hundreds of round trips to vfsd. So the walk happens
+ * once and its result is kept: a flat list of paths, searched by substring.
+ *
+ * The index is written to disk as well, so a second run of the browser does not
+ * pay for the first one's walk. That makes it possible for the index to be
+ * older than the filesystem, which is a real cost and is why it is stated: a
+ * search finds what was there when the index was built. Rebuilding is one item
+ * in the View menu, and anything the index claims is checked with stat before
+ * it is shown, so a stale entry is dropped rather than offered.
+ */
+static void index_path(char* out, int max)
+{
+    const char* home = getenv("HOME");
+    if (home == 0 || home[0] == '\0')
+        home = "/root";
+    snprintf(out, (unsigned)max, "%s/.searchindex", home);
+}
+
+/* One directory's worth, recursively. `depth` bounds it: a link loop or a very
+ * deep tree should not be able to turn a search into a hang, and eight levels
+ * is past anything this filesystem holds. */
+static void index_walk(const char* dir, int depth)
+{
+    if (depth > INDEX_DEPTH || g_index_n >= INDEX_MAX)
+        return;
+    /* Not the synthetic filesystems: /proc invents a file per process and
+     * indexing it would fill the table with names that expire. */
+    if (strncmp(dir, "/proc", 5) == 0 || strncmp(dir, "/dev", 4) == 0 ||
+        strncmp(dir, "/sys", 4) == 0)
+        return;
+
+    /* Its own array per level rather than one shared scratch: recursion with a
+     * shared buffer reads the parent's entries after the child has overwritten
+     * them, which is a bug that looks like a corrupt disk. Sixty-four at a
+     * time keeps the stack cost of eight levels reasonable. */
+    struct dirent here[64];
+    const int n = getdents(dir, here, 64);
+    for (int i = 0; i < n && g_index_n < INDEX_MAX; ++i) {
+        if (here[i].d_name[0] == '.')
+            continue;
+        char full[INDEX_PATH];
+        if (strcmp(dir, "/") == 0)
+            snprintf(full, sizeof(full), "/%s", here[i].d_name);
+        else
+            snprintf(full, sizeof(full), "%s/%s", dir, here[i].d_name);
+        snprintf(g_index[g_index_n++], INDEX_PATH, "%s", full);
+        if (here[i].d_type == S_IFDIR && !bundle_is_app(here[i].d_name))
+            index_walk(full, depth + 1);
+    }
+}
+
+static void index_save(void)
+{
+    char path[256];
+    index_path(path, sizeof(path));
+    FILE* out = fopen(path, "w");
+    if (out == 0)
+        return;
+    for (int i = 0; i < g_index_n; ++i)
+        fprintf(out, "%s\n", g_index[i]);
+    fclose(out);
+}
+
+static void index_build(int force)
+{
+    if (g_index_ready && !force)
+        return;
+    g_index_n = 0;
+    index_walk("/", 0);
+    g_index_ready = 1;
+    index_save();
+    snprintf(g_status, sizeof(g_status), "indexed %d items", g_index_n);
+}
+
+/* Read a previous run's index. Cheap enough to do at startup: it is one file
+ * and a few thousand short lines, against a walk of the whole disk. */
+static void index_load(void)
+{
+    char path[256];
+    index_path(path, sizeof(path));
+    FILE* in = fopen(path, "r");
+    if (in == 0)
+        return;
+    char line[INDEX_PATH];
+    g_index_n = 0;
+    while (g_index_n < INDEX_MAX && fgets(line, sizeof(line), in) != 0) {
+        unsigned n = (unsigned)strlen(line);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r'))
+            line[--n] = '\0';
+        if (n > 0)
+            snprintf(g_index[g_index_n++], INDEX_PATH, "%s", line);
+    }
+    fclose(in);
+    g_index_ready = g_index_n > 0;
+}
+
+static int fold(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
+}
+
+/* Substring, case-insensitive, against the last component - because a person
+ * searching for "notes" means the file called notes, not every file in a
+ * folder that happens to have "notes" in its path. */
+static int name_contains(const char* path, const char* needle)
+{
+    const char* name = leaf_of(path);
+    for (const char* p = name; *p != '\0'; ++p) {
+        int i = 0;
+        while (needle[i] != '\0' && fold(p[i]) == fold(needle[i]))
+            ++i;
+        if (needle[i] == '\0')
+            return 1;
+    }
+    return 0;
+}
+
+static void search_run(void)
+{
+    g_results_n = 0;
+    g_scroll = 0;
+    g_selected = -1;
+    if (g_query[0] == '\0') {
+        g_searching = 0;
+        return;
+    }
+    index_build(0);             /* built once, then reused */
+    g_searching = 1;
+    for (int i = 0; i < g_index_n && g_results_n < INDEX_MAX; ++i) {
+        if (!name_contains(g_index[i], g_query))
+            continue;
+        /* Checked against the disk, so an entry left over from before a file
+         * was deleted is dropped rather than offered as a result. */
+        struct stat st;
+        if (stat(g_index[i], &st) != 0)
+            continue;
+        g_results[g_results_n++] = i;
+    }
+    snprintf(g_status, sizeof(g_status), "%d result%s for \"%s\"",
+             g_results_n, g_results_n == 1 ? "" : "s", g_query);
+}
+
+/* Detach whatever volume we are looking at, if it is one. */
+static void unmount_here(void)
+{
+    int found = -1;
+    for (int i = 0; i < g_places; ++i)
+        if (g_place[i].volume && strcmp(g_place[i].path, g_path) == 0)
+            found = i;
+    if (found < 0) {
+        snprintf(g_status, sizeof(g_status), "go to a mounted volume first");
+        return;
+    }
+    char at[192];
+    snprintf(at, sizeof(at), "%s", g_place[found].path);
+    goto_path("/", 1);
+    if (fs_umount(at) == 0) {
+        places_build();
+        snprintf(g_status, sizeof(g_status), "unmounted %s", at);
+    } else {
+        snprintf(g_status, sizeof(g_status), "%s will not detach", at);
+    }
+}
+
+static void menu_action(int menu, int item)
 {
     char full[512];
+    if (menu == M_VIEW) {
+        if (item == 0)      { g_view = VIEW_ICON; g_scroll = 0; }
+        else if (item == 1) { g_view = VIEW_LIST; g_scroll = 0; }
+        else if (item == 2) { g_view = VIEW_TREE; g_scroll = 0; rebuild_tree(); }
+        else if (item == 4) { read_dir(); if (g_view == VIEW_TREE) rebuild_tree(); }
+        else if (item == 5) index_build(1);
+        return;
+    }
+    if (menu == M_GO) {
+        const char* home = getenv("HOME");
+        if (home == 0 || home[0] == '\0') home = "/root";
+        if (item == 0)      go_history(-1);
+        else if (item == 1) go_history(1);
+        else if (item == 2) go_up();
+        else if (item == 4) goto_path(home, 1);
+        else if (item == 5) goto_path(PATH_APPS, 1);
+        else if (item == 6) goto_path("/", 1);
+        else if (item == 8) unmount_here();
+        return;
+    }
     switch (item) {
-    case MENU_ICON: g_view = VIEW_ICON; g_scroll = 0; break;
-    case MENU_LIST: g_view = VIEW_LIST; g_scroll = 0; break;
-    case MENU_TREE: g_view = VIEW_TREE; g_scroll = 0; rebuild_tree(); break;
-    case MENU_OPEN:
+    case 0:
         if (g_selected >= 0) {
             join(g_path, g_entries[g_selected].d_name, full, sizeof(full));
             open_path(full, g_entries[g_selected].d_type == S_IFDIR);
         }
         break;
-    case MENU_RENAME:
+    case 1:
         if (g_selected >= 0)
             begin_rename();
         break;
-    case MENU_NEWDIR: {
+    case 3: {
         /* A name that is not taken, so this never fails for a reason the
          * person has to think about. */
         for (int n = 1; n < 100; ++n) {
@@ -1163,7 +1618,7 @@ static void menu_action(int item)
         }
         break;
     }
-    case MENU_DELETE:
+    case 4:
         if (g_selected >= 0) {
             join(g_path, g_entries[g_selected].d_name, full, sizeof(full));
             const int dir = g_entries[g_selected].d_type == S_IFDIR;
@@ -1174,7 +1629,7 @@ static void menu_action(int item)
             if (ok) { g_selected = -1; read_dir(); }
         }
         break;
-    case MENU_PROPS:
+    case 6:
         if (g_selected >= 0) {
             join(g_path, g_entries[g_selected].d_name, full, sizeof(full));
             struct stat st;
@@ -1209,28 +1664,6 @@ static void menu_action(int item)
                          st.st_uid, st.st_ino);
         }
         break;
-    case MENU_UNMOUNT: {
-        /* Only a volume, and only if we are looking at one. */
-        int found = -1;
-        for (int i = 0; i < g_places; ++i)
-            if (g_place[i].volume && strcmp(g_place[i].path, g_path) == 0)
-                found = i;
-        if (found < 0) {
-            snprintf(g_status, sizeof(g_status),
-                     "go to a mounted volume first");
-            break;
-        }
-        char at[192];
-        snprintf(at, sizeof(at), "%s", g_place[found].path);
-        goto_path("/", 1);
-        if (fs_umount(at) == 0) {
-            places_build();
-            snprintf(g_status, sizeof(g_status), "unmounted %s", at);
-        } else {
-            snprintf(g_status, sizeof(g_status), "%s will not detach", at);
-        }
-        break;
-    }
     }
 }
 
@@ -1281,12 +1714,18 @@ int main(int argc, char** argv)
         return 1;
     }
     const int id = win_create(x, y, g_w, g_h, "Files");
-    /* Its pixels carry alpha, so the glass reaches past the title bar. */
+    /* Its pixels carry alpha, so the glass reaches past the title bar - and
+     * this window draws that bar itself, which is what puts the controls on
+     * the same line as the title rather than in a band beneath it. */
     if (id >= 0) {
         win_set_alpha(id);
+        win_set_client_title(id);
         win_set_sidebar(id, SIDEBAR_W);
     }
     places_build();
+    /* The previous run's index, if there is one: a walk of the whole disk is
+     * what this avoids, and reading a few thousand short lines is not. */
+    index_load();
     if (id < 0) {
         printf("browse: no window server\n");
         return 1;
@@ -1474,11 +1913,12 @@ int main(int argc, char** argv)
             } else if (event.type == WIN_EVENT_MOUSE_DOWN) {
                 /* The menu is in front of everything, so it answers first and
                  * a press anywhere else closes it. */
-                if (g_menu_open) {
+                if (g_menu_open >= 0) {
+                    const int was = g_menu_open;
                     const int item = menu_hit(event.x, event.y);
-                    g_menu_open = 0;
+                    g_menu_open = -1;
                     if (item != MENU_NONE) {
-                        menu_action(item);
+                        menu_action(was, item);
                         draw();
                         win_present(id);
                         continue;
@@ -1487,14 +1927,45 @@ int main(int argc, char** argv)
                     win_present(id);
                     continue;
                 }
-                if (inside(&g_menu_btn, event.x, event.y)) {
-                    g_menu_open = 1;
+                /* Any press outside the search box gives the keyboard back to
+                 * the listing; the box's own branch takes it again below. */
+                g_query_focus = 0;
+                /* This window owns its title strip, so the server no longer
+                 * treats a press there as a drag. Anything in that band which
+                 * is not one of ours is handed back as one - which is how the
+                 * window still moves when you grab the bar. */
+                if (event.y < TOOLBAR_H && event.x >= SIDEBAR_W &&
+                    !inside(&g_back, event.x, event.y) &&
+                    !inside(&g_fwd, event.x, event.y) &&
+                    !inside(&g_up, event.x, event.y) &&
+                    !inside(&g_search_box, event.x, event.y) &&
+                    event.x < menu_btn_x(0)) {
+                    win_move_begin(id);
+                    continue;
+                }
+                /* A menu button opens its own menu, and clicking the one that
+                 * is already down closes it. */
+                if (event.y >= menu_btn_y() &&
+                    event.y < menu_btn_y() + menu_btn_h() &&
+                    event.x >= menu_btn_x(0)) {
+                    const int m = (event.x - menu_btn_x(0)) / MENU_BTN_W;
+                    if (m >= 0 && m < M_COUNT)
+                        g_menu_open = (g_menu_open == m) ? -1 : m;
+                } else if (inside(&g_search_box, event.x, event.y)) {
+                    g_query_focus = 1;
                 } else if (event.x < SIDEBAR_W) {
+                    /* A press in the sidebar might be a click or the start of
+                     * dragging a pin out; which it was is only known at the
+                     * release, so both are set up here. */
                     const int row = sidebar_row(event.y);
+                    g_pin_drag = row;
+                    g_pin_out = 0;
                     if (row >= 0) {
+                        g_query_focus = 0;
                         goto_path(g_place[row].path, 1);
                         g_scroll = 0;
                         g_selected = -1;
+                        g_searching = 0;
                     }
                 } else if (inside(&g_back, event.x, event.y)) {
                     go_history(-1);
@@ -1583,6 +2054,17 @@ int main(int argc, char** argv)
                             select_at(hit, m);
                     }
                 }
+            } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_pin_drag >= 0) {
+                /* Far enough out of the sidebar to mean it. Half the sidebar's
+                 * width past its edge: far enough that a shaky click cannot
+                 * unpin anything, close enough that the gesture is one motion. */
+                const int out = event.x > SIDEBAR_W + SIDEBAR_W / 2;
+                if (out != g_pin_out) {
+                    g_pin_out = out;
+                    draw();
+                    win_present(id);
+                }
+                continue;
             } else if (event.type == WIN_EVENT_MOUSE_MOVE && g_press_item >= 0 &&
                        !win_dragging()) {
                 const int dx = event.x - g_press_x, dy = event.y - g_press_y;
@@ -1631,6 +2113,26 @@ int main(int argc, char** argv)
                  * receiver can read it when the drop arrives. */
                 char from[256];
                 snprintf(from, sizeof(from), "%s", win_drop_path());
+                /* Onto the sidebar is a pin, not a move. There is nowhere for
+                 * a file to go in a list of places, and "put this where I can
+                 * reach it" is what dropping it there plainly means. */
+                if (event.x < SIDEBAR_W) {
+                    struct stat st;
+                    if (stat(from, &st) == 0 && st.st_type == S_IFDIR) {
+                        place_pin(from);
+                        win_drop_accept(event.x, event.y);
+                        snprintf(g_status, sizeof(g_status), "pinned %s",
+                                 leaf_of(from));
+                    } else {
+                        win_drop_reject();
+                        snprintf(g_status, sizeof(g_status),
+                                 "only folders can be pinned");
+                    }
+                    g_press_item = -1;
+                    draw();
+                    win_present(id);
+                    continue;
+                }
                 const int hit = hit_test(event.x, event.y);
                 const int onto_folder =
                     hit >= 0 && g_entries[hit].d_type == S_IFDIR &&
@@ -1657,17 +2159,58 @@ int main(int argc, char** argv)
                 }
                 g_press_item = -1;
             } else if (event.type == WIN_EVENT_MOUSE_UP) {
+                /* A pin dragged clear of the sidebar and let go is unpinned.
+                 * Dragging out is the gesture people already expect for this,
+                 * and it needs no menu item and no confirmation - putting it
+                 * back is one drag the other way. */
+                if (g_pin_drag >= 0 && g_pin_out) {
+                    place_unpin(g_pin_drag);
+                    snprintf(g_status, sizeof(g_status), "unpinned");
+                }
+                g_pin_drag = -1;
+                g_pin_out = 0;
                 g_band = 0;
                 g_bar_drag = 0;
                 g_press_item = -1;
             } else if (event.type == WIN_EVENT_KEY) {
+                /* The search box takes the keyboard while it has the focus,
+                 * and Escape gives it back along with the folder that was
+                 * showing before - so a search is always one key from undone. */
+                if (g_query_focus) {
+                    const unsigned n = (unsigned)strlen(g_query);
+                    if (event.key == 27) {
+                        g_query[0] = '\0';
+                        g_query_focus = 0;
+                        g_searching = 0;
+                        g_status[0] = '\0';
+                    } else if (event.key == '\b' && n > 0) {
+                        g_query[n - 1] = '\0';
+                        search_run();
+                    } else if (event.key == '\n' || event.key == '\r') {
+                        search_run();
+                        g_query_focus = 0;
+                    } else if (event.key >= ' ' && event.key < 127 &&
+                               n + 1 < sizeof(g_query)) {
+                        g_query[n] = (char)event.key;
+                        g_query[n + 1] = '\0';
+                        /* Searched as you type, which the index makes cheap:
+                         * the walk has already happened and this is a scan of
+                         * a few thousand strings. */
+                        search_run();
+                    }
+                    draw();
+                    win_present(id);
+                    continue;
+                }
                 /* Arrows move the selection, not the view: moving the view and
                  * leaving the selection behind is how you lose your place. The
                  * view follows whatever is chosen. */
                 if (event.key != '\n' && event.key != '\r')
                     g_enter_armed = 0;
-                const int limit = (g_view == VIEW_TREE) ? g_row_count : g_count;
-                const int per_row = (g_view == VIEW_ICON) ? icon_cols() : 1;
+                const int limit = g_searching ? g_results_n
+                                : (g_view == VIEW_TREE) ? g_row_count : g_count;
+                const int per_row = (g_view == VIEW_ICON && !g_searching)
+                                  ? icon_cols() : 1;
                 if (event.key == WIN_KEY_DOWN || event.key == WIN_KEY_UP ||
                     (g_view == VIEW_ICON &&
                      (event.key == WIN_KEY_LEFT || event.key == WIN_KEY_RIGHT))) {
