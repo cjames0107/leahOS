@@ -11,6 +11,7 @@
  * the first of the month is both shorter and impossible to get wrong by one.
  */
 
+#include <app.h>
 #include <dialog.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,8 +21,6 @@
 #include <widget.h>
 #include <window.h>
 
-static uint32_t* g_px;
-static unsigned  g_w = 420, g_h = 380;
 
 /* What is being looked at, and what is actually today - the two are the same
  * until somebody presses an arrow, and the difference is what lets today keep
@@ -96,20 +95,25 @@ static void step(int months)
 /* The grid's geometry, worked out once so that drawing and hit-testing cannot
  * disagree about where a cell is. */
 #define HEAD_H 76
-static int cell_w(void) { return ((int)g_w - 32) / 7; }
-static int cell_h(void) { return ((int)g_h - HEAD_H - 16) / 6; }
+static struct app* g_app;
+static unsigned g_w(void) { return g_app->w; }
+static unsigned g_h(void) { return g_app->h; }
+
+static int cell_w(void) { return ((int)g_w() - 32) / 7; }
+static int cell_h(void) { return ((int)g_h() - HEAD_H - 16) / 6; }
 static int grid_x(void) { return 16; }
 static int grid_y(void) { return HEAD_H; }
 
 /* The three controls in the header, as one conjoined pill each side of the
  * title - previous, today, next - because they are the same kind of action. */
-static int pill_x(void) { return (int)g_w - 16 - 3 * 44; }
+static int pill_x(void) { return (int)g_w() - 16 - 3 * 44; }
 static int pill_y(void) { return 30; }
 #define PILL_W 44
 #define PILL_H 26
 
-static void draw(void)
+static void draw(struct app* a)
 {
+    (void)a;
     wg_theme();
     wg_glass_clear();
 
@@ -163,69 +167,49 @@ static int pill_hit(int x, int y)
     return (x >= pill_x() && i >= 0 && i < 3) ? i : -1;
 }
 
+static int on_event(struct app* a, const struct win_event* e)
+{
+    (void)a;
+    if (e->type == WIN_EVENT_MOUSE_DOWN) {
+        const int p = pill_hit(e->x, e->y);
+        if (p == 0)      step(-1);
+        else if (p == 1) go_today();
+        else if (p == 2) step(1);
+        else return 0;
+        return 1;
+    }
+    if (e->type == WIN_EVENT_KEY) {
+        if (e->key == WIN_KEY_LEFT)       step(-1);
+        else if (e->key == WIN_KEY_RIGHT) step(1);
+        else if (e->key == WIN_KEY_UP)    step(-12);
+        else if (e->key == WIN_KEY_DOWN)  step(12);
+        else if (e->key == 't')           go_today();
+        else return 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* Once a second, and only to notice midnight: the grid is otherwise static,
+ * and returning 0 is what keeps a static grid off the busy list. */
+static int on_tick(struct app* a)
+{
+    (void)a;
+    const int was = g_today_day;
+    read_today();
+    return was != g_today_day;
+}
+
 int main(int argc, char** argv)
 {
-    const int wx = argc > 1 ? atoi_simple(argv[1]) : 220;
-    const int wy = argc > 2 ? atoi_simple(argv[2]) : 160;
-    if (wg_font() != 0)
-        return 1;
-    const int id = win_create(wx, wy, g_w, g_h, "Calendar");
-    if (id < 0) {
-        printf("calendar: no window server\n");
-        return 1;
-    }
-    win_set_alpha(id);
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    win_set_min_size(id, 320, 300);
-    wg_target(g_px, g_w, g_h);
-
+    struct app a = {
+        .title = "Calendar",
+        .width = 420, .height = 380,
+        .min_width = 320, .min_height = 300,
+        .tick_ms = 1000,
+        .draw = draw, .event = on_event, .tick = on_tick,
+    };
+    g_app = &a;
     go_today();
-    draw();
-    win_present(id);
-
-    unsigned since = 0;
-    for (;;) {
-        struct win_event e;
-        while (win_poll(id, &e)) {
-            if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
-
-            if (e.type == WIN_EVENT_RESIZE) {
-                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
-                g_px = win_map(id);
-                if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
-            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                const int p = pill_hit(e.x, e.y);
-                if (p == 0)      step(-1);
-                else if (p == 1) go_today();
-                else if (p == 2) step(1);
-            } else if (e.type == WIN_EVENT_KEY) {
-                if (e.key == WIN_KEY_LEFT)       step(-1);
-                else if (e.key == WIN_KEY_RIGHT) step(1);
-                else if (e.key == WIN_KEY_UP)    step(-12);
-                else if (e.key == WIN_KEY_DOWN)  step(12);
-                else if (e.key == 't')           go_today();
-            } else {
-                continue;
-            }
-            draw();
-            win_present(id);
-        }
-
-        /* Once a second, and only to notice midnight: the grid is otherwise
-         * static, and redrawing a static grid is how a calendar ends up on the
-         * busy list in the resource monitor. */
-        if (++since >= 66) {
-            since = 0;
-            const int was = g_today_day;
-            read_today();
-            if (was != g_today_day) {
-                draw();
-                win_present(id);
-            }
-        }
-        msleep(15);
-    }
+    return app_run(&a, argc, argv);
 }

@@ -98,7 +98,14 @@ stage_bundle() {
     local app="$1"; local src="$2"; local icon="$3"; local opens="$4"; shift 4
     local dir="$STAGING/opt/$app.app"
     local exe
+    # Without the .elf. That extension is a fact about the build directory -
+    # it is how the Makefile tells a linked binary from an object file - and it
+    # has no business being visible in an installed system. Nothing else here
+    # carries it: /bin/ls is ls, and /opt/Calendar.app should hold Calendar's
+    # program, not Calendar's build artefact. The Info file names the
+    # executable, so the bundle stays self-describing either way.
     exe="$(basename "$src")"
+    exe="${exe%.elf}"
     mkdir -p "$dir"
     cp "$src" "$dir/$exe"
     {
