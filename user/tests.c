@@ -25,6 +25,7 @@
 #include <image.h>
 #include <ipc.h>
 #include <proc.h>
+#include <ui.h>
 #include <math.h>
 #include <paths.h>
 #include <time.h>
@@ -719,6 +720,130 @@ static void ipc_server(void)
         }
         ipc_reply(handle, &r);
     }
+}
+
+/* The component layer.
+ *
+ * Tested here rather than by clicking at the screen, because the screen test
+ * can only ask "did anything change", and answering that needs a pixel
+ * coordinate worked out by hand - which is a thing to get wrong that has
+ * nothing to do with the library. Events are synthesised straight into
+ * ui_event, so what is checked is the routing, not my aim.
+ */
+static int g_ui_fired;
+static void ui_test_action(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    ++g_ui_fired;
+}
+
+static const char* ui_test_row(void* user, int row)
+{
+    static const char* const kRows[3] = { "alpha", "beta", "gamma" };
+    (void)user;
+    return (row >= 0 && row < 3) ? kRows[row] : "";
+}
+
+static void press(struct ui_view* root, int x, int y)
+{
+    struct win_event e;
+    memset(&e, 0, sizeof(e));
+    e.type = WIN_EVENT_MOUSE_DOWN; e.x = x; e.y = y; e.button = 1;
+    ui_event(root, &e);
+}
+
+static void release(struct ui_view* root, int x, int y)
+{
+    struct win_event e;
+    memset(&e, 0, sizeof(e));
+    e.type = WIN_EVENT_MOUSE_UP; e.x = x; e.y = y; e.button = 1;
+    ui_event(root, &e);
+}
+
+static void tap_key(struct ui_view* root, unsigned key)
+{
+    struct win_event e;
+    memset(&e, 0, sizeof(e));
+    e.type = WIN_EVENT_KEY; e.key = key;
+    ui_event(root, &e);
+}
+
+static void test_ui(void)
+{
+    section("components");
+    ui_reset();
+    g_ui_fired = 0;
+
+    struct ui_view* root = ui_box(0, UI_STACK_V, 10, 6);
+    struct ui_view* field = ui_field(root, "");
+    ui_grow(field, 0);
+    struct ui_view* button = ui_button(root, "Go", ui_test_action, 0);
+    ui_grow(button, 0);
+    struct ui_view* list = ui_list(root, ui_test_row, 3, 0);
+    ui_on(list, ui_test_action, 0);
+
+    const struct ui_rect all = { 0, 0, 300, 300 };
+    ui_layout(root, all);
+
+    /* Layout gives every view a frame, and they do not overlap or escape. */
+    check("layout puts a view inside its parent",
+          field->frame.x >= root->frame.x &&
+          field->frame.x + field->frame.w <= root->frame.x + root->frame.w);
+    check("stacked views do not overlap",
+          button->frame.y >= field->frame.y + field->frame.h);
+    check("padding is honoured", field->frame.x == 10);
+    check("a growing view takes the room left over",
+          list->frame.h > field->frame.h);
+
+    /* A press lands on the view under it and takes the keyboard. */
+    press(root, field->frame.x + 20, field->frame.y + 5);
+    check("a press focuses the view under it", ui_focused() == field);
+
+    tap_key(root, 'h');
+    tap_key(root, 'i');
+    check("typing reaches the focused field", strcmp(ui_text(field), "hi") == 0);
+    tap_key(root, '\b');
+    check("backspace removes the character before the caret",
+          strcmp(ui_text(field), "h") == 0);
+    /* The caret moves rather than the text always being appended to, which is
+     * what makes a field correctable instead of retypeable. */
+    tap_key(root, WIN_KEY_LEFT);
+    tap_key(root, 'a');
+    check("a character is inserted at the caret",
+          strcmp(ui_text(field), "ah") == 0);
+
+    /* A button fires on release over itself, and not on the press. */
+    press(root, button->frame.x + 10, button->frame.y + 5);
+    check("a button does not fire on the press", g_ui_fired == 0);
+    release(root, button->frame.x + 10, button->frame.y + 5);
+    check("a button fires on the release", g_ui_fired == 1);
+
+    /* Released somewhere else, it does not fire - which is how a press is
+     * taken back by sliding off the control. */
+    press(root, button->frame.x + 10, button->frame.y + 5);
+    release(root, list->frame.x + 10, list->frame.y + 40);
+    check("a press slid off the button is cancelled", g_ui_fired == 1);
+
+    /* A list selects the row under the pointer, and the arrows move it. */
+    press(root, list->frame.x + 10, list->frame.y + 2);
+    check("a list selects the row that was pressed", list->selected == 0);
+    tap_key(root, WIN_KEY_DOWN);
+    check("the arrows move a list's selection", list->selected == 1);
+    tap_key(root, WIN_KEY_UP);
+    tap_key(root, WIN_KEY_UP);
+    check("and stop at the end rather than wrapping", list->selected == 0);
+
+    /* Radios in one parent are one group. */
+    ui_reset();
+    struct ui_view* group = ui_box(0, UI_STACK_V, 0, 0);
+    struct ui_view* r1 = ui_radio(group, "one", 1);
+    struct ui_view* r2 = ui_radio(group, "two", 0);
+    ui_layout(group, all);
+    press(root, 0, 0);                  /* clear focus from the old tree */
+    press(group, r2->frame.x + 4, r2->frame.y + 4);
+    check("choosing a radio turns its sibling off", r2->on && !r1->on);
+
+    ui_reset();
 }
 
 static void test_ipc(void)
@@ -3022,6 +3147,7 @@ int main(void)
     test_permissions();
     test_accounts();
     test_tcp();
+    test_ui();
     test_ipc();
     test_driver_abi();
     test_exit_churn();

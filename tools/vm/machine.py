@@ -171,6 +171,30 @@ class Machine:
             seen.add(data[i:i + 3])
         return len(seen)
 
+    def screen_signature(self, name="sig"):
+        """A number that changes when the screen does.
+
+        Counting colours answers "is anything drawn at all", and that is all it
+        answers. It cannot see a window that opened over a colourful wallpaper,
+        because covering colour with a flat panel makes the count go *down* -
+        which reads as nothing having been drawn.
+
+        What a GUI check actually wants to ask is "did the screen change when I
+        did that", and for a click on a component that is the whole assertion:
+        the tree routed the event, something changed, and it was repainted.
+        """
+        ppm = "/tmp/%s.ppm" % name
+        self.cmd("screendump %s" % ppm, 1.0)
+        try:
+            with open(ppm, "rb") as f:
+                data = f.read()
+        except OSError:
+            return 0
+        total = 0
+        for i in range(0, len(data) - 3, 613):
+            total = (total * 131 + data[i]) & 0xFFFFFFFF
+        return total
+
     def serial(self):
         try:
             with open(LOG, "r", errors="replace") as f:

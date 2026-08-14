@@ -28,13 +28,12 @@ void app_quit(struct app* a, int status)
     a->status = status;
 }
 
+static void paint(struct app* a);
+
 void app_redraw(struct app* a)
 {
-    if (a->draw != 0 && a->px != 0) {
-        a->draw(a);
-        menu_draw();
-        win_present(a->id);
-    }
+    if (a->px != 0)
+        paint(a);
 }
 
 /* Take the new size and make every view of it agree. */
@@ -46,12 +45,42 @@ static int resized(struct app* a, int w, int h)
     if (a->px == 0)
         return -1;
     wg_target(a->px, a->w, a->h);
+    /* The components are laid out against the window, so a new window size is
+     * a new layout - and it happens here rather than at the next draw, because
+     * an event may arrive first and would otherwise be hit-tested against the
+     * old frames. */
+    app_relayout(a);
     return 0;
+}
+
+/* Paint: the application's own background if it has one, then its components
+ * over the top. */
+static void paint(struct app* a)
+{
+    if (a->draw != 0)
+        a->draw(a);
+    else {
+        wg_theme();
+        wg_glass_clear();
+    }
+    if (a->root != 0)
+        ui_draw(a->root);
+    menu_draw();
+    win_present(a->id);
+}
+
+void app_relayout(struct app* a)
+{
+    if (a == 0 || a->root == 0)
+        return;
+    const struct ui_rect all = { 0, 0, (int)a->w, (int)a->h };
+    ui_layout(a->root, all);
 }
 
 int app_run(struct app* a, int argc, char** argv)
 {
-    if (a == 0 || a->draw == 0)
+    /* One or the other has to exist, or there is nothing to show. */
+    if (a == 0 || (a->draw == 0 && a->root == 0))
         return 1;
     if (wg_font() != 0)
         return 1;
@@ -84,8 +113,8 @@ int app_run(struct app* a, int argc, char** argv)
         return 1;
     wg_target(a->px, a->w, a->h);
 
-    a->draw(a);
-    win_present(a->id);
+    app_relayout(a);
+    paint(a);
 
     /* The tick is counted in fifteen-millisecond passes rather than measured,
      * which is what the hand-written loops did and is accurate enough for
@@ -114,9 +143,13 @@ int app_run(struct app* a, int argc, char** argv)
                 dirty = 1;              /* the menu itself has to be redrawn */
                 continue;
             }
-            /* The one piece of behaviour offered rather than required: a
-             * right-click opens the menu when the application declared one and
-             * did not claim the event for itself. */
+            /* Components first: they are the interface, and an application's
+             * own handler is for what is left over. A view that took the event
+             * says so by asking for a redraw, and the handler still sees it -
+             * an application may want to know about a click its list already
+             * dealt with. */
+            if (a->root != 0)
+                dirty |= ui_event(a->root, &e);
             if (a->event != 0)
                 dirty |= a->event(a, &e);
             if (e.type == WIN_EVENT_MOUSE_DOWN && e.button == 2 &&
@@ -132,11 +165,8 @@ int app_run(struct app* a, int argc, char** argv)
                 dirty |= a->tick(a);
         }
 
-        if (dirty && !a->quit) {
-            a->draw(a);
-            menu_draw();
-            win_present(a->id);
-        }
+        if (dirty && !a->quit)
+            paint(a);
         msleep(15);
     }
 

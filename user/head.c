@@ -1,9 +1,15 @@
-/* head - the first few lines of something. */
+/* head - the first few lines of something.
+ *
+ * Ported to <cli.h>, and worth comparing against what it was. The option
+ * parsing was eight lines that knew "-n10" and "-n 10" are the same thing; the
+ * error messages named the program in a string literal; the loop over the
+ * files had to skip the option's own value by index. All of that was correct
+ * and all of it was this program's copy of it.
+ */
 
+#include <cli.h>
 #include <fcntl.h>
-#include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
 
 static void first(int fd, long want, const char* name, int show_name)
@@ -24,32 +30,31 @@ static void first(int fd, long want, const char* name, int show_name)
 
 int main(int argc, char** argv)
 {
-    long want = 10;
-    int i = 1;
-    if (i < argc && argv[i][0] == '-' && argv[i][1] == 'n') {
-        /* -n10 and -n 10 both, because both are what people type. */
-        if (argv[i][2] != '\0') { want = atoi_simple(&argv[i][2]); ++i; }
-        else if (i + 1 < argc) { want = atoi_simple(argv[i + 1]); i += 2; }
-    }
+    cli_begin(argc, argv, "[-n lines] [file...]");
+
+    const long want = cli_number("-n", 10);
     if (want <= 0)
         return 0;
 
-    if (i >= argc) {
+    /* Nothing named: standard input, which is what makes `... | head` work. */
+    if (cli_argc() == 0) {
         first(0, want, 0, 0);
         return 0;
     }
-    const int many = (argc - i) > 1;
+
+    const int many = cli_argc() > 1;
     int status = 0;
-    for (int k = 0; i < argc; ++i, ++k) {
-        const int fd = open(argv[i], O_RDONLY);
+    for (int i = 0; i < cli_argc(); ++i) {
+        const char* path = cli_arg(i);
+        const int fd = open(path, O_RDONLY);
         if (fd < 0) {
-            fprintf(stderr, "head: %s: %s\n", argv[i], strerror(errno));
+            cli_fail("%s: cannot open it", path);
             status = 1;
             continue;
         }
-        if (many && k > 0)
+        if (many && i > 0)
             printf("\n");
-        first(fd, want, argv[i], many);
+        first(fd, want, path, many);
         close(fd);
     }
     return status;
