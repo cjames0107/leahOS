@@ -463,13 +463,22 @@ static void soft_shadow(int x, int y, int w, int h, int r)
 {
     if (!glass_on())
         return;
-    const struct surface c = canvas();
-    static const unsigned kRing[3] = { 0x26u, 0x16u, 0x0Au };
-    for (int i = 2; i >= 0; --i) {
-        const unsigned a = kRing[i];
-        draw_round_rect_outline(&c, x - i, y - i + 1, w + 2 * i, h + 2 * i,
-                                r + i, 1, (a << 24));
-    }
+    /* Through the alpha-keeping path, which is the whole reason this looked
+     * like a border rather than a shadow.
+     *
+     * draw_round_rect_outline composites with draw_over, and draw_over returns
+     * something opaque. On the glass a client's buffer starts as transparent
+     * black, so a ring of black at alpha 0x26 came out as *solid* black - and
+     * three of them, one pixel apart, drew a hard dark outline around every
+     * button and pill. It was a shadow the whole time; it just had its
+     * transparency thrown away by the function drawing it.
+     *
+     * Fainter as well as translucent: a shadow that reads as an edge is too
+     * dark whatever it is composited with. */
+    static const unsigned kRing[3] = { 0x1Au, 0x10u, 0x08u };
+    for (int i = 2; i >= 0; --i)
+        wg_glass_outline(x - i, y - i + 1, w + 2 * i, h + 2 * i, r + i, 1,
+                         kRing[i] << 24);
 }
 
 /* Source-over onto a buffer that may itself be see-through.
@@ -652,8 +661,8 @@ void wg_row_select(int x, int y, int w, int h)
     const struct surface c = canvas();
     const int r = h / 2 > WG_RADIUS ? WG_RADIUS : h / 2;
     if (glass_on()) {
-        wg_glass_fill(x, y, w, h, r, 0x59FFFFFFu);
-        wg_glass_outline(x, y, w, h, r, 1, 0x4DFFFFFFu);
+        wg_glass_fill(x, y, w, h, r, 0x8CFFFFFFu);
+        wg_glass_outline(x, y, w, h, r, 1, 0x66FFFFFFu);
     } else {
         draw_round_rect(&c, x, y, w, h, r, 0xFF000000u | g_sel);
     }
@@ -697,7 +706,7 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
 
     soft_shadow(x, y, w, h, r);
     if (glass_on())
-        wg_glass_fill(x, y, w, h, r, 0x38FFFFFFu);
+        wg_glass_fill(x, y, w, h, r, 0x59FFFFFFu);
     else
         /* Darker than it was: at ten counts off the base this was a control
          * you had to look for against the window behind it. */
@@ -707,7 +716,7 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
     if (selected >= 0 && selected < count) {
         const int sx = x + selected * seg_w;
         if (glass_on())
-            wg_glass_fill(sx + 1, y + 1, seg_w - 2, h - 2, r - 1, 0x66FFFFFFu);
+            wg_glass_fill(sx + 1, y + 1, seg_w - 2, h - 2, r - 1, 0xB3FFFFFFu);
         else
             draw_round_rect(&c, sx + 1, y + 1, seg_w - 2, h - 2, r - 1,
                             0x99FFFFFFu);
@@ -725,7 +734,7 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
      * on a design that otherwise has none, and it made every control look
      * stuck onto the window rather than part of it. */
     if (glass_on())
-        wg_glass_outline(x, y, w, h, r, 1, 0x3AFFFFFFu);
+        wg_glass_outline(x, y, w, h, r, 1, 0x59FFFFFFu);
     inner_glow(x, y, w, h, r);
 
     for (int i = 0; i < count; ++i) {
@@ -755,8 +764,8 @@ void wg_button(int x, int y, int w, int h, const char* label, int down)
      * the text jumping. */
     soft_shadow(x, y, w, h, WG_RADIUS);
     if (glass_on()) {
-        wg_glass_fill(x, y, w, h, WG_RADIUS, down ? 0x8CFFFFFFu : 0x4DFFFFFFu);
-        wg_glass_outline(x, y, w, h, WG_RADIUS, 1, 0x40FFFFFFu);
+        wg_glass_fill(x, y, w, h, WG_RADIUS, down ? 0xA6FFFFFFu : 0x73FFFFFFu);
+        wg_glass_outline(x, y, w, h, WG_RADIUS, 1, 0x59FFFFFFu);
     } else {
         /* A wash of white over a window that is already almost white is not a
          * button, it is a rumour of one. Opaque, it gets a tone of its own and
@@ -978,8 +987,8 @@ void wg_check(int x, int y, int size, int on)
         draw_round_rect(&c, x, y, size, size, r, 0xFF000000u | wg_sel_colour());
         tick(x, y, size, 0xFFFFFF);
     } else if (glass_on()) {
-        wg_glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
-        wg_glass_outline(x, y, size, size, r, 1, 0x66FFFFFFu);
+        wg_glass_fill(x, y, size, size, r, 0x59FFFFFFu);
+        wg_glass_outline(x, y, size, size, r, 1, 0x8CFFFFFFu);
     } else {
         /* An empty box needs an edge to be a box at all.
          *
@@ -1001,8 +1010,8 @@ void wg_radio(int x, int y, int size, int on)
     const struct surface c = canvas();
     const int r = size / 2;
     if (glass_on()) {
-        wg_glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
-        wg_glass_outline(x, y, size, size, r, 1, 0x66FFFFFFu);
+        wg_glass_fill(x, y, size, size, r, 0x59FFFFFFu);
+        wg_glass_outline(x, y, size, size, r, 1, 0x8CFFFFFFu);
     } else {
         draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 20));
         draw_round_rect_outline(&c, x, y, size, size, r, 1,

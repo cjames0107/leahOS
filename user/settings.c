@@ -60,21 +60,22 @@ static const char* kPages[PAGES] = {
  * the server is told to look. */
 static struct ws_shared* g_ws;
 
-/* Which element the colour grid is editing. */
-#define EL_DESKTOP 0
-#define EL_FACE    1
-#define EL_TITLE   2
-#define EL_CURSOR  3
-#define EL_SEL     4
-#define EL_BODY    5
-#define ELEMENTS   6
-static const char* kElements[ELEMENTS] = {
-    "desktop", "window", "title", "pointer", "selection", "body"
-};
+/* Which of the two looks is on. Remembered rather than worked out from the
+ * colours: a theme read back from ~/.leahrc is a set of numbers, and asking
+ * "is this the dark one" of a pile of numbers is a guess. */
+static int g_mode;
 
-/* Whole looks rather than six separate choices. Most people want "the dark
- * one", not to pick a shadow colour; the individual controls are still there
- * for anyone who does. */
+/* Two looks, and no way to pick a shadow colour.
+ *
+ * There used to be six elements and three sliders, so a person could set the
+ * pointer to lime and the title bar to maroon. That is a lot of interface for
+ * a choice nobody makes, and every combination it allows has to look like this
+ * system - which most of them did not. Light or dark is the choice people
+ * actually have, and the rest follows from it.
+ *
+ * The presets remain as the definition of those two looks rather than as a
+ * menu: light is the first and dark is the second, and nothing else is
+ * reachable from the interface. */
 struct preset {
     const char* name;
     uint32_t desktop, face, light, shadow, title, title_text, cursor;
@@ -83,16 +84,16 @@ struct preset {
     uint32_t pattern;
 };
 static const struct preset kPresets[] = {
-    { "Default",  0x8894A8, 0xF2F4F7, 0xFFFFFF, 0x9AA3AE, 0xF2F4F7, 0x18202B,
+    { "Light", 0x8894A8, 0xF2F4F7, 0xFFFFFF, 0x9AA3AE, 0xF2F4F7, 0x18202B,
       0xFFFFFF, 0x2C6BED, 0xFFFFFF, 0x18202B, 0, WS_PATTERN_FLAT },
-    { "Slate",    0x2E3440, 0x4C566A, 0x7B88A1, 0x2B303B, 0x5E81AC, 0xECEFF4,
-      0xD8DEE9, 0x5E81AC, 0x3B4252, 0xE5E9F0, 10, WS_PATTERN_GRID },
-    { "Parchment",0x8B7355, 0xE8DCC0, 0xFFF8E7, 0x9A8C70, 0x6B4423, 0xFFF8E7,
-      0xFFF8E7, 0xC8B48A, 0xFFFDF5, 0x2A1F14, -10, WS_PATTERN_WEAVE },
-    { "Contrast", 0x000000, 0xFFFFFF, 0xFFFFFF, 0x000000, 0x000000, 0xFFFFFF,
-      0xFFFF00, 0x0000FF, 0xFFFFFF, 0x000000, 60, WS_PATTERN_FLAT },
+    /* Dark, and dark all the way through: a window face that is dark with ink
+     * that is still black is not a dark mode, it is an unreadable light one. */
+    { "Dark",  0x1B2028, 0x272C34, 0x3A414D, 0x14181E, 0x272C34, 0xE8ECF2,
+      0xE8ECF2, 0x3E7BF0, 0x1E232A, 0xE8ECF2, 10, WS_PATTERN_FLAT },
 };
 #define PRESETS (int)(sizeof(kPresets) / sizeof(kPresets[0]))
+#define MODE_LIGHT 0
+#define MODE_DARK  1
 
 /* One name per WS_PATTERN_*, and the compiler is told the count so that adding
  * a pattern without naming it is a build error rather than a null pointer
@@ -111,15 +112,7 @@ static const char* kPatterns[] = {
  * nulls to the declared length and the check cannot fail. */
 _Static_assert(sizeof(kPatterns) / sizeof(kPatterns[0]) == WS_PATTERN_COUNT,
                "every backdrop pattern needs a name on the Appearance page");
-static int g_element;
 
-/* Where the RGB picker sits on the Appearance page, and which of its sliders
- * is being dragged. Dragging matters more than clicking here: you find a
- * colour by sweeping until it looks right, not by landing on a number. */
-#define PICK_X (SIDEBAR + 90)
-#define PICK_Y 118
-#define PICK_W 300
-static int g_pick_drag = -1;
 
 /* Written through to the user's file as well as to the running desktop, so a
  * choice survives the session that made it. */
@@ -140,6 +133,7 @@ static void theme_changed(void)
     prefs_set_u32("theme.contrast", (unsigned)(g_ws->theme.contrast + 100));
     prefs_set_u32("theme.pattern", g_ws->theme.pattern);
     prefs_set_u32("theme.blur", g_ws->theme.blur);
+    prefs_set_u32("theme.mode", (unsigned)g_mode);
     prefs_set_str("theme.wallpaper", (const char*)g_ws->theme.wallpaper);
     if (prefs_save() != 0)
         snprintf(g_note, sizeof(g_note), "changed, but could not be saved");
@@ -177,69 +171,23 @@ static void apply_saved_theme(void)
     g_ws->theme.pattern    = prefs_get_u32("theme.pattern", WS_PATTERN_DITHER);
     /* Off unless this user has asked for it: see the note in wproto.h. */
     g_ws->theme.blur       = prefs_get_u32("theme.blur", 0);
-    const char* paper = prefs_get_str("theme.wallpaper", "");
+    g_mode = (int)prefs_get_u32("theme.mode", MODE_LIGHT);
+    /* A picture rather than a flat colour, because a desktop with nothing on
+     * it looks like something failed to load. Whatever the person chose wins;
+     * this is only what is there before anybody chooses. */
+    const char* paper = prefs_get_str("theme.wallpaper",
+                                      "/usr/share/wallpapers/town.png");
     int n = 0;
     while (paper[n] != '\0' && n < 126) { g_ws->theme.wallpaper[n] = paper[n]; ++n; }
     g_ws->theme.wallpaper[n] = '\0';
     __atomic_add_fetch(&g_ws->theme.generation, 1, __ATOMIC_RELEASE);
 }
 
-/* What the sliders should start at: whatever the chosen element is already,
- * so opening the picker never throws away the current colour. */
-static uint32_t element_colour(void)
-{
-    if (g_ws == 0)
-        return 0x808080;
-    switch (g_element) {
-    case EL_DESKTOP: return g_ws->theme.desktop;
-    case EL_FACE:    return g_ws->theme.face;
-    case EL_TITLE:   return g_ws->theme.title_active;
-    case EL_CURSOR:  return g_ws->theme.cursor;
-    case EL_SEL:     return g_ws->theme.selection;
-    case EL_BODY:    return g_ws->theme.body;
-    }
-    return 0x808080;
-}
 
-static void set_colour(uint32_t c)
-{
-    if (g_ws == 0) {
-        snprintf(g_note, sizeof(g_note), "no window server to tell");
-        return;
-    }
-    switch (g_element) {
-    case EL_DESKTOP:
-        g_ws->theme.desktop = c;
-        /* Choosing a colour means wanting the colour, not the picture that was
-         * covering it. */
-        g_ws->theme.wallpaper[0] = '\0';
-        break;
-    case EL_FACE:
-        g_ws->theme.face = c;
-        break;
-    case EL_TITLE:
-        g_ws->theme.title_active = c;
-        break;
-    case EL_CURSOR:
-        g_ws->theme.cursor = c;
-        break;
-    case EL_SEL:
-        g_ws->theme.selection = c;
-        break;
-    case EL_BODY:
-        /* Ink follows the body: light text on a light background is not a
-         * choice anyone is making on purpose. */
-        g_ws->theme.body = c;
-        g_ws->theme.text = (((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF))
-                           > 3 * 128 ? 0x000000 : 0xFFFFFF;
-        break;
-    }
-    theme_changed();
-    snprintf(g_note, sizeof(g_note), "%s set", kElements[g_element]);
-}
 
 static void apply_preset(int i)
 {
+    g_mode = i;
     if (g_ws == 0 || i < 0 || i >= PRESETS)
         return;
     const struct preset* p = &kPresets[i];
@@ -420,25 +368,14 @@ static void draw_appearance(void)
      * drawn rather than what colour it is. */
     int y = 58;
     wg_group_begin(x, y, w, 2, "Theme");
-    wg_row(x, y, w, 0, "Preset");
-    for (int i = 0; i < PRESETS; ++i)
-        wg_pill(x + w - 14 - (PRESETS - i) * 80, y + 4, 76, 22,
-                kPresets[i].name, 0);
+    wg_row(x, y, w, 0, "Appearance");
+    wg_pill(x + w - 170, y + 4, 76, 22, "Light", g_mode == MODE_LIGHT);
+    wg_pill(x + w - 90,  y + 4, 76, 22, "Dark",  g_mode == MODE_DARK);
     wg_row(x, y, w, 1, "Window Backdrop");
     wg_pill(x + w - 170, y + WG_ROW_H + 4, 76, 22, "opaque",
             g_ws && g_ws->theme.blur == 0);
     wg_pill(x + w - 90,  y + WG_ROW_H + 4, 76, 22, "blurred",
             g_ws && g_ws->theme.blur != 0);
-
-    /* Colour: which element, and the three sliders that set it. */
-    y += 2 * WG_ROW_H + 34;
-    wg_group_begin(x, y, w, 2, "Colour");
-    wg_row(x, y, w, 0, "Element");
-    for (int i = 0; i < ELEMENTS && i < 3; ++i)
-        wg_pill(x + w - 14 - (3 - i) * 84, y + 4, 80, 22, kElements[i],
-                g_element == i);
-    wg_row(x, y, w, 1, "Value");
-    wg_rgb_draw(x + w - 190, y + WG_ROW_H + 2, 176, element_colour());
 
     /* Text and desktop. */
     y += 2 * WG_ROW_H + 34;
@@ -726,11 +663,7 @@ int main(int argc, char** argv)
                 wg_target(g_px, g_w, g_h);
             } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_vol_drag) {
                 set_audio_volume(wg_slider_value(VOL_X, VOL_W, e.x, 100));
-            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_pick_drag >= 0) {
-                set_colour(wg_rgb_move(element_colour(), g_pick_drag,
-                                       PICK_X, PICK_W, e.x));
             } else if (e.type == WIN_EVENT_MOUSE_UP) {
-                g_pick_drag = -1;
                 g_vol_drag = 0;
             } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
                 if (e.x < SIDEBAR) {
@@ -766,32 +699,16 @@ int main(int argc, char** argv)
                     const int inrow = e.y >= 0;
 
                     if (inrow && e.y >= y1 + 4 && e.y < y1 + 26) {
-                        for (int i = 0; i < PRESETS; ++i) {
-                            const int bx = x + w - 14 - (PRESETS - i) * 80;
-                            if (e.x >= bx && e.x < bx + 76)
-                                apply_preset(i);
-                        }
+                        if (e.x >= x + w - 170 && e.x < x + w - 94)
+                            apply_preset(MODE_LIGHT);
+                        else if (e.x >= x + w - 90 && e.x < x + w - 14)
+                            apply_preset(MODE_DARK);
                     } else if (inrow && e.y >= y1 + WG_ROW_H + 4 &&
                                e.y < y1 + WG_ROW_H + 26 && g_ws != 0) {
                         if (e.x >= x + w - 170 && e.x < x + w - 94)
                             { g_ws->theme.blur = 0; theme_changed(); }
                         else if (e.x >= x + w - 90 && e.x < x + w - 14)
                             { g_ws->theme.blur = 1; theme_changed(); }
-                    } else if (inrow && e.y >= y2 + 4 && e.y < y2 + 26) {
-                        for (int i = 0; i < ELEMENTS && i < 3; ++i) {
-                            const int bx = x + w - 14 - (3 - i) * 84;
-                            if (e.x >= bx && e.x < bx + 80)
-                                g_element = i;
-                        }
-                    } else if (inrow && e.y >= y2 + WG_ROW_H &&
-                               e.y < y2 + WG_ROW_H + WG_RGB_H) {
-                        g_pick_drag = wg_rgb_hit(x + w - 190,
-                                                 y2 + WG_ROW_H + 2, 176,
-                                                 e.x, e.y);
-                        if (g_pick_drag >= 0)
-                            set_colour(wg_rgb_move(element_colour(),
-                                                   g_pick_drag,
-                                                   x + w - 190, 176, e.x));
                     } else if (inrow && e.y >= y3 + 4 && e.y < y3 + 26 &&
                                g_ws != 0) {
                         if (e.x >= x + w - 170 && e.x < x + w - 94)
