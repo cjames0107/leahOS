@@ -128,6 +128,11 @@ int  wg_container_radius(int pad);
  * because the component layer builds its own surfaces out of the same stuff. */
 void wg_glass_fill(int x, int y, int w, int h, int radius, uint32_t argb);
 
+/* The same for an edge: an outline that stays translucent instead of being
+ * flattened into an opaque line by draw_over. */
+void wg_glass_outline(int x, int y, int w, int h, int radius, int thick,
+                      uint32_t argb);
+
 void wg_container(int x, int y, int w, int h, int pad);
 
 /* Full height, square, a shade apart from the content beside it. */

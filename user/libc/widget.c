@@ -435,6 +435,13 @@ static void inner_glow(int x, int y, int w, int h, int radius)
     struct surface c = canvas();
     const int band = h / 3 > 1 ? h / 3 : 1;
 
+    if (glass_on()) {
+        /* One faint edge on the glass rather than two banded ones: the clip
+         * that makes the bands lives on the surface, and the alpha-keeping
+         * path does not go through a surface. */
+        wg_glass_outline(x, y, w, h, radius, 1, 0x30FFFFFFu);
+        return;
+    }
     c.cx = x; c.cy = y; c.cw = w; c.ch = band;
     draw_round_rect_outline(&c, x, y, w, h, radius, 1, 0x59FFFFFFu);
 
@@ -514,6 +521,44 @@ static void blend_px(int x, int y, uint32_t over)
  * buffer already held and hand back something opaque, which is right for a
  * control drawn on a surface and wrong for the surface itself. This leaves the
  * alpha in the pixel for the server to blend against the blur. */
+/* A rounded outline that keeps its alpha.
+ *
+ * draw_round_rect_outline goes through draw_over, which hands back something
+ * opaque because it assumes it is painting *onto* a surface. On the glass the
+ * buffer starts as transparent black, so a translucent white line composited
+ * that way comes out dark grey and solid - which is what every border on a
+ * blurred window was, and why the buttons looked like slate.
+ *
+ * Coverage of the shape minus coverage of the shape one thickness in, blended
+ * per pixel: the same edge with the transparency left in it. */
+void wg_glass_outline(int x, int y, int w, int h, int radius, int thick,
+                      uint32_t argb)
+{
+    const unsigned a = (argb >> 24) & 0xFF;
+    const uint32_t rgb = argb & 0x00FFFFFFu;
+    if (thick < 1) thick = 1;
+    for (int py = y; py < y + h; ++py) {
+        if (py < 0 || (unsigned)py >= g_h)
+            continue;
+        for (int px = x; px < x + w; ++px) {
+            if (px < 0 || (unsigned)px >= g_w)
+                continue;
+            const int outer = draw_round_coverage(px, py, x, y, w, h, radius);
+            if (outer == 0)
+                continue;
+            const int inner = draw_round_coverage(px, py, x + thick, y + thick,
+                                                  w - 2 * thick, h - 2 * thick,
+                                                  radius > thick ? radius - thick
+                                                                 : 0);
+            const int edge = outer - inner;
+            if (edge <= 0)
+                continue;
+            const unsigned pa = (a * (unsigned)edge + 127) / 255;
+            blend_px(px, py, (pa << 24) | rgb);
+        }
+    }
+}
+
 void wg_glass_fill(int x, int y, int w, int h, int radius, uint32_t argb)
 {
     const unsigned a = (argb >> 24) & 0xFF;
@@ -608,7 +653,7 @@ void wg_row_select(int x, int y, int w, int h)
     const int r = h / 2 > WG_RADIUS ? WG_RADIUS : h / 2;
     if (glass_on()) {
         wg_glass_fill(x, y, w, h, r, 0x59FFFFFFu);
-        draw_round_rect_outline(&c, x, y, w, h, r, 1, 0x4DFFFFFFu);
+        wg_glass_outline(x, y, w, h, r, 1, 0x4DFFFFFFu);
     } else {
         draw_round_rect(&c, x, y, w, h, r, 0xFF000000u | g_sel);
     }
@@ -652,7 +697,7 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
 
     soft_shadow(x, y, w, h, r);
     if (glass_on())
-        draw_round_rect(&c, x, y, w, h, r, 0x38FFFFFFu);
+        wg_glass_fill(x, y, w, h, r, 0x38FFFFFFu);
     else
         /* Darker than it was: at ten counts off the base this was a control
          * you had to look for against the window behind it. */
@@ -661,8 +706,11 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
     /* The chosen segment, inside the pill rather than instead of it. */
     if (selected >= 0 && selected < count) {
         const int sx = x + selected * seg_w;
-        draw_round_rect(&c, sx + 1, y + 1, seg_w - 2, h - 2, r - 1,
-                        glass_on() ? 0x66FFFFFFu : 0x99FFFFFFu);
+        if (glass_on())
+            wg_glass_fill(sx + 1, y + 1, seg_w - 2, h - 2, r - 1, 0x66FFFFFFu);
+        else
+            draw_round_rect(&c, sx + 1, y + 1, seg_w - 2, h - 2, r - 1,
+                            0x99FFFFFFu);
     }
 
     /* Hairlines between the segments, short of the ends so they do not cut
@@ -677,7 +725,7 @@ void wg_pill_group(int x, int y, int seg_w, int h, int count,
      * on a design that otherwise has none, and it made every control look
      * stuck onto the window rather than part of it. */
     if (glass_on())
-        draw_round_rect_outline(&c, x, y, w, h, r, 1, 0x3AFFFFFFu);
+        wg_glass_outline(x, y, w, h, r, 1, 0x3AFFFFFFu);
     inner_glow(x, y, w, h, r);
 
     for (int i = 0; i < count; ++i) {
@@ -707,9 +755,8 @@ void wg_button(int x, int y, int w, int h, const char* label, int down)
      * the text jumping. */
     soft_shadow(x, y, w, h, WG_RADIUS);
     if (glass_on()) {
-        draw_round_rect(&c, x, y, w, h, WG_RADIUS,
-                        down ? 0x8CFFFFFFu : 0x4DFFFFFFu);
-        draw_round_rect_outline(&c, x, y, w, h, WG_RADIUS, 1, 0x40FFFFFFu);
+        wg_glass_fill(x, y, w, h, WG_RADIUS, down ? 0x8CFFFFFFu : 0x4DFFFFFFu);
+        wg_glass_outline(x, y, w, h, WG_RADIUS, 1, 0x40FFFFFFu);
     } else {
         /* A wash of white over a window that is already almost white is not a
          * button, it is a rumour of one. Opaque, it gets a tone of its own and
@@ -932,8 +979,19 @@ void wg_check(int x, int y, int size, int on)
         tick(x, y, size, 0xFFFFFF);
     } else if (glass_on()) {
         wg_glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
+        wg_glass_outline(x, y, size, size, r, 1, 0x66FFFFFFu);
     } else {
-        draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 12));
+        /* An empty box needs an edge to be a box at all.
+         *
+         * Twelve counts off the window's own colour was almost visible when
+         * the window was nearly white, and stopped being visible at all once
+         * windows took a tint from the theme - an unticked checkbox simply was
+         * not there. This is the one place a drawn outline is the control
+         * rather than decoration on it, which is why it is the exception to
+         * having removed them. */
+        draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 20));
+        draw_round_rect_outline(&c, x, y, size, size, r, 1,
+                                darken(wg_base_colour(), 90));
     }
     inner_glow(x, y, size, size, r);
 }
@@ -942,10 +1000,14 @@ void wg_radio(int x, int y, int size, int on)
 {
     const struct surface c = canvas();
     const int r = size / 2;
-    if (glass_on())
+    if (glass_on()) {
         wg_glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
-    else
-        draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 12));
+        wg_glass_outline(x, y, size, size, r, 1, 0x66FFFFFFu);
+    } else {
+        draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 20));
+        draw_round_rect_outline(&c, x, y, size, size, r, 1,
+                                darken(wg_base_colour(), 90));
+    }
     if (on) {
         const int inset = size / 4;
         draw_round_rect(&c, x + inset, y + inset, size - inset * 2,

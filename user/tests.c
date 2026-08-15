@@ -861,6 +861,26 @@ static void test_ui(void)
     press(group, r2->frame.x + 4, r2->frame.y + 4);
     check("choosing a radio turns its sibling off", r2->on && !r1->on);
 
+    /* A child never draws outside the box holding it.
+     *
+     * This is the bug from the split: a label's width is measured from its
+     * text when it is made, and a view that does not grow keeps what it asked
+     * for. Drag the divider left and the label went on drawing at its old
+     * width, out through the side of the pane and across its neighbour. */
+    {
+        struct ui_view* narrow = ui_box(0, UI_STACK_V, 4, 2);
+        struct ui_view* wide = ui_label(narrow, "a label far wider than its box");
+        ui_grow(wide, 0);
+        const struct ui_rect small = { 0, 0, 60, 100 };
+        ui_layout(narrow, small);
+        check("a view is never wider than the box holding it",
+              wide->frame.x + wide->frame.w <=
+              narrow->frame.x + narrow->frame.w);
+        check("nor taller than it",
+              wide->frame.y + wide->frame.h <=
+              narrow->frame.y + narrow->frame.h);
+    }
+
     /* --- the second set of components ---------------------------------- */
     ui_reset();
     g_ui_fired = 0;

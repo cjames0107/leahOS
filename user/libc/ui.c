@@ -521,8 +521,12 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
         struct ui_view* c = v->child;
         if (c != 0) {
             const int tall = c->want_h > into.h ? c->want_h : into.h;
-            struct ui_rect r = { into.x, into.y - v->scroll,
-                                 into.w - WG_SCROLL_W - 2, tall };
+            /* Room for the bar taken out of the width before the child is laid
+             * out, so its contents stop short of it instead of being drawn
+             * underneath it. */
+            int w = into.w - WG_SCROLL_W - 4;
+            if (w < 0) w = 0;
+            struct ui_rect r = { into.x, into.y - v->scroll, w, tall };
             ui_layout(c, r);
         }
         return;
@@ -595,6 +599,21 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
             r.h = c->want_h + extra;
             at += r.h + v->gap;
         }
+        /* Never wider or taller than the room it is being put in.
+         *
+         * A view that does not grow keeps the size it asked for, and what it
+         * asked for was measured when it was made - a label's width is the
+         * width of its text. Narrow the window, or drag a divider left, and
+         * that width stopped fitting: the label kept drawing at its full size,
+         * out through the side of the pane holding it and across whatever was
+         * beside it. The pane is the limit, so it is applied here rather than
+         * hoped for by each component. */
+        if (r.w > (horizontal ? inner.w : inner.w))
+            r.w = inner.w;
+        if (r.h > inner.h)
+            r.h = inner.h;
+        if (r.w < 0) r.w = 0;
+        if (r.h < 0) r.h = 0;
         ui_layout(c, r);
     }
 }
