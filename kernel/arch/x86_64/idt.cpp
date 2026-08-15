@@ -281,14 +281,20 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
         // knowing.
         constexpr u64 kUserMode = 4;
         if ((frame->error_code & kUserMode) != 0) {
-            console::printf("\n  %s[%u] faulted: %s at %p, %s %p%s\n",
+            /* The stack pointer as well, because "where was it" is the first
+             * question about any fault and the report could not answer it. A
+             * fault at address 0 from an instruction that only ever touches
+             * the stack means RSP is the thing that is wrong, and without this
+             * that has to be worked out from a disassembly. */
+            console::printf("\n  %s[%u] faulted: %s at %p, %s %p%s (rsp %p)\n",
                             scheduler::current_name(), scheduler::current_pid(),
                             (frame->error_code & 1) ? "protection violation"
                                                     : "unmapped address",
                             reinterpret_cast<void*>(fault_address),
                             (frame->error_code & 2) ? "writing from" : "reading from",
                             reinterpret_cast<void*>(frame->rip),
-                            (frame->error_code & 0x10) ? " (instruction fetch)" : "");
+                            (frame->error_code & 0x10) ? " (instruction fetch)" : "",
+                            reinterpret_cast<void*>(frame->rsp));
             scheduler::exit_current(139);      // 128 + SIGSEGV
         }
     }
