@@ -65,6 +65,30 @@ enum {
     UI_SPACER,          /* nothing, but takes up room */
     UI_CUSTOM,          /* the application draws it */
     UI_SIDEBAR,         /* a list, styled as the window's spine */
+
+    /* --- the second set -----------------------------------------------------
+     *
+     * Added by asking what the applications already written here had to build
+     * for themselves. Every one of these exists in the tree twice or more:
+     * Files has a table, a tree and an icon grid; Edit, Console and the browser
+     * each hold a page of scrolling text; Settings and the browser both want a
+     * bar of menus; three windows are a sidebar beside a pane with a divider
+     * between them that none of them can drag.
+     */
+    UI_SEPARATOR,       /* a rule between sections */
+    UI_GROUP,           /* a titled box holding other views */
+    UI_TOGGLE,          /* on or off, as a switch rather than a tick */
+    UI_STEPPER,         /* a number with a - and a + */
+    UI_POPUP,           /* one of a list, chosen from a drop-down */
+    UI_TABS,            /* a strip of tabs, the last one selected */
+    UI_MENUBAR,         /* titles across a bar, each with a drop-down */
+    UI_TABLE,           /* rows and columns, with headings */
+    UI_TREE,            /* rows at depths, with twisties */
+    UI_ICONGRID,        /* icons with labels, wrapped into rows */
+    UI_TEXT,            /* many lines, editable, scrolling */
+    UI_SCROLL,          /* a window onto a child taller than itself */
+    UI_SPLIT,           /* two children and a divider that can be dragged */
+    UI_IMAGE,           /* a picture */
 };
 
 /* How a box arranges its children. */
@@ -100,12 +124,44 @@ struct ui_view {
     int  on;                    /* check, radio, segmented-selected index */
     int  value, max;            /* slider, progress */
 
-    /* Lists. */
+    /* Lists, and everything that is a list underneath: tables, trees, icon
+     * grids, tabs, popups and menu bars all answer "how many" and "what is the
+     * text of one", and differ in what they draw around it. */
     ui_row_text row_text;
     int         rows;
     int         selected;
-    int         scroll;         /* first visible row */
+    int         scroll;         /* first visible row, or pixels for UI_TEXT */
     int         row_h;
+
+    /* Tables. Columns are declared rather than measured, because a column that
+     * resized itself to its contents would move every time the contents did. */
+    const char* (*cell)(void* user, int row, int col);
+    int  cols;
+    char col_title[6][24];
+    int  col_w[6];
+
+    /* Trees. The application keeps the flattened rows - it is the only one that
+     * knows what expanding a row reveals - and answers what depth each is at
+     * and whether it can be opened. */
+    int (*depth_of)(void* user, int row);
+    int (*branch_of)(void* user, int row);      /* 0 leaf, 1 shut, 2 open */
+    int hit_branch;             /* the twisty was what was clicked, not the row */
+
+    /* Icon grids. */
+    const uint32_t* (*icon_of)(void* user, int row);
+    int cell_w, cell_h;
+
+    /* Text areas. The buffer belongs to the application: a component that owned
+     * its own would mean copying a document in and out of it to do anything
+     * with it. */
+    char* buffer;
+    int   cap;
+
+    /* Splits: where the divider is, as a distance from the leading edge. */
+    int divider;
+
+    /* Popups and menu bars: which drop-down is showing, if any. */
+    int open;
 
     ui_action action;
     void*     user;
@@ -139,6 +195,62 @@ struct ui_view* ui_progress(struct ui_view* parent, int value, int max);
 struct ui_view* ui_spacer(struct ui_view* parent);
 struct ui_view* ui_custom(struct ui_view* parent,
                           void (*draw)(struct ui_view*, void*), void* user);
+
+/* --- the second set --------------------------------------------------------
+ *
+ * Same shape as the first: a parent, whatever the component needs, and a view
+ * back. Anything a component cannot know - what a table's cells say, what a
+ * tree's rows are - is asked for through a callback, so the application keeps
+ * its own data and there is never a second copy to hold in step.
+ */
+
+struct ui_view* ui_separator(struct ui_view* parent);
+struct ui_view* ui_group(struct ui_view* parent, const char* title,
+                         int layout, int pad, int gap);
+struct ui_view* ui_toggle(struct ui_view* parent, const char* label, int on);
+struct ui_view* ui_stepper(struct ui_view* parent, int value, int max);
+struct ui_view* ui_image(struct ui_view* parent, const uint32_t* px, int size);
+
+/* One of a list, shown as the chosen one until it is opened. */
+struct ui_view* ui_popup(struct ui_view* parent, ui_row_text items, int count,
+                         void* user);
+
+/* A strip of tabs. `selected` is `on`, as with the segmented control. */
+struct ui_view* ui_tabs(struct ui_view* parent, ui_row_text titles, int count,
+                        void* user);
+
+/* A bar of menu titles. Each title's items come from `items`, asked for as
+ * (menu * 100 + item) so that one callback can answer for the whole bar - the
+ * alternative is an array of arrays, which is a second structure to keep in
+ * step with the first. `counts` says how many items each menu has. */
+struct ui_view* ui_menubar(struct ui_view* parent, ui_row_text titles,
+                           int count, ui_row_text items,
+                           const int* counts, void* user);
+
+/* Rows and columns. Declare the columns after making it. */
+struct ui_view* ui_table(struct ui_view* parent,
+                         const char* (*cell)(void* user, int row, int col),
+                         int rows, void* user);
+void ui_column(struct ui_view* table, const char* title, int width);
+
+struct ui_view* ui_tree(struct ui_view* parent, ui_row_text rows, int count,
+                        int (*depth_of)(void*, int),
+                        int (*branch_of)(void*, int), void* user);
+
+struct ui_view* ui_icongrid(struct ui_view* parent, ui_row_text labels,
+                            int count,
+                            const uint32_t* (*icon_of)(void*, int), void* user);
+
+/* Editable text over a buffer the application owns. */
+struct ui_view* ui_text_area(struct ui_view* parent, char* buffer, int cap);
+
+/* A window onto a child that does not fit. The child is the one view added to
+ * it; anything taller than the frame scrolls. */
+struct ui_view* ui_scroll(struct ui_view* parent);
+
+/* Two children with a divider between them. The first two views added are the
+ * panes; `at` is where the divider starts. */
+struct ui_view* ui_split(struct ui_view* parent, int layout, int at);
 
 /* Sizing, as a hint rather than a command: layout may give a view more when it
  * is set to grow, and never gives it less. */

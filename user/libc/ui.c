@@ -8,22 +8,72 @@
 
 #include <ui.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-static struct ui_view g_pool[UI_MAX_VIEWS];
+/* An icon is 32x32 here as it is everywhere else; named rather than
+ * repeated so a change to the icon set is one line. */
+#define ICON_SIZE_DEFAULT 32
+#define DIVIDER_W 6
+
+/* Asked for when the first view is made, rather than reserved in every
+ * program that links libc.
+ *
+ * As a static array this was ninety kilobytes of BSS in every binary on the
+ * system - including audiod, which never draws anything. That is not merely
+ * wasteful: audiod is restarted by init when it dies, and with every process
+ * on the machine carrying the extra, a restart began failing at startup with a
+ * null dereference inside libc. The pool costs nothing now unless something
+ * builds an interface out of it. */
+static struct ui_view* g_pool;
 static int g_used;
 static struct ui_view* g_focus;
 static struct ui_view* g_pressed;
+/* The view whose drop-down is showing. There is at most one: a second menu
+ * opening closes the first, which is what a menu bar does. */
+static struct ui_view* g_dropped;
 
 void ui_reset(void)
 {
     g_used = 0;
     g_focus = 0;
     g_pressed = 0;
+    g_dropped = 0;
+}
+
+/* Where a view's drop-down is, and how many rows it has. Written once and read
+ * by both the drawing and the hit-testing, for the same reason every other
+ * frame is: two copies of a rectangle are two chances to disagree. */
+static int dropdown_box(struct ui_view* v, int* x, int* y, int* w, int* n)
+{
+    if (v == 0)
+        return 0;
+    if (v->kind == UI_POPUP && v->open) {
+        *x = v->frame.x; *y = v->frame.y + v->frame.h;
+        *w = v->frame.w; *n = v->rows;
+        return 1;
+    }
+    if (v->kind == UI_MENUBAR && v->open >= 0) {
+        int at = v->frame.x;
+        for (int i = 0; i < v->open; ++i) {
+            const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
+            at += (int)strlen(t != 0 ? t : "") * WG_GLYPH_W + 20;
+        }
+        const int* counts = (const int*)(void*)v->depth_of;
+        *x = at; *y = v->frame.y + v->frame.h; *w = 170;
+        *n = counts != 0 ? counts[v->open] : 0;
+        return *n > 0;
+    }
+    return 0;
 }
 
 static struct ui_view* alloc_view(struct ui_view* parent, int kind)
 {
+    if (g_pool == 0) {
+        g_pool = (struct ui_view*)malloc(sizeof(struct ui_view) * UI_MAX_VIEWS);
+        if (g_pool == 0)
+            return 0;
+    }
     if (g_used >= UI_MAX_VIEWS)
         return 0;
     struct ui_view* v = &g_pool[g_used++];
@@ -199,6 +249,206 @@ struct ui_view* ui_custom(struct ui_view* parent,
     return v;
 }
 
+/* --- the second set -------------------------------------------------------- */
+
+struct ui_view* ui_separator(struct ui_view* parent)
+{
+    struct ui_view* v = alloc_view(parent, UI_SEPARATOR);
+    if (v == 0) return 0;
+    v->want_h = 9;
+    v->want_w = 9;
+    return v;
+}
+
+struct ui_view* ui_group(struct ui_view* parent, const char* title,
+                         int layout, int pad, int gap)
+{
+    /* A box that draws a heading and a frame. Its children lay out inside the
+     * padding as any box's do, with room left at the top for the title. */
+    struct ui_view* v = alloc_view(parent, UI_GROUP);
+    if (v == 0) return 0;
+    set_text(v, title);
+    v->layout = layout;
+    v->pad = pad;
+    v->gap = gap;
+    v->grow = 1;
+    return v;
+}
+
+struct ui_view* ui_toggle(struct ui_view* parent, const char* label, int on)
+{
+    struct ui_view* v = alloc_view(parent, UI_TOGGLE);
+    if (v == 0) return 0;
+    set_text(v, label);
+    v->on = on;
+    v->want_h = 22;
+    v->want_w = (int)strlen(v->text) * WG_GLYPH_W + 52;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_stepper(struct ui_view* parent, int value, int max)
+{
+    struct ui_view* v = alloc_view(parent, UI_STEPPER);
+    if (v == 0) return 0;
+    v->value = value;
+    v->max = max > 0 ? max : 100;
+    v->want_h = 24;
+    v->want_w = 96;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_image(struct ui_view* parent, const uint32_t* px, int size)
+{
+    struct ui_view* v = alloc_view(parent, UI_IMAGE);
+    if (v == 0) return 0;
+    v->icon_of = 0;
+    v->user = (void*)px;
+    v->want_w = size > 0 ? size : ICON_SIZE_DEFAULT;
+    v->want_h = v->want_w;
+    return v;
+}
+
+struct ui_view* ui_popup(struct ui_view* parent, ui_row_text items, int count,
+                         void* user)
+{
+    struct ui_view* v = alloc_view(parent, UI_POPUP);
+    if (v == 0) return 0;
+    v->row_text = items;
+    v->rows = count;
+    v->user = user;
+    v->selected = 0;
+    v->want_h = 26;
+    v->want_w = 160;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_tabs(struct ui_view* parent, ui_row_text titles, int count,
+                        void* user)
+{
+    struct ui_view* v = alloc_view(parent, UI_TABS);
+    if (v == 0) return 0;
+    v->row_text = titles;
+    v->rows = count;
+    v->user = user;
+    v->want_h = 26;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_menubar(struct ui_view* parent, ui_row_text titles,
+                           int count, ui_row_text items,
+                           const int* counts, void* user)
+{
+    struct ui_view* v = alloc_view(parent, UI_MENUBAR);
+    if (v == 0) return 0;
+    v->row_text = titles;
+    v->rows = count;
+    v->cell = 0;
+    v->user = user;
+    /* The items callback and the per-menu counts ride in the fields a menu bar
+     * does not otherwise use, rather than growing the struct for one kind. */
+    v->icon_of = (const uint32_t* (*)(void*, int))items;
+    v->depth_of = (int (*)(void*, int))(void*)counts;
+    v->open = -1;
+    v->want_h = 24;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_table(struct ui_view* parent,
+                         const char* (*cell)(void* user, int row, int col),
+                         int rows, void* user)
+{
+    struct ui_view* v = alloc_view(parent, UI_TABLE);
+    if (v == 0) return 0;
+    v->cell = cell;
+    v->rows = rows;
+    v->user = user;
+    v->grow = 1;
+    v->row_h = WG_GLYPH_H + 4;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+void ui_column(struct ui_view* t, const char* title, int width)
+{
+    if (t == 0 || t->cols >= 6)
+        return;
+    snprintf(t->col_title[t->cols], sizeof(t->col_title[0]), "%s",
+             title != 0 ? title : "");
+    t->col_w[t->cols] = width > 0 ? width : 100;
+    ++t->cols;
+}
+
+struct ui_view* ui_tree(struct ui_view* parent, ui_row_text rows, int count,
+                        int (*depth_of)(void*, int),
+                        int (*branch_of)(void*, int), void* user)
+{
+    struct ui_view* v = alloc_view(parent, UI_TREE);
+    if (v == 0) return 0;
+    v->row_text = rows;
+    v->rows = count;
+    v->depth_of = depth_of;
+    v->branch_of = branch_of;
+    v->user = user;
+    v->grow = 1;
+    v->row_h = WG_GLYPH_H + 4;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_icongrid(struct ui_view* parent, ui_row_text labels,
+                            int count,
+                            const uint32_t* (*icon_of)(void*, int), void* user)
+{
+    struct ui_view* v = alloc_view(parent, UI_ICONGRID);
+    if (v == 0) return 0;
+    v->row_text = labels;
+    v->rows = count;
+    v->icon_of = icon_of;
+    v->user = user;
+    v->grow = 1;
+    v->cell_w = 92;
+    v->cell_h = 64;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_text_area(struct ui_view* parent, char* buffer, int cap)
+{
+    struct ui_view* v = alloc_view(parent, UI_TEXT);
+    if (v == 0) return 0;
+    v->buffer = buffer;
+    v->cap = cap;
+    v->grow = 1;
+    v->row_h = WG_GLYPH_H;
+    v->caret = buffer != 0 ? (int)strlen(buffer) : 0;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_scroll(struct ui_view* parent)
+{
+    struct ui_view* v = alloc_view(parent, UI_SCROLL);
+    if (v == 0) return 0;
+    v->grow = 1;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_split(struct ui_view* parent, int layout, int at)
+{
+    struct ui_view* v = alloc_view(parent, UI_SPLIT);
+    if (v == 0) return 0;
+    v->layout = layout;
+    v->divider = at;
+    v->grow = 1;
+    return v;
+}
+
 struct ui_view* ui_size(struct ui_view* v, int w, int h)
 {
     if (v != 0) { v->want_w = w; v->want_h = h; }
@@ -235,8 +485,58 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
     if (v == 0 || (v->flags & UI_HIDDEN) != 0)
         return;
     v->frame = into;
-    if (v->kind != UI_BOX)
+
+    if (v->kind == UI_SPLIT) {
+        /* Two panes and a divider. The first child gets `divider` across the
+         * split's direction, the second gets the rest - so dragging the
+         * divider is one number changing and everything following from it. */
+        struct ui_view* first = v->child;
+        struct ui_view* second = first != 0 ? first->next : 0;
+        const int across = (v->layout == UI_STACK_H);
+        int at = v->divider;
+        const int span = across ? into.w : into.h;
+        if (at < 40) at = 40;
+        if (at > span - 40) at = span - 40 > 40 ? span - 40 : 40;
+        v->divider = at;
+        if (first != 0) {
+            struct ui_rect r = across ? (struct ui_rect){ into.x, into.y, at, into.h }
+                                      : (struct ui_rect){ into.x, into.y, into.w, at };
+            ui_layout(first, r);
+        }
+        if (second != 0) {
+            struct ui_rect r = across
+                ? (struct ui_rect){ into.x + at + DIVIDER_W, into.y,
+                                    into.w - at - DIVIDER_W, into.h }
+                : (struct ui_rect){ into.x, into.y + at + DIVIDER_W,
+                                    into.w, into.h - at - DIVIDER_W };
+            ui_layout(second, r);
+        }
         return;
+    }
+
+    if (v->kind == UI_SCROLL) {
+        /* The child is laid out at its own height rather than the frame's, and
+         * shifted by the scroll. Anything past the bottom is simply not drawn -
+         * which is why the child's own layout has to be done at full size. */
+        struct ui_view* c = v->child;
+        if (c != 0) {
+            const int tall = c->want_h > into.h ? c->want_h : into.h;
+            struct ui_rect r = { into.x, into.y - v->scroll,
+                                 into.w - WG_SCROLL_W - 2, tall };
+            ui_layout(c, r);
+        }
+        return;
+    }
+
+    if (v->kind != UI_BOX && v->kind != UI_GROUP)
+        return;
+
+    /* A group keeps room at the top for its title; a plain box does not. */
+    if (v->kind == UI_GROUP) {
+        into.y += WG_GLYPH_H + 6;
+        into.h -= WG_GLYPH_H + 6;
+        v->frame.h = v->frame.h;    /* the frame stays the whole group */
+    }
 
     const int horizontal = (v->layout == UI_STACK_H);
     struct ui_rect inner = { into.x + v->pad, into.y + v->pad,
@@ -372,6 +672,37 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         return 0;
 
     if (e->type == WIN_EVENT_MOUSE_DOWN) {
+        /* An open drop-down answers first, wherever it is over. It is drawn
+         * above its neighbours, so it has to be hit above them too - otherwise
+         * choosing an item activates whatever the item happens to cover. */
+        if (g_dropped != 0) {
+            int dx, dy, dw, dn;
+            struct ui_view* d = g_dropped;
+            const int rh = WG_GLYPH_H + 8;
+            if (dropdown_box(d, &dx, &dy, &dw, &dn) &&
+                e->x >= dx && e->x < dx + dw &&
+                e->y >= dy && e->y < dy + dn * rh) {
+                const int item = (e->y - dy) / rh;
+                if (d->kind == UI_POPUP) {
+                    d->selected = item;
+                    d->open = 0;
+                } else {
+                    /* Which menu and which item, in one number: the two are
+                     * always wanted together, and an application reading
+                     * `selected / 100` and `% 100` needs no second field. */
+                    d->selected = d->open * 100 + item;
+                    d->open = -1;
+                }
+                g_dropped = 0;
+                if (d->action) d->action(d, d->user);
+                return 1;
+            }
+            /* Anywhere else shuts it, and the press goes on to whatever it
+             * landed on - which is what makes a menu dismiss without eating
+             * the click that dismissed it. */
+            if (d->kind == UI_POPUP) d->open = 0; else d->open = -1;
+            g_dropped = 0;
+        }
         struct ui_view* v = hit(root, e->x, e->y);
         g_pressed = v;
         if (v == 0) {
@@ -416,6 +747,91 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             if (val > v->max) val = v->max;
             v->value = val;
             if (v->action) v->action(v, v->user);
+        } else if (v->kind == UI_TOGGLE) {
+            v->on = !v->on;
+            if (v->action) v->action(v, v->user);
+        } else if (v->kind == UI_STEPPER) {
+            /* The two ends step, the middle does nothing: a stepper whose
+             * number was also a button would fire on every glance at it. */
+            const int third = v->frame.w / 3;
+            if (e->x < v->frame.x + third && v->value > 0) --v->value;
+            else if (e->x > v->frame.x + v->frame.w - third &&
+                     v->value < v->max) ++v->value;
+            else return 1;
+            if (v->action) v->action(v, v->user);
+        } else if (v->kind == UI_POPUP) {
+            v->open = !v->open;
+            g_dropped = v->open ? v : 0;
+        } else if (v->kind == UI_TABS) {
+            const int seg = v->rows > 0
+                ? (e->x - v->frame.x) / (v->frame.w / v->rows) : 0;
+            if (seg >= 0 && seg < v->rows) {
+                v->on = seg;
+                if (v->action) v->action(v, v->user);
+            }
+        } else if (v->kind == UI_MENUBAR) {
+            int at = v->frame.x, picked = -1;
+            for (int i = 0; i < v->rows; ++i) {
+                const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
+                const int w = (int)strlen(t) * WG_GLYPH_W + 20;
+                if (e->x >= at && e->x < at + w) { picked = i; break; }
+                at += w;
+            }
+            /* Clicking the open one shuts it, which is what a menu bar does
+             * everywhere and what stops a title being a one-way switch. */
+            v->open = (picked >= 0 && picked == v->open) ? -1 : picked;
+            g_dropped = v->open >= 0 ? v : 0;
+        } else if (v->kind == UI_TABLE || v->kind == UI_TREE) {
+            const int head = (v->kind == UI_TABLE) ? v->row_h : 0;
+            const int row = v->scroll + (e->y - v->frame.y - head) / v->row_h;
+            if (row >= 0 && row < v->rows) {
+                v->selected = row;
+                v->hit_branch = 0;
+                if (v->kind == UI_TREE && v->branch_of != 0 &&
+                    v->branch_of(v->user, row) != 0) {
+                    /* The twisty is a target of its own: opening a folder and
+                     * selecting it are different intentions, and a tree that
+                     * cannot tell them apart opens something every time you
+                     * try to look at it. */
+                    const int depth = v->depth_of != 0
+                                    ? v->depth_of(v->user, row) : 0;
+                    const int tx = v->frame.x + 8 + depth * 16;
+                    if (e->x >= tx && e->x < tx + 12)
+                        v->hit_branch = 1;
+                }
+                if (v->action) v->action(v, v->user);
+            }
+        } else if (v->kind == UI_ICONGRID) {
+            const int cols = v->frame.w / (v->cell_w > 0 ? v->cell_w : 1);
+            if (cols > 0) {
+                const int col = (e->x - v->frame.x) / v->cell_w;
+                const int row = (e->y - v->frame.y) / v->cell_h + v->scroll;
+                const int i = row * cols + col;
+                if (col >= 0 && col < cols && i >= 0 && i < v->rows) {
+                    v->selected = i;
+                    if (v->action) v->action(v, v->user);
+                }
+            }
+        } else if (v->kind == UI_TEXT) {
+            /* The caret goes to the line and column that were clicked. */
+            if (v->buffer != 0) {
+                const int line = v->scroll + (e->y - v->frame.y - 4) / v->row_h;
+                const int col = (e->x - v->frame.x - 8) / WG_GLYPH_W;
+                int at = 0, l = 0;
+                while (v->buffer[at] != '\0' && l < line) {
+                    if (v->buffer[at] == '\n') ++l;
+                    ++at;
+                }
+                int c = 0;
+                while (v->buffer[at] != '\0' && v->buffer[at] != '\n' && c < col) {
+                    ++at; ++c;
+                }
+                v->caret = at;
+            }
+        } else if (v->kind == UI_SPLIT) {
+            /* Only the divider itself: the panes are children and were hit
+             * first, so reaching here means the gap between them. */
+            g_pressed = v;
         } else if (v->kind == UI_FIELD) {
             /* The caret lands where it was clicked, as near as the glyph width
              * allows. */
@@ -437,6 +853,22 @@ int ui_event(struct ui_view* root, const struct win_event* e)
     }
 
     if (e->type == WIN_EVENT_MOUSE_MOVE && g_pressed != 0 &&
+        g_pressed->kind == UI_SPLIT) {
+        struct ui_view* v = g_pressed;
+        const int at = (v->layout == UI_STACK_H) ? e->x - v->frame.x
+                                                 : e->y - v->frame.y;
+        if (at != v->divider) {
+            v->divider = at;
+            /* Laid out again at once: the panes' frames are what the next
+             * event will be hit-tested against, and leaving them stale for a
+             * frame is how a drag comes out one step behind the pointer. */
+            ui_layout(v, v->frame);
+            return 1;
+        }
+        return 0;
+    }
+
+    if (e->type == WIN_EVENT_MOUSE_MOVE && g_pressed != 0 &&
         g_pressed->kind == UI_SLIDER) {
         const struct ui_view* v = g_pressed;
         const int span = v->frame.w > 1 ? v->frame.w - 1 : 1;
@@ -455,7 +887,57 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         struct ui_view* v = g_focus;
         if (v->kind == UI_FIELD)
             return field_key(v, e->key);
-        if (v->kind == UI_LIST || v->kind == UI_SIDEBAR) {
+        if (v->kind == UI_TEXT && v->buffer != 0) {
+            const int n = (int)strlen(v->buffer);
+            if (v->caret > n) v->caret = n;
+            if (e->key == '\b') {
+                if (v->caret <= 0) return 0;
+                memmove(&v->buffer[v->caret - 1], &v->buffer[v->caret],
+                        (unsigned)(n - v->caret) + 1);
+                --v->caret;
+            } else if (e->key == WIN_KEY_LEFT) {
+                if (v->caret > 0) --v->caret; else return 0;
+            } else if (e->key == WIN_KEY_RIGHT) {
+                if (v->caret < n) ++v->caret; else return 0;
+            } else if (e->key == WIN_KEY_UP || e->key == WIN_KEY_DOWN) {
+                /* By line, keeping the column where it can. Walking the buffer
+                 * rather than keeping a line table: a table is a second
+                 * structure to invalidate on every keystroke. */
+                int line_start = v->caret;
+                while (line_start > 0 && v->buffer[line_start - 1] != '\n')
+                    --line_start;
+                const int col = v->caret - line_start;
+                if (e->key == WIN_KEY_UP) {
+                    if (line_start == 0) return 0;
+                    int prev = line_start - 1;
+                    while (prev > 0 && v->buffer[prev - 1] != '\n') --prev;
+                    int at = prev;
+                    while (at < line_start - 1 && at - prev < col) ++at;
+                    v->caret = at;
+                } else {
+                    int next = v->caret;
+                    while (v->buffer[next] != '\0' && v->buffer[next] != '\n')
+                        ++next;
+                    if (v->buffer[next] == '\0') return 0;
+                    ++next;
+                    int at = next;
+                    while (v->buffer[at] != '\0' && v->buffer[at] != '\n' &&
+                           at - next < col) ++at;
+                    v->caret = at;
+                }
+            } else if ((e->key >= ' ' && e->key < 127) || e->key == '\n' ||
+                       e->key == '\r') {
+                if (n + 1 >= v->cap) return 0;
+                const char c = (e->key == '\r') ? '\n' : (char)e->key;
+                memmove(&v->buffer[v->caret + 1], &v->buffer[v->caret],
+                        (unsigned)(n - v->caret) + 1);
+                v->buffer[v->caret++] = c;
+            } else return 0;
+            return 1;
+        }
+        if (v->kind == UI_LIST || v->kind == UI_SIDEBAR ||
+            v->kind == UI_TABLE || v->kind == UI_TREE ||
+            v->kind == UI_ICONGRID) {
             int to = v->selected;
             if (e->key == WIN_KEY_DOWN)      ++to;
             else if (e->key == WIN_KEY_UP)   --to;
@@ -495,6 +977,30 @@ int ui_event(struct ui_view* root, const struct win_event* e)
 }
 
 /* --- drawing --------------------------------------------------------------- */
+
+/* Which menu of a bar is being drawn, so the shared item callback knows which
+ * one it is answering for. */
+static int g_menu_of;
+
+/* One drop-down: a popup's list of choices, or a menu bar's items. They are the
+ * same picture, and were the same picture written twice until this. */
+static void draw_dropdown(struct ui_view* v, int x, int y, int w,
+                          ui_row_text items, int count, int chosen)
+{
+    if (count <= 0)
+        return;
+    const int rh = WG_GLYPH_H + 8;
+    wg_container(x - 4, y - 2, w + 8, count * rh + 8, 10);
+    for (int i = 0; i < count; ++i) {
+        const int ry = y + 2 + i * rh;
+        if (i == chosen)
+            wg_row_select(x, ry, w, rh);
+        const char* t = items != 0
+            ? items(v->user, v->kind == UI_MENUBAR ? g_menu_of * 100 + i : i)
+            : "";
+        wg_text(x + 10, ry + 4, t != 0 ? t : "", wg_ink_colour());
+    }
+}
 
 static void draw_list(struct ui_view* v)
 {
@@ -600,10 +1106,257 @@ void ui_draw(struct ui_view* v)
         if (v->draw != 0)
             v->draw(v, v->user);
         break;
+
+    case UI_SEPARATOR:
+        /* A hairline down the middle of the room it was given, so the space
+         * around it comes from the rule rather than from its neighbours. */
+        wg_fill(f.x, f.y + f.h / 2, f.w, 1, WG_DIM);
+        break;
+
+    case UI_GROUP:
+        wg_text(f.x, f.y, v->text, WG_DIM);
+        wg_container(f.x, f.y + WG_GLYPH_H + 2, f.w, f.h - WG_GLYPH_H - 2, 8);
+        break;
+
+    case UI_TOGGLE: {
+        /* A switch: the knob is at the end it is at, which says the state
+         * without a word and without a tick to read. */
+        const int tw = 38, th = 18;
+        const int ty = f.y + (f.h - th) / 2;
+        wg_fill(f.x, ty, tw, th, v->on ? WG_ACCENT : WG_SHADOW);
+        wg_fill(v->on ? f.x + tw - th + 2 : f.x + 2, ty + 2, th - 4, th - 4,
+                WG_PAPER);
+        wg_text_clipped(f.x + tw + 10, f.y + (f.h - WG_GLYPH_H) / 2, v->text,
+                        wg_ink_colour(), f.w - tw - 12);
+        if (focused)
+            wg_fill(f.x, f.y + f.h - 2, f.w, 1, WG_ACCENT);
+        break;
+    }
+
+    case UI_STEPPER: {
+        char num[16];
+        snprintf(num, sizeof(num), "%d", v->value);
+        const int third = f.w / 3;
+        wg_button(f.x, f.y, third, f.h, "-", 0);
+        wg_button(f.x + f.w - third, f.y, third, f.h, "+", 0);
+        const int tw = (int)strlen(num) * WG_GLYPH_W;
+        wg_text(f.x + f.w / 2 - tw / 2, f.y + (f.h - WG_GLYPH_H) / 2, num,
+                wg_ink_colour());
+        break;
+    }
+
+    case UI_POPUP: {
+        const char* now = (v->row_text != 0 && v->selected >= 0)
+                        ? v->row_text(v->user, v->selected) : "";
+        wg_button(f.x, f.y, f.w, f.h, "", v->open);
+        wg_text_clipped(f.x + 10, f.y + (f.h - WG_GLYPH_H) / 2,
+                        now != 0 ? now : "", wg_ink_colour(), f.w - 30);
+        /* The arrow, so it reads as something that opens rather than as a
+         * button that happens to have a word on it. */
+        for (int i = 0; i < 4; ++i)
+            wg_fill(f.x + f.w - 16 + i, f.y + f.h / 2 - 2 + i, 8 - 2 * i, 1,
+                    wg_ink_colour());
+        break;
+    }
+
+    case UI_TABS: {
+        const int each = v->rows > 0 ? f.w / v->rows : f.w;
+        for (int i = 0; i < v->rows; ++i) {
+            const int x = f.x + i * each;
+            if (i == v->on)
+                wg_row_select(x, f.y, each - 2, f.h);
+            const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
+            wg_text_clipped(x + 10, f.y + (f.h - WG_GLYPH_H) / 2,
+                            t != 0 ? t : "", wg_ink_colour(), each - 20);
+        }
+        /* A line under the strip, broken where the chosen tab is: that gap is
+         * what joins the tab to what it is showing. */
+        wg_fill(f.x, f.y + f.h - 1, f.w, 1, WG_DIM);
+        if (v->on >= 0 && v->on < v->rows)
+            wg_fill(f.x + v->on * each, f.y + f.h - 1, each - 2, 1,
+                    wg_base_colour());
+        break;
+    }
+
+    case UI_MENUBAR: {
+        int at = f.x;
+        for (int i = 0; i < v->rows; ++i) {
+            const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
+            const int w = (int)strlen(t != 0 ? t : "") * WG_GLYPH_W + 20;
+            if (i == v->open)
+                wg_row_select(at, f.y, w, f.h);
+            wg_text(at + 10, f.y + (f.h - WG_GLYPH_H) / 2, t != 0 ? t : "",
+                    wg_ink_colour());
+            at += w;
+        }
+        break;
+    }
+
+    case UI_TABLE: {
+        wg_container(f.x, f.y, f.w, f.h, 6);
+        /* The headings, then a rule, then the rows - and the columns are laid
+         * out from the declared widths in both, so a cell cannot land under
+         * the wrong heading. */
+        int cx = f.x + 10;
+        for (int c = 0; c < v->cols; ++c) {
+            wg_text_clipped(cx, f.y + 3, v->col_title[c], WG_DIM,
+                            v->col_w[c] - 6);
+            cx += v->col_w[c];
+        }
+        wg_fill(f.x + 4, f.y + v->row_h, f.w - 8, 1, WG_DIM);
+        const int page = (f.h - v->row_h) / v->row_h;
+        for (int i = 0; i < page; ++i) {
+            const int row = v->scroll + i;
+            if (row >= v->rows)
+                break;
+            const int y = f.y + v->row_h + i * v->row_h;
+            if (row == v->selected)
+                wg_row_select(f.x + 4, y, f.w - 8, v->row_h);
+            cx = f.x + 10;
+            for (int c = 0; c < v->cols; ++c) {
+                const char* text = v->cell != 0 ? v->cell(v->user, row, c) : "";
+                wg_text_clipped(cx, y + 2, text != 0 ? text : "",
+                                wg_ink_colour(), v->col_w[c] - 6);
+                cx += v->col_w[c];
+            }
+        }
+        break;
+    }
+
+    case UI_TREE: {
+        wg_container(f.x, f.y, f.w, f.h, 6);
+        const int page = f.h / v->row_h;
+        for (int i = 0; i < page; ++i) {
+            const int row = v->scroll + i;
+            if (row >= v->rows)
+                break;
+            const int y = f.y + i * v->row_h;
+            const int depth = v->depth_of != 0 ? v->depth_of(v->user, row) : 0;
+            const int branch = v->branch_of != 0 ? v->branch_of(v->user, row) : 0;
+            if (row == v->selected)
+                wg_row_select(f.x + 4, y, f.w - 8, v->row_h);
+            const int tx = f.x + 8 + depth * 16;
+            if (branch != 0) {
+                /* A twisty: a minus when open, a plus when shut. */
+                wg_fill(tx, y + 4, 9, 9, WG_PAPER);
+                wg_bevel(tx, y + 4, 9, 9, 0);
+                wg_fill(tx + 2, y + 8, 5, 1, WG_INK);
+                if (branch == 1)
+                    wg_fill(tx + 4, y + 6, 1, 5, WG_INK);
+            }
+            const char* t = v->row_text != 0 ? v->row_text(v->user, row) : "";
+            wg_text_clipped(tx + 14, y + 2, t != 0 ? t : "",
+                            branch != 0 ? WG_ACCENT : wg_ink_colour(),
+                            f.w - (tx - f.x) - 20);
+        }
+        break;
+    }
+
+    case UI_ICONGRID: {
+        wg_container(f.x, f.y, f.w, f.h, 6);
+        const int cols = f.w / (v->cell_w > 0 ? v->cell_w : 1);
+        for (int i = 0; i < v->rows && cols > 0; ++i) {
+            const int col = i % cols, row = i / cols - v->scroll;
+            if (row < 0)
+                continue;
+            const int x = f.x + col * v->cell_w;
+            const int y = f.y + row * v->cell_h;
+            if (y + v->cell_h > f.y + f.h)
+                break;
+            if (i == v->selected)
+                wg_row_select(x + 2, y + 2, v->cell_w - 6, v->cell_h - 6);
+            const uint32_t* px = v->icon_of != 0 ? v->icon_of(v->user, i) : 0;
+            if (px != 0)
+                wg_icon(x + (v->cell_w - ICON_SIZE_DEFAULT) / 2, y + 6, px,
+                        ICON_SIZE_DEFAULT, ICON_SIZE_DEFAULT);
+            const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
+            wg_text_clipped(x + 6, y + 42, t != 0 ? t : "", wg_ink_colour(),
+                            v->cell_w - 12);
+        }
+        break;
+    }
+
+    case UI_TEXT: {
+        wg_container(f.x, f.y, f.w, f.h, 6);
+        if (v->buffer == 0)
+            break;
+        const int page = (f.h - 8) / v->row_h;
+        int at = 0, line = 0;
+        /* Skipped rather than measured: finding the first visible line means
+         * counting newlines, and counting them is the same walk either way. */
+        while (v->buffer[at] != '\0' && line < v->scroll) {
+            if (v->buffer[at] == '\n') ++line;
+            ++at;
+        }
+        for (int i = 0; i < page && v->buffer[at] != '\0'; ++i) {
+            char text[160];
+            unsigned n = 0;
+            while (v->buffer[at + n] != '\0' && v->buffer[at + n] != '\n' &&
+                   n + 1 < sizeof(text)) {
+                text[n] = v->buffer[at + n];
+                ++n;
+            }
+            text[n] = '\0';
+            wg_text_clipped(f.x + 8, f.y + 4 + i * v->row_h, text,
+                            wg_ink_colour(), f.w - 16);
+            /* The caret, when it is on this line. */
+            if (focused && v->caret >= at && v->caret <= at + (int)n) {
+                const int cx2 = f.x + 8 + (v->caret - at) * WG_GLYPH_W;
+                wg_fill(cx2, f.y + 4 + i * v->row_h, 1, v->row_h,
+                        wg_ink_colour());
+            }
+            at += n + (v->buffer[at + n] == '\n' ? 1 : 0);
+        }
+        break;
+    }
+
+    case UI_SCROLL:
+        /* The child is drawn by the walk below; this draws the bar beside it. */
+        if (v->child != 0 && v->child->frame.h > f.h)
+            wg_scrollbar_v(f.x + f.w - WG_SCROLL_W, f.y, f.h, v->scroll,
+                           f.h, v->child->frame.h);
+        break;
+
+    case UI_SPLIT:
+        /* The divider, as a grip between the panes. */
+        if (v->layout == UI_STACK_H)
+            wg_fill(f.x + v->divider + 1, f.y, DIVIDER_W - 2, f.h,
+                    wg_sel_colour());
+        else
+            wg_fill(f.x, f.y + v->divider + 1, f.w, DIVIDER_W - 2,
+                    wg_sel_colour());
+        break;
+
+    case UI_IMAGE:
+        if (v->user != 0)
+            wg_icon_scaled(f.x, f.y, (const uint32_t*)v->user,
+                           ICON_SIZE_DEFAULT, ICON_SIZE_DEFAULT, f.w, f.h);
+        break;
+
     default:
         break;
     }
 
     for (struct ui_view* c = v->child; c != 0; c = c->next)
         ui_draw(c);
+
+    /* A drop-down is drawn after the whole tree beneath it, because it has to
+     * be over its neighbours and the tree is walked in the order things sit.
+     * Doing it here - on the way out of the view that owns it - is what keeps
+     * it above them without a second pass over everything. */
+    if (v->kind == UI_POPUP && v->open)
+        draw_dropdown(v, v->frame.x, v->frame.y + v->frame.h, v->frame.w,
+                      v->row_text, v->rows, v->selected);
+    if (v->kind == UI_MENUBAR && v->open >= 0) {
+        int at = v->frame.x;
+        for (int i = 0; i < v->open; ++i) {
+            const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
+            at += (int)strlen(t != 0 ? t : "") * WG_GLYPH_W + 20;
+        }
+        const int* counts = (const int*)(void*)v->depth_of;
+        const int n = counts != 0 ? counts[v->open] : 0;
+        g_menu_of = v->open;
+        draw_dropdown(v, at, v->frame.y + v->frame.h, 170,
+                      (ui_row_text)v->icon_of, n, -1);
+    }
 }

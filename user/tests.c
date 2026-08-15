@@ -737,6 +737,24 @@ static void ui_test_action(struct ui_view* v, void* user)
     ++g_ui_fired;
 }
 
+static const char* ui_test_cell(void* user, int row, int col)
+{
+    (void)user; (void)row;
+    return col == 0 ? "name" : "size";
+}
+
+static int ui_test_depth(void* user, int row)
+{
+    (void)user;
+    return row == 0 ? 0 : 1;
+}
+
+static int ui_test_branch(void* user, int row)
+{
+    (void)user;
+    return row == 0 ? 1 : 0;        /* the first row can be opened */
+}
+
 static const char* ui_test_row(void* user, int row)
 {
     static const char* const kRows[3] = { "alpha", "beta", "gamma" };
@@ -842,6 +860,72 @@ static void test_ui(void)
     press(root, 0, 0);                  /* clear focus from the old tree */
     press(group, r2->frame.x + 4, r2->frame.y + 4);
     check("choosing a radio turns its sibling off", r2->on && !r1->on);
+
+    /* --- the second set of components ---------------------------------- */
+    ui_reset();
+    g_ui_fired = 0;
+
+    struct ui_view* page = ui_box(0, UI_STACK_V, 8, 4);
+
+    struct ui_view* toggle = ui_toggle(page, "on", 0);
+    ui_grow(toggle, 0);
+    struct ui_view* step = ui_stepper(page, 5, 10);
+    ui_grow(step, 0);
+    struct ui_view* pop = ui_popup(page, ui_test_row, 3, 0);
+    ui_on(pop, ui_test_action, 0);
+    ui_grow(pop, 0);
+    struct ui_view* table = ui_table(page, ui_test_cell, 3, 0);
+    ui_column(table, "Name", 100);
+    ui_column(table, "Size", 60);
+    struct ui_view* tree = ui_tree(page, ui_test_row, 3, ui_test_depth,
+                                   ui_test_branch, 0);
+    static char doc[64] = "ab";
+    struct ui_view* text = ui_text_area(page, doc, (int)sizeof(doc));
+
+    ui_layout(page, all);
+
+    check("a table declares its columns", table->cols == 2);
+
+    press(page, toggle->frame.x + 10, toggle->frame.y + 8);
+    check("a toggle flips when pressed", toggle->on == 1);
+
+    /* The two ends of a stepper step and the middle does not, so a glance at
+     * the number cannot change it. */
+    press(page, step->frame.x + 4, step->frame.y + 8);
+    check("a stepper's left end steps down", step->value == 4);
+    press(page, step->frame.x + step->frame.w - 4, step->frame.y + 8);
+    press(page, step->frame.x + step->frame.w - 4, step->frame.y + 8);
+    check("and its right end steps up", step->value == 6);
+    const int held = step->value;
+    press(page, step->frame.x + step->frame.w / 2, step->frame.y + 8);
+    check("its middle does nothing", step->value == held);
+
+    /* A drop-down is hit before whatever it covers, or choosing an item would
+     * activate the thing underneath it. */
+    press(page, pop->frame.x + 10, pop->frame.y + 8);
+    check("a popup opens when pressed", pop->open != 0);
+    const int rh = WG_GLYPH_H + 8;
+    press(page, pop->frame.x + 10, pop->frame.y + pop->frame.h + rh + 2);
+    check("choosing from it selects that row", pop->selected == 1);
+    check("and closes it", pop->open == 0);
+    check("and tells the application", g_ui_fired == 1);
+
+    /* A tree tells a press on the twisty apart from a press on the row. */
+    press(page, tree->frame.x + 60, tree->frame.y + 2);
+    check("a tree selects a row", tree->selected == 0 && !tree->hit_branch);
+    press(page, tree->frame.x + 10, tree->frame.y + 2);
+    check("and knows when the twisty was hit", tree->hit_branch == 1);
+
+    /* Text areas edit a buffer the application owns, with a caret that moves
+     * through it rather than only appending. */
+    press(page, text->frame.x + 10, text->frame.y + 6);
+    tap_key(page, 'c');
+    check("typing reaches a text area", strcmp(doc, "acb") == 0 ||
+                                        strcmp(doc, "cab") == 0 ||
+                                        strcmp(doc, "abc") == 0);
+    const int was_len = (int)strlen(doc);
+    tap_key(page, '\n');
+    check("a text area takes a newline", (int)strlen(doc) == was_len + 1);
 
     ui_reset();
 }
