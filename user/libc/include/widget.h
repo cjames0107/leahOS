@@ -123,6 +123,11 @@ void wg_glass_clear(void);
  * and the corner radius follows from it: pressed against the edge wants a
  * tight curve, floating in space can afford a generous one. */
 int  wg_container_radius(int pad);
+/* A rounded shape filled with a chosen alpha, left see-through for the server
+ * to blend against the blur. What every glassy surface here is made of; public
+ * because the component layer builds its own surfaces out of the same stuff. */
+void wg_glass_fill(int x, int y, int w, int h, int radius, uint32_t argb);
+
 void wg_container(int x, int y, int w, int h, int pad);
 
 /* Full height, square, a shade apart from the content beside it. */

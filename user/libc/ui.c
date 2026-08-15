@@ -621,6 +621,25 @@ static struct ui_view* hit(struct ui_view* v, int x, int y)
     return v->kind == UI_BOX ? 0 : v;
 }
 
+/* How far along a line the caret sits.
+ *
+ * WG_GLYPH_W is the width of a cell in the console font, and the interface is
+ * not drawn in the console font - wg_text measures proportionally. Multiplying
+ * the caret index by a fixed width put the mark a long way from the letter it
+ * was in front of, further with every character typed. Measuring the text up
+ * to the caret is the only thing that agrees with what was drawn, because it
+ * asks the same function that drew it. */
+static int caret_x(const char* text, int caret)
+{
+    char before[UI_TEXT_MAX];
+    int n = caret;
+    if (n < 0) n = 0;
+    if (n > (int)sizeof(before) - 1) n = (int)sizeof(before) - 1;
+    memcpy(before, text, (unsigned)n);
+    before[n] = '\0';
+    return wg_text_width(before);
+}
+
 static int list_rows_visible(const struct ui_view* v)
 {
     const int n = v->frame.h / (v->row_h > 0 ? v->row_h : 1);
@@ -835,9 +854,15 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         } else if (v->kind == UI_FIELD) {
             /* The caret lands where it was clicked, as near as the glyph width
              * allows. */
-            int at = (e->x - v->frame.x - 8) / WG_GLYPH_W;
+            /* Measured the same way it is drawn: walk the string until the
+             * text is wider than the click. Dividing by a fixed width put the
+             * caret somewhere else entirely on a proportional font. */
+            const int want = e->x - v->frame.x - 8;
             const int n = (int)strlen(v->text);
-            v->caret = at < 0 ? 0 : (at > n ? n : at);
+            int at = 0;
+            while (at < n && caret_x(v->text, at + 1) <= want)
+                ++at;
+            v->caret = at;
         }
         return 1;
     }
@@ -978,9 +1003,41 @@ int ui_event(struct ui_view* root, const struct win_event* e)
 
 /* --- drawing --------------------------------------------------------------- */
 
+/* A colour that suits whichever mode is on.
+ *
+ * The components were written with flat colours - WG_SHADOW for a switch's
+ * track, WG_PAPER behind a progress bar - and a flat grey laid on the glass is
+ * a grey rectangle: it covers the blur instead of sitting on it, which is what
+ * "some elements turn dark grey" was. On the glass they want a translucent
+ * white; opaque, they want the solid colour they always had. */
+static uint32_t glass_tint(uint32_t on_glass, uint32_t when_opaque)
+{
+    return wg_glass_on() ? on_glass : when_opaque;
+}
+
 /* Which menu of a bar is being drawn, so the shared item callback knows which
  * one it is answering for. */
 static int g_menu_of;
+
+static void draw_dropdown(struct ui_view* v, int x, int y, int w,
+                          ui_row_text items, int count, int chosen);
+
+/* Whatever has to be above everything, drawn after everything. One menu at
+ * most, which is why this needs no list. */
+static void draw_overlay(void)
+{
+    struct ui_view* v = g_dropped;
+    if (v == 0)
+        return;
+    int x, y, w, n;
+    if (!dropdown_box(v, &x, &y, &w, &n))
+        return;
+    if (v->kind == UI_MENUBAR)
+        g_menu_of = v->open;
+    draw_dropdown(v, x, y, w,
+                  v->kind == UI_MENUBAR ? (ui_row_text)v->icon_of : v->row_text,
+                  n, v->kind == UI_POPUP ? v->selected : -1);
+}
 
 /* One drop-down: a popup's list of choices, or a menu bar's items. They are the
  * same picture, and were the same picture written twice until this. */
@@ -1002,13 +1059,27 @@ static void draw_dropdown(struct ui_view* v, int x, int y, int w,
     }
 }
 
+/* The background of something you look *into* - a table, a tree, a page of
+ * text - as opposed to a panel that floats above the window.
+ *
+ * wg_container is the floating kind: a wash and a bright line just inside its
+ * edge. Used for content it draws that bright line inside whatever box already
+ * drew one, and two of them a few pixels apart is the doubled border that
+ * showed up on the glass. This is the wash without the edge. */
+static void content_surface(const struct ui_rect* f)
+{
+    wg_glass_fill(f->x, f->y, f->w, f->h, WG_RADIUS,
+                  wg_glass_on() ? 0x24FFFFFFu
+                                : (0xFF000000u | (wg_body_colour() & 0xFFFFFF)));
+}
+
 static void draw_list(struct ui_view* v)
 {
     const int sidebar = (v->kind == UI_SIDEBAR);
     if (sidebar)
         wg_sidebar(v->frame.x, v->frame.y, v->frame.w, v->frame.h);
     else
-        wg_container(v->frame.x, v->frame.y, v->frame.w, v->frame.h, 6);
+        content_surface(&v->frame);
 
     const int page = list_rows_visible(v);
     for (int i = 0; i < page; ++i) {
@@ -1053,7 +1124,7 @@ void ui_draw(struct ui_view* v)
             /* The caret, where the next character will go. Drawn rather than
              * blinked: a blink needs a timer, and a timer to show where you
              * are typing is a lot of machinery for very little. */
-            const int cx = f.x + 8 + v->caret * WG_GLYPH_W;
+            const int cx = f.x + 8 + caret_x(v->text, v->caret);
             if (cx < f.x + f.w - 4)
                 wg_fill(cx, f.y + 5, 1, f.h - 10, wg_ink_colour());
         }
@@ -1091,8 +1162,10 @@ void ui_draw(struct ui_view* v)
         wg_slider_draw(f.x, f.y, f.w, v->value, v->max);
         break;
     case UI_PROGRESS:
-        wg_fill(f.x, f.y, f.w, f.h, WG_PAPER);
-        wg_bevel(f.x, f.y, f.w, f.h, 0);
+        /* No bevel: a drawn border is what this design does without, and on
+         * the glass it came out as a hard grey outline around a pale bar. */
+        wg_glass_fill(f.x, f.y, f.w, f.h, f.h / 2,
+                      glass_tint(0x2EFFFFFFu, WG_PAPER));
         if (v->max > 0) {
             int fill = (f.w - 2) * v->value / v->max;
             if (fill < 0) fill = 0;
@@ -1123,7 +1196,12 @@ void ui_draw(struct ui_view* v)
          * without a word and without a tick to read. */
         const int tw = 38, th = 18;
         const int ty = f.y + (f.h - th) / 2;
-        wg_fill(f.x, ty, tw, th, v->on ? WG_ACCENT : WG_SHADOW);
+        /* The off state is the one that went grey on the glass. */
+        if (v->on)
+            wg_fill(f.x, ty, tw, th, WG_ACCENT);
+        else
+            wg_glass_fill(f.x, ty, tw, th, th / 2,
+                          glass_tint(0x33FFFFFFu, WG_SHADOW));
         wg_fill(v->on ? f.x + tw - th + 2 : f.x + 2, ty + 2, th - 4, th - 4,
                 WG_PAPER);
         wg_text_clipped(f.x + tw + 10, f.y + (f.h - WG_GLYPH_H) / 2, v->text,
@@ -1193,7 +1271,7 @@ void ui_draw(struct ui_view* v)
     }
 
     case UI_TABLE: {
-        wg_container(f.x, f.y, f.w, f.h, 6);
+        content_surface(&f);
         /* The headings, then a rule, then the rows - and the columns are laid
          * out from the declared widths in both, so a cell cannot land under
          * the wrong heading. */
@@ -1224,7 +1302,7 @@ void ui_draw(struct ui_view* v)
     }
 
     case UI_TREE: {
-        wg_container(f.x, f.y, f.w, f.h, 6);
+        content_surface(&f);
         const int page = f.h / v->row_h;
         for (int i = 0; i < page; ++i) {
             const int row = v->scroll + i;
@@ -1253,7 +1331,7 @@ void ui_draw(struct ui_view* v)
     }
 
     case UI_ICONGRID: {
-        wg_container(f.x, f.y, f.w, f.h, 6);
+        content_surface(&f);
         const int cols = f.w / (v->cell_w > 0 ? v->cell_w : 1);
         for (int i = 0; i < v->rows && cols > 0; ++i) {
             const int col = i % cols, row = i / cols - v->scroll;
@@ -1277,7 +1355,7 @@ void ui_draw(struct ui_view* v)
     }
 
     case UI_TEXT: {
-        wg_container(f.x, f.y, f.w, f.h, 6);
+        content_surface(&f);
         if (v->buffer == 0)
             break;
         const int page = (f.h - 8) / v->row_h;
@@ -1301,7 +1379,7 @@ void ui_draw(struct ui_view* v)
                             wg_ink_colour(), f.w - 16);
             /* The caret, when it is on this line. */
             if (focused && v->caret >= at && v->caret <= at + (int)n) {
-                const int cx2 = f.x + 8 + (v->caret - at) * WG_GLYPH_W;
+                const int cx2 = f.x + 8 + caret_x(text, v->caret - at);
                 wg_fill(cx2, f.y + 4 + i * v->row_h, 1, v->row_h,
                         wg_ink_colour());
             }
@@ -1317,15 +1395,32 @@ void ui_draw(struct ui_view* v)
                            f.h, v->child->frame.h);
         break;
 
-    case UI_SPLIT:
-        /* The divider, as a grip between the panes. */
-        if (v->layout == UI_STACK_H)
-            wg_fill(f.x + v->divider + 1, f.y, DIVIDER_W - 2, f.h,
-                    wg_sel_colour());
-        else
-            wg_fill(f.x, f.y + v->divider + 1, f.w, DIVIDER_W - 2,
-                    wg_sel_colour());
+    case UI_SPLIT: {
+        /* Clamped to the split, not just clipped by the window.
+         *
+         * The divider is drawn from `divider`, which the drag writes straight
+         * from the pointer - so dragging past the edge drew the grip outside
+         * the split, over whatever was beside it. Layout clamps the same value
+         * afterwards, which meant the picture and the position disagreed for
+         * exactly as long as the mouse was down. */
+        int at = v->divider;
+        const int span = (v->layout == UI_STACK_H) ? f.w : f.h;
+        if (at < 0) at = 0;
+        if (at > span - DIVIDER_W) at = span - DIVIDER_W;
+        if (at < 0) break;
+        /* A pair of hairlines rather than a filled bar: a solid block of the
+         * selection colour between two panes reads as a selected thing. */
+        if (v->layout == UI_STACK_H) {
+            wg_fill(f.x + at + 2, f.y, 1, f.h, WG_DIM);
+            wg_fill(f.x + at + 3, f.y, 1, f.h,
+                    glass_tint(0x33FFFFFFu, WG_LIGHT));
+        } else {
+            wg_fill(f.x, f.y + at + 2, f.w, 1, WG_DIM);
+            wg_fill(f.x, f.y + at + 3, f.w, 1,
+                    glass_tint(0x33FFFFFFu, WG_LIGHT));
+        }
         break;
+    }
 
     case UI_IMAGE:
         if (v->user != 0)
@@ -1340,23 +1435,14 @@ void ui_draw(struct ui_view* v)
     for (struct ui_view* c = v->child; c != 0; c = c->next)
         ui_draw(c);
 
-    /* A drop-down is drawn after the whole tree beneath it, because it has to
-     * be over its neighbours and the tree is walked in the order things sit.
-     * Doing it here - on the way out of the view that owns it - is what keeps
-     * it above them without a second pass over everything. */
-    if (v->kind == UI_POPUP && v->open)
-        draw_dropdown(v, v->frame.x, v->frame.y + v->frame.h, v->frame.w,
-                      v->row_text, v->rows, v->selected);
-    if (v->kind == UI_MENUBAR && v->open >= 0) {
-        int at = v->frame.x;
-        for (int i = 0; i < v->open; ++i) {
-            const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
-            at += (int)strlen(t != 0 ? t : "") * WG_GLYPH_W + 20;
-        }
-        const int* counts = (const int*)(void*)v->depth_of;
-        const int n = counts != 0 ? counts[v->open] : 0;
-        g_menu_of = v->open;
-        draw_dropdown(v, at, v->frame.y + v->frame.h, 170,
-                      (ui_row_text)v->icon_of, n, -1);
-    }
+    /* The open drop-down is not drawn here.
+     *
+     * It was, on the way out of the view that owns it - which is above that
+     * view's own children and above nothing else. The tree is walked in the
+     * order things sit, so every sibling after the menu was painted straight
+     * over it, and a menu near the top of a window disappeared behind the
+     * whole window. It goes last instead, after the entire tree, which is the
+     * only place that is above all of it. */
+    if (v->parent == 0)
+        draw_overlay();
 }

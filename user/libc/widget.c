@@ -514,7 +514,7 @@ static void blend_px(int x, int y, uint32_t over)
  * buffer already held and hand back something opaque, which is right for a
  * control drawn on a surface and wrong for the surface itself. This leaves the
  * alpha in the pixel for the server to blend against the blur. */
-static void glass_fill(int x, int y, int w, int h, int radius, uint32_t argb)
+void wg_glass_fill(int x, int y, int w, int h, int radius, uint32_t argb)
 {
     const unsigned a = (argb >> 24) & 0xFF;
     const uint32_t rgb = argb & 0x00FFFFFFu;
@@ -585,7 +585,7 @@ void wg_container(int x, int y, int w, int h, int pad)
     const struct surface c = canvas();
     const int r = wg_container_radius(pad);
     if (glass_on())
-        glass_fill(x, y, w, h, r, 0x30FFFFFFu);
+        wg_glass_fill(x, y, w, h, r, 0x30FFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 14));
     inner_glow(x, y, w, h, r);
@@ -607,7 +607,7 @@ void wg_row_select(int x, int y, int w, int h)
     const struct surface c = canvas();
     const int r = h / 2 > WG_RADIUS ? WG_RADIUS : h / 2;
     if (glass_on()) {
-        glass_fill(x, y, w, h, r, 0x59FFFFFFu);
+        wg_glass_fill(x, y, w, h, r, 0x59FFFFFFu);
         draw_round_rect_outline(&c, x, y, w, h, r, 1, 0x4DFFFFFFu);
     } else {
         draw_round_rect(&c, x, y, w, h, r, 0xFF000000u | g_sel);
@@ -625,7 +625,7 @@ void wg_sidebar(int x, int y, int w, int h)
     if (glass_on())
         /* The same amount the server adds over the title bar, so the column
          * is one tone from the very top of the window. */
-        glass_fill(x, y, w, h, 0, 0x33FFFFFFu);
+        wg_glass_fill(x, y, w, h, 0, 0x33FFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, 0, darken(wg_base_colour(), 18));
     /* No line down the inside edge. The change of tone is the edge, and a
@@ -931,7 +931,7 @@ void wg_check(int x, int y, int size, int on)
         draw_round_rect(&c, x, y, size, size, r, 0xFF000000u | wg_sel_colour());
         tick(x, y, size, 0xFFFFFF);
     } else if (glass_on()) {
-        glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
+        wg_glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
     } else {
         draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 12));
     }
@@ -943,7 +943,7 @@ void wg_radio(int x, int y, int size, int on)
     const struct surface c = canvas();
     const int r = size / 2;
     if (glass_on())
-        glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
+        wg_glass_fill(x, y, size, size, r, 0x3AFFFFFFu);
     else
         draw_round_rect(&c, x, y, size, size, r, darken(wg_base_colour(), 12));
     if (on) {
@@ -963,7 +963,7 @@ void wg_field(int x, int y, int w, int h, const char* text, int focused)
     const struct surface c = canvas();
     const int r = h / 3 > 8 ? 8 : h / 3;
     if (glass_on())
-        glass_fill(x, y, w, h, r, 0x1FFFFFFFu);
+        wg_glass_fill(x, y, w, h, r, 0x1FFFFFFFu);
     else
         draw_round_rect(&c, x, y, w, h, r, darken(wg_base_colour(), 22));
     if (focused)
