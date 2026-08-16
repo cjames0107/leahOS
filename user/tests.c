@@ -786,6 +786,45 @@ static void tap_key(struct ui_view* root, unsigned key)
     ui_event(root, &e);
 }
 
+/* Deliberately writes past the end of a local array.
+ *
+ * Through a volatile length so the compiler cannot see the overrun and either
+ * remove it or refuse to build. Called only in a forked child, which is
+ * expected to die - the point is that it dies *here*, with the canary's
+ * message, rather than somewhere unrelated much later. */
+static volatile int g_smash_len = 96;
+
+/* noinline, because inlined into its caller the array stops being the last
+ * thing before that caller's canary and the overrun lands in other locals
+ * instead. The first version of this check failed for exactly that reason and
+ * looked like the protector being off. */
+__attribute__((noinline)) static void smash_the_stack(void)
+{
+    char small[8];
+    for (int i = 0; i < g_smash_len; ++i)
+        small[i] = (char)('A' + (i & 15));
+    /* Used, so the array is not optimised away entirely. */
+    write(1, small, 1);
+}
+
+static void test_stack_guard(void)
+{
+    section("stack canary");
+
+    const int pid = fork();
+    if (pid == 0) {
+        smash_the_stack();
+        exit(0);            /* reached only if the canary did not fire */
+    }
+    int status = 0;
+    wait(&status);
+    /* 134 is what __stack_chk_fail exits with. A child that returned 0 got
+     * away with writing thirty-two bytes past an eight-byte array, which
+     * means the protector is not on - and the whole reason it is on is to
+     * catch exactly that happening by accident somewhere else. */
+    check("an overrun local trips the stack canary", status != 0);
+}
+
 static void test_ui(void)
 {
     section("components");
@@ -3251,6 +3290,7 @@ int main(void)
     test_permissions();
     test_accounts();
     test_tcp();
+    test_stack_guard();
     test_ui();
     test_ipc();
     test_driver_abi();

@@ -218,7 +218,11 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 # these registers there is nothing to save until one user task gives way to
 # another. Programs link low (user.ld), so the default small code model is all
 # they need.
-USER_CFLAGS := -std=c11 -ffreestanding -fno-stack-protector -fno-pic -fno-pie \
+# -fstack-protector-strong: a canary between a function's locals and its
+# return address, checked on the way out. Turned on to find an overrun
+# whose damage only shows up somewhere else entirely - see
+# docs/startup-fault.md - and worth keeping afterwards.
+USER_CFLAGS := -std=c11 -ffreestanding -fstack-protector-strong -fno-pic -fno-pie \
                -msse -msse2 -mfpmath=sse \
                -O2 -g -Wall -Wextra -Iuser/libc/include
 

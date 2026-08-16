@@ -50,6 +50,29 @@ either, and once here.
     `kMaxArgs` and `kArgStorage`.
   - **Large locals** in audiod or in libc's startup path. There are none.
 
+## The sweep, and what it settled
+
+A reproduction loop was built for this: boot, kill audiod, look for a fault in
+the restart. Two minutes a sample rather than the six a full `make check`
+takes. It checks itself - if the kill did nothing, or audiod never came back,
+it says so instead of reporting "clean", because a detector that passes when
+nothing happened is how the last three of these went wrong.
+
+With that:
+
+  - The **known-failing configuration is now clean**. The static view pool,
+    which reproduced twice in a row, does not reproduce at all - confirmed with
+    the detector shown to work (it killed pid 13 and saw the restart as 35).
+    Between then and now libc gained a few kilobytes of code for unrelated
+    reasons. That is all it took to move it.
+  - **Eight BSS layouts, 8K to 120K, all clean.** Padding .bss does not
+    reproduce it, which says the sensitive axis is not the one that was
+    obviously suspicious.
+
+So the bug is not reachable by sweeping BSS, and the thing that moved it last
+was *code*. A sweep of text or data placement might find it; it might equally
+be moved again by the next commit.
+
 ## Where to go next
 
 The thing to find is a write that runs past the end of something. Suggestions,
@@ -58,9 +81,15 @@ cheapest first:
   1. Sweep the layout deliberately: a padding array in libc, grown a few
      hundred bytes at a time, until it reproduces. That gives a reproduction
      that does not evaporate, which is what this attempt lacked.
-  2. A canary: have crt0 write a known value below the initial stack and have
-     libc check it. If it is gone by the time libc runs, the overrun is in
-     startup rather than later.
+  2. ~~A canary~~ - done. Userland builds with -fstack-protector-strong and
+     libc provides __stack_chk_guard and __stack_chk_fail. An overrun of a
+     local array now dies where it happens, naming nothing but saying plainly
+     what went wrong, instead of corrupting a frame whose damage appears two
+     calls and one exec later. The suite proves it fires: a function that
+     writes ninety-six bytes into an eight-byte array is expected to die.
+
+     This has not caught the startup fault, because the startup fault is not
+     currently happening. It is armed for when it comes back.
   3. The user stack is 16 pages with nothing below it. A guard page would not
      have caught this one - the fault address is 0, not just under the stack -
      but it would catch the ordinary kind.
