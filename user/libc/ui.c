@@ -32,7 +32,17 @@ static struct ui_view* g_focus;
 static struct ui_view* g_pressed;
 /* The view whose drop-down is showing. There is at most one: a second menu
  * opening closes the first, which is what a menu bar does. */
+/* A menu row that is a rule rather than a choice. */
+static int ui_is_separator(const char* label)
+{
+    return label != 0 && label[0] == '-' && label[1] == '\0';
+}
+
 static struct ui_view* g_dropped;
+/* Which channel of the colour mixer is being dragged, or -1. */
+static int g_channel = -1;
+static void colour_panel(const struct ui_view* v, int* x, int* y, int* w,
+                         int* h);
 /* The popover that is showing. One at a time, like the drop-downs: a second
  * one over the first is not something a person can answer. */
 static struct ui_view* g_popover;
@@ -43,6 +53,7 @@ void ui_reset(void)
     g_focus = 0;
     g_pressed = 0;
     g_dropped = 0;
+    g_channel = -1;
 }
 
 /* Where a view's drop-down is, and how many rows it has. Written once and read
@@ -66,6 +77,17 @@ static int dropdown_box(struct ui_view* v, int* x, int* y, int* w, int* n)
         const int* counts = (const int*)(void*)v->depth_of;
         *x = at; *y = v->frame.y + v->frame.h; *w = 170;
         *n = counts != 0 ? counts[v->open] : 0;
+        /* Pulled left when it would run off the window. A menu bar sits at the
+         * right-hand end of a toolbar as often as not, and dropping its items
+         * straight down from there put half of every label past the edge. */
+        const struct ui_view* root = v;
+        while (root->parent != 0)
+            root = root->parent;
+        const int right = root->frame.x + root->frame.w;
+        if (*x + *w > right - 4)
+            *x = right - 4 - *w;
+        if (*x < root->frame.x + 4)
+            *x = root->frame.x + 4;
         return *n > 0;
     }
     return 0;
@@ -913,6 +935,25 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         /* An open drop-down answers first, wherever it is over. It is drawn
          * above its neighbours, so it has to be hit above them too - otherwise
          * choosing an item activates whatever the item happens to cover. */
+        if (g_dropped != 0 && g_dropped->kind == UI_COLOUR) {
+            struct ui_view* d = g_dropped;
+            int px, py, pw, ph;
+            colour_panel(d, &px, &py, &pw, &ph);
+            if (e->x >= px && e->x < px + pw &&
+                e->y >= py && e->y < py + ph) {
+                g_channel = wg_rgb_hit(px + 8, py + 8, pw - 16, e->x, e->y);
+                if (g_channel >= 0) {
+                    d->value = (int)wg_rgb_move((uint32_t)d->value, g_channel,
+                                                px + 8, pw - 16, e->x);
+                    if (d->action) d->action(d, d->user);
+                }
+                return 1;
+            }
+            /* Anywhere else shuts it, and the press goes on to whatever it
+             * landed on. */
+            d->open = 0;
+            g_dropped = 0;
+        }
         if (g_dropped != 0) {
             int dx, dy, dw, dn;
             struct ui_view* d = g_dropped;
@@ -921,6 +962,16 @@ int ui_event(struct ui_view* root, const struct win_event* e)
                 e->x >= dx && e->x < dx + dw &&
                 e->y >= dy && e->y < dy + dn * rh) {
                 const int item = (e->y - dy) / rh;
+                {
+                    ui_row_text items = d->kind == UI_MENUBAR
+                                      ? (ui_row_text)d->icon_of : d->row_text;
+                    const char* t = items != 0
+                        ? items(d->user, d->kind == UI_MENUBAR
+                                       ? d->open * 100 + item : item)
+                        : "";
+                    if (ui_is_separator(t != 0 ? t : ""))
+                        return 1;   /* a line: it takes the press and does nothing */
+                }
                 if (d->kind == UI_POPUP || d->kind == UI_COMBO) {
                     d->selected = item;
                     d->open = 0;
@@ -1083,7 +1134,11 @@ int ui_event(struct ui_view* root, const struct win_event* e)
                 if (v->action) v->action(v, v->user);
             }
         } else if (v->kind == UI_COLOUR) {
+            /* The well opens a mixer under it. Three sliders rather than a
+             * tray of swatches: twelve fixed colours are twelve pictures you
+             * can paint, and three channels are all of them. */
             v->open = !v->open;
+            g_dropped = v->open ? v : 0;
         } else if (v->kind == UI_BROWSER) {
             const int each = v->cols > 0 ? v->frame.w / v->cols : v->frame.w;
             const int col = each > 0 ? (e->x - v->frame.x) / each : 0;
@@ -1141,7 +1196,24 @@ int ui_event(struct ui_view* root, const struct win_event* e)
                 ++at;
             v->caret = at;
         }
-        return 1;
+        /* A view with nothing to do did not take the press. The distinction
+         * matters to the application's own handler: a custom view is where it
+         * draws its own content and does its own hit-testing, and treating a
+         * press there as "a component dealt with it" makes the content dead. */
+        switch (v->kind) {
+        case UI_CUSTOM:
+        case UI_LABEL:
+        case UI_SPACER:
+        case UI_SEPARATOR:
+        case UI_IMAGE:
+        case UI_PROGRESS:
+        case UI_LEVEL:
+        case UI_GROUP:
+        case UI_SPINNER:
+            return 0;
+        default:
+            return 1;
+        }
     }
 
     if (e->type == WIN_EVENT_MOUSE_UP) {
@@ -1151,6 +1223,20 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         if (v != 0 && v == g_pressed && v->kind == UI_BUTTON && v->action != 0)
             v->action(v, v->user);
         g_pressed = 0;
+        g_channel = -1;
+        return 1;
+    }
+
+    if (e->type == WIN_EVENT_MOUSE_MOVE && g_channel >= 0 &&
+        g_dropped != 0 && g_dropped->kind == UI_COLOUR) {
+        struct ui_view* d = g_dropped;
+        int px, py, pw, ph;
+        colour_panel(d, &px, &py, &pw, &ph);
+        const uint32_t was = (uint32_t)d->value;
+        d->value = (int)wg_rgb_move(was, g_channel, px + 8, pw - 16, e->x);
+        if ((uint32_t)d->value == was)
+            return 0;
+        if (d->action) d->action(d, d->user);
         return 1;
     }
 
@@ -1307,6 +1393,28 @@ static int g_menu_of;
 static void draw_dropdown(struct ui_view* v, int x, int y, int w,
                           ui_row_text items, int count, int chosen);
 
+/* The colour well's mixer: under the well, pulled left when that would run it
+ * off the window's edge. In one place because the drawing and the dragging
+ * both need it and a second copy is a second thing to get wrong. */
+#define UI_MIXER_W 236
+static void colour_panel(const struct ui_view* v, int* x, int* y, int* w,
+                         int* h)
+{
+    *w = UI_MIXER_W;
+    *h = WG_RGB_H + 16;
+    *x = v->frame.x;
+    *y = v->frame.y + v->frame.h + 4;
+    /* The window, which is whatever the root was laid out over. */
+    const struct ui_view* root = v;
+    while (root->parent != 0)
+        root = root->parent;
+    const int right = root->frame.x + root->frame.w;
+    if (*x + *w > right - 4)
+        *x = right - 4 - *w;
+    if (*x < root->frame.x + 4)
+        *x = root->frame.x + 4;
+}
+
 /* Whatever has to be above everything, drawn after everything. One menu at
  * most, which is why this needs no list. */
 static void draw_overlay(void)
@@ -1314,6 +1422,13 @@ static void draw_overlay(void)
     struct ui_view* v = g_dropped;
     if (v == 0)
         return;
+    if (v->kind == UI_COLOUR) {
+        int px, py, pw, ph;
+        colour_panel(v, &px, &py, &pw, &ph);
+        wg_container(px, py, pw, ph, 10);
+        wg_rgb_draw(px + 8, py + 8, pw - 16, (uint32_t)v->value);
+        return;
+    }
     int x, y, w, n;
     if (!dropdown_box(v, &x, &y, &w, &n))
         return;
@@ -1337,12 +1452,22 @@ static void draw_dropdown(struct ui_view* v, int x, int y, int w,
     wg_container(x - 4, y - 2, w + 8, count * rh + 8, 10);
     for (int i = 0; i < count; ++i) {
         const int ry = y + 2 + i * rh;
-        if (i == chosen)
-            wg_row_select(x, ry, w, rh);
         const char* t = items != 0
             ? items(v->user, v->kind == UI_MENUBAR ? g_menu_of * 100 + i : i)
             : "";
-        wg_text(x + 10, ry + 4, t != 0 ? t : "", wg_ink_colour());
+        if (t == 0)
+            t = "";
+        /* A row whose label is "-" is a separator: a line, and not something
+         * that can be chosen. It is how a menu groups without needing a second
+         * level, and it was being drawn as a row with a hyphen in it. */
+        if (ui_is_separator(t)) {
+            wg_glass_fill(x + 6, ry + rh / 2, w - 12, 1, 0,
+                          glass_tint(0x40FFFFFFu, WG_DIM));
+            continue;
+        }
+        if (i == chosen)
+            wg_row_select(x, ry, w, rh);
+        wg_text(x + 10, ry + 4, t, wg_ink_colour());
     }
 }
 
@@ -1463,8 +1588,17 @@ void ui_draw(struct ui_view* v)
     case UI_SPACER:
         break;
     case UI_CUSTOM:
-        if (v->draw != 0)
+        /* Clipped to its frame. A view that draws its own content is the one
+         * kind that has no idea where the rest of the interface is, and the
+         * ones that scroll by the pixel draw a part-row past their own top
+         * edge. Painting the chrome again afterwards was the old answer, and
+         * it stops working the moment the chrome is a sibling in this tree
+         * rather than something drawn last by hand. */
+        if (v->draw != 0) {
+            wg_clip(f.x, f.y, f.w, f.h);
             v->draw(v, v->user);
+            wg_clip_none();
+        }
         break;
 
     case UI_SECURE: {

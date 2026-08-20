@@ -67,6 +67,8 @@ static void paint(struct app* a)
     }
     if (a->root != 0)
         ui_draw(a->root);
+    if (a->overlay != 0)
+        a->overlay(a);
     menu_draw();
     win_present(a->id);
 
@@ -378,7 +380,10 @@ int app_run(struct app* a, int argc, char** argv)
     a->id = win_create(x, y, a->width, a->height,
                        a->title != 0 ? a->title : "Window");
     if (a->id < 0) {
-        printf("%s: no window server\n", a->title != 0 ? a->title : "app");
+        /* Either there is no server or it has no free slot, and from here the
+         * two look the same - so say what happened rather than guessing why. */
+        printf("%s: could not open a window\n",
+               a->title != 0 ? a->title : "app");
         return 1;
     }
     /* Alpha unless the application asks to be opaque, because the glass
@@ -386,6 +391,8 @@ int app_run(struct app* a, int argc, char** argv)
      * was the single most common way a new window came out wrong. */
     if (!a->opaque)
         win_set_alpha(a->id);
+    if (a->client_title)
+        win_set_client_title(a->id);
     if (a->sidebar > 0)
         win_set_sidebar(a->id, a->sidebar);
     if (a->min_width > 0 || a->min_height > 0)
@@ -469,8 +476,15 @@ int app_run(struct app* a, int argc, char** argv)
              * says so by asking for a redraw, and the handler still sees it -
              * an application may want to know about a click its list already
              * dealt with. */
-            if (a->root != 0)
-                dirty |= ui_event(a->root, &e);
+            if (a->filter != 0 && a->filter(a, &e) != 0) {
+                dirty = 1;
+                continue;
+            }
+            a->handled = 0;
+            if (a->root != 0) {
+                a->handled = ui_event(a->root, &e);
+                dirty |= a->handled;
+            }
             if (a->event != 0)
                 dirty |= a->event(a, &e);
             if (e.type == WIN_EVENT_MOUSE_DOWN && e.button == 2 &&

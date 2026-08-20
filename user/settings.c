@@ -10,8 +10,9 @@
  * the note on persistence under Appearance.
  */
 
+#include <app.h>
+#include <ui.h>
 #include <paths.h>
-#include <dialog.h>
 #include <display.h>
 #include <audio.h>
 #include <net.h>
@@ -38,14 +39,11 @@
 #define SIDEBAR 118
 #define ROW_H   22
 
-static uint32_t* g_px;
-static unsigned  g_w = 660, g_h = 400;
 static int g_page = PAGE_GENERAL;
 
 /* The output device, asked about once, and the volume to come back to when
  * mute is switched off. */
 static struct audio_info g_audio;
-static int g_vol_drag;
 static int g_vol_before_mute = 70;
 static char g_note[128] = "";
 
@@ -222,20 +220,6 @@ static void set_wallpaper(const char* path)
 /* --- users ---------------------------------------------------------------- */
 
 static char g_uname[64], g_upass[64];
-static int  g_ufield;               /* 1 name, 2 password */
-
-struct box { int x, y, w, h; };
-static int inside(const struct box* b, int x, int y)
-{
-    return x >= b->x && y >= b->y && x < b->x + b->w && y < b->y + b->h;
-}
-
-static struct box g_f_name = { SIDEBAR + 90, 70,  180, 22 };
-static struct box g_f_pass = { SIDEBAR + 90, 98,  180, 22 };
-static struct box g_b_add  = { SIDEBAR + 90, 128, 96,  24 };
-static struct box g_b_pass = { SIDEBAR + 194, 128, 104, 24 };
-static struct box g_b_priv = { SIDEBAR + 90, 200, 200, 24 };
-static struct box g_b_open = { SIDEBAR + 90, 232, 200, 24 };
 
 static void add_user(void)
 {
@@ -284,122 +268,6 @@ static void set_home_mode(unsigned mode)
         snprintf(g_note, sizeof(g_note), "%s is now %04o", home, mode);
 }
 
-/* --- drawing --------------------------------------------------------------- */
-
-static void field(const struct box* b, const char* label, const char* text,
-                  int focused, int secret)
-{
-    wg_text(SIDEBAR + 14, b->y + 3, label, WG_DIM);
-    wg_fill(b->x, b->y, b->w, b->h, WG_PAPER);
-    wg_bevel(b->x, b->y, b->w, b->h, 0);
-    if (secret) {
-        for (unsigned k = 0; k < strlen(text) && (int)k * 10 < b->w - 12; ++k)
-            wg_fill(b->x + 6 + (int)k * 10, b->y + b->h / 2 - 2, 5, 5, WG_INK);
-    } else {
-        wg_text_clipped(b->x + 5, b->y + 3, text, WG_INK, b->w - 10);
-    }
-    if (focused)
-        wg_fill(b->x + 2, b->y + 3, 1, b->h - 6, WG_ACCENT);
-}
-
-static void kv(int y, const char* k, const char* v)
-{
-    wg_text(SIDEBAR + 14, y, k, WG_DIM);
-    wg_text_clipped(SIDEBAR + 130, y, v, WG_INK, (int)g_w - SIDEBAR - 145);
-}
-
-/* A row's value, set against the group's right edge. */
-static void kv_at(int right, int y, const char* value)
-{
-    const int tw = wg_text_width(value);
-    wg_text_clipped(right - tw, y, value, WG_DIM, right - SIDEBAR - 120);
-}
-
-static void draw_general(void)
-{
-    char name[64] = "?", line[96], cwd[128] = "";
-    username(getuid(), name);
-    getcwd(cwd, sizeof(cwd));
-
-    const int x = SIDEBAR + 16, w = (int)g_w - SIDEBAR - 32;
-    wg_text(x, 12, "General", wg_ink_colour());
-
-    /* Who you are. */
-    int y = 58;
-    wg_group_begin(x, y, w, 3, "Account");
-    snprintf(line, sizeof(line), "%u", getuid());
-    wg_row(x, y, w, 0, "User");       kv_at(x + w - 14, y + 4, name);
-    wg_row(x, y, w, 1, "User ID");    kv_at(x + w - 14, y + WG_ROW_H + 4, line);
-    wg_row(x, y, w, 2, "Directory");  kv_at(x + w - 14, y + WG_ROW_H * 2 + 4, cwd);
-
-    /* And what it is running on. */
-    y += 3 * WG_ROW_H + 34;
-    wg_group_begin(x, y, w, 3, "This Computer");
-
-    struct fb_info fb;
-    if (fb_info(&fb) == 0)
-        snprintf(line, sizeof(line), "%ux%u, %u bpp", fb.width, fb.height,
-                 fb.bits_per_pixel);
-    else
-        snprintf(line, sizeof(line), "none");
-    wg_row(x, y, w, 0, "Display");    kv_at(x + w - 14, y + 4, line);
-
-    struct mem_info m;
-    if (mem_info(&m) == 0)
-        snprintf(line, sizeof(line), "%llu of %llu KiB used",
-                 (unsigned long long)(m.used / 1024),
-                 (unsigned long long)(m.usable / 1024));
-    else
-        snprintf(line, sizeof(line), "unknown");
-    wg_row(x, y, w, 1, "Memory");     kv_at(x + w - 14, y + WG_ROW_H + 4, line);
-
-    struct proc_info procs[64];
-    const int n = proc_list(procs, 64);
-    snprintf(line, sizeof(line), "%d", n < 0 ? 0 : n);
-    wg_row(x, y, w, 2, "Tasks");      kv_at(x + w - 14, y + WG_ROW_H * 2 + 4, line);
-}
-
-static void draw_appearance(void)
-{
-    const int x = SIDEBAR + 16, w = (int)g_w - SIDEBAR - 32;
-    wg_text(x, 12, "Appearance", wg_ink_colour());
-
-    /* Theme: the presets, and the one switch that changes how everything is
-     * drawn rather than what colour it is. */
-    int y = 58;
-    wg_group_begin(x, y, w, 2, "Theme");
-    wg_row(x, y, w, 0, "Appearance");
-    wg_pill(x + w - 170, y + 4, 76, 22, "Light", g_mode == MODE_LIGHT);
-    wg_pill(x + w - 90,  y + 4, 76, 22, "Dark",  g_mode == MODE_DARK);
-    wg_row(x, y, w, 1, "Window Backdrop");
-    wg_pill(x + w - 170, y + WG_ROW_H + 4, 76, 22, "opaque",
-            g_ws && g_ws->theme.blur == 0);
-    wg_pill(x + w - 90,  y + WG_ROW_H + 4, 76, 22, "blurred",
-            g_ws && g_ws->theme.blur != 0);
-
-    /* Text and desktop. */
-    y += 2 * WG_ROW_H + 34;
-    wg_group_begin(x, y, w, 3, "Desktop");
-    wg_row(x, y, w, 0, "Text Size");
-    wg_pill(x + w - 170, y + 4, 76, 22, "normal",
-            g_ws && g_ws->theme.text_scale != 2);
-    wg_pill(x + w - 90,  y + 4, 76, 22, "large",
-            g_ws && g_ws->theme.text_scale == 2);
-
-    wg_row(x, y, w, 1, "Pattern");
-    for (int i = 0; i < WS_PATTERN_COUNT && i < 4; ++i)
-        wg_pill(x + w - 14 - (4 - i) * 62, y + WG_ROW_H + 4, 58, 22,
-                kPatterns[i], g_ws && (int)g_ws->theme.pattern == i);
-
-    wg_row(x, y, w, 2, "Wallpaper");
-    wg_pill(x + w - 200, y + WG_ROW_H * 2 + 4, 116, 22, "Choose a PNG...", 0);
-    wg_pill(x + w - 80,  y + WG_ROW_H * 2 + 4, 66, 22, "Remove", 0);
-
-    wg_text_clipped(x, y + 3 * WG_ROW_H + 12,
-                    "saved to ~/.leahrc and restored when settings next starts",
-                    WG_DIM, w);
-}
-
 /* --- sound ----------------------------------------------------------------
  *
  * One control that matters and a way to hear the effect of moving it. Volume
@@ -407,9 +275,6 @@ static void draw_appearance(void)
  * check, which is how a volume slider ends up being adjusted by trial against
  * whatever happens to be playing.
  */
-#define VOL_X (SIDEBAR + 90)
-#define VOL_Y 62
-#define VOL_W 260
 /* A quarter-second of A above middle C, generated here rather than launched as
  * a program: a test tone that takes a fork and an exec to make a sound is
  * testing the wrong thing. */
@@ -459,163 +324,531 @@ static void set_audio_volume(int percent)
     prefs_save();
 }
 
-static void draw_sound(void)
-{
-    wg_text(SIDEBAR + 14, 16, "Sound", WG_INK);
-    wg_fill(SIDEBAR + 14, 34, (int)g_w - SIDEBAR - 28, 1, WG_DIM);
+/* --- the interface ---------------------------------------------------------
+ *
+ * A sidebar and a page, both components. Each page is built rather than drawn:
+ * the pixel arithmetic that used to place every pill - and that had to be
+ * repeated exactly in the click handler, which is how the Appearance row came
+ * to be a column of magic numbers - is gone, and a control is hit because it
+ * is where the layout put it.
+ *
+ * Switching pages rebuilds the tree. It could instead hide five of six
+ * subtrees, but a control panel builds a page in microseconds and the
+ * alternative is six trees permanently alive with stale text in them.
+ */
 
+static struct app g_app;
+static struct ui_view* g_note_label;
+static int g_rebuild;               /* a page change, applied after the walk */
+
+static const char* page_name(void* user, int row)
+{
+    (void)user;
+    return (row >= 0 && row < PAGES) ? kPages[row] : "";
+}
+
+static void on_page(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (v->selected < 0 || v->selected >= PAGES || v->selected == g_page)
+        return;
+    g_page = v->selected;
+    g_note[0] = '\0';
+    /* Not here: this runs inside the walk over the tree that is about to be
+     * freed. */
+    g_rebuild = 1;
+}
+
+/* A row of a settings group: what it is on the left, what it says on the
+ * right. Returns the row so a control can be hung on it. */
+static struct ui_view* row(struct ui_view* parent, const char* key)
+{
+    struct ui_view* r = ui_box(parent, UI_STACK_H, 0, 8);
+    ui_size(r, 0, 24);
+    ui_grow(r, 0);
+    ui_grow(ui_label(r, key), 0);
+    ui_spacer(r);
+    return r;
+}
+
+static void kv(struct ui_view* parent, const char* key, const char* value)
+{
+    ui_grow(ui_label(row(parent, key), value), 0);
+}
+
+/* --- general --------------------------------------------------------------- */
+
+static void build_general(struct ui_view* page)
+{
+    char name[64] = "?", line[96], cwd[128] = "";
+    username(getuid(), name);
+    getcwd(cwd, sizeof(cwd));
+
+    struct ui_view* g = ui_group(page, "Account", UI_STACK_V, 12, 2);
+    ui_grow(g, 0);
+    ui_size(g, 0, 3 * 24 + 28);
+    kv(g, "User", name);
+    snprintf(line, sizeof(line), "%u", getuid());
+    kv(g, "User ID", line);
+    kv(g, "Directory", cwd);
+
+    struct ui_view* c = ui_group(page, "This Computer", UI_STACK_V, 12, 2);
+    ui_grow(c, 0);
+    ui_size(c, 0, 3 * 24 + 28);
+
+    struct fb_info fb;
+    if (fb_info(&fb) == 0)
+        snprintf(line, sizeof(line), "%ux%u, %u bpp", fb.width, fb.height,
+                 fb.bits_per_pixel);
+    else
+        snprintf(line, sizeof(line), "none");
+    kv(c, "Display", line);
+
+    struct mem_info m;
+    if (mem_info(&m) == 0)
+        snprintf(line, sizeof(line), "%llu of %llu KiB used",
+                 (unsigned long long)(m.used / 1024),
+                 (unsigned long long)(m.usable / 1024));
+    else
+        snprintf(line, sizeof(line), "unknown");
+    kv(c, "Memory", line);
+
+    struct proc_info procs[64];
+    const int n = proc_list(procs, 64);
+    snprintf(line, sizeof(line), "%d", n < 0 ? 0 : n);
+    kv(c, "Tasks", line);
+    ui_spacer(page);
+}
+
+/* --- appearance ------------------------------------------------------------ */
+
+static const char* mode_name(void* user, int i)
+{
+    (void)user;
+    return (i >= 0 && i < PRESETS) ? kPresets[i].name : "";
+}
+
+static const char* backdrop_name(void* user, int i)
+{
+    (void)user;
+    return i == 0 ? "Opaque" : "Blurred";
+}
+
+static const char* size_name(void* user, int i)
+{
+    (void)user;
+    return i == 0 ? "Normal" : "Large";
+}
+
+static const char* pattern_name(void* user, int i)
+{
+    (void)user;
+    return (i >= 0 && i < WS_PATTERN_COUNT) ? kPatterns[i] : "";
+}
+
+static void on_mode(struct ui_view* v, void* user)
+{
+    (void)user;
+    apply_preset(v->on);
+    g_rebuild = 1;
+}
+
+static void on_backdrop(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (g_ws == 0) return;
+    g_ws->theme.blur = (uint32_t)(v->on != 0);
+    theme_changed();
+    ui_set_text(g_note_label, g_note);
+}
+
+static void on_text_size(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (g_ws == 0) return;
+    g_ws->theme.text_scale = v->on == 0 ? 1u : 2u;
+    theme_changed();
+    ui_set_text(g_note_label, g_note);
+}
+
+static void on_pattern(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (g_ws == 0 || v->selected < 0 || v->selected >= WS_PATTERN_COUNT) return;
+    g_ws->theme.pattern = (uint32_t)v->selected;
+    theme_changed();
+}
+
+static void on_choose_paper(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    app_sheet_file(&g_app, PATH_WALLPAPERS);
+}
+
+static void on_clear_paper(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    set_wallpaper("");
+    ui_set_text(g_note_label, g_note);
+}
+
+static void build_appearance(struct ui_view* page)
+{
+    struct ui_view* t = ui_group(page, "Theme", UI_STACK_V, 12, 4);
+    ui_grow(t, 0);
+    ui_size(t, 0, 2 * 30 + 28);
+
+    struct ui_view* r = row(t, "Appearance");
+    struct ui_view* seg = ui_segmented(r, mode_name, PRESETS, 0);
+    seg->on = g_mode;
+    ui_size(seg, 160, 24);
+    ui_grow(seg, 0);
+    ui_on(seg, on_mode, 0);
+
+    r = row(t, "Window Backdrop");
+    seg = ui_segmented(r, backdrop_name, 2, 0);
+    seg->on = (g_ws != 0 && g_ws->theme.blur != 0);
+    ui_size(seg, 160, 24);
+    ui_grow(seg, 0);
+    ui_on(seg, on_backdrop, 0);
+
+    struct ui_view* d = ui_group(page, "Desktop", UI_STACK_V, 12, 4);
+    ui_grow(d, 0);
+    ui_size(d, 0, 3 * 30 + 28);
+
+    r = row(d, "Text Size");
+    seg = ui_segmented(r, size_name, 2, 0);
+    seg->on = (g_ws != 0 && g_ws->theme.text_scale == 2);
+    ui_size(seg, 160, 24);
+    ui_grow(seg, 0);
+    ui_on(seg, on_text_size, 0);
+
+    r = row(d, "Backdrop Pattern");
+    struct ui_view* pop = ui_popup(r, pattern_name, WS_PATTERN_COUNT, 0);
+    pop->selected = g_ws != 0 ? (int)g_ws->theme.pattern : 0;
+    ui_size(pop, 160, 24);
+    ui_grow(pop, 0);
+    ui_on(pop, on_pattern, 0);
+
+    r = row(d, "Wallpaper");
+    ui_grow(ui_size(ui_button(r, "Choose a Picture...", on_choose_paper, 0),
+                    150, 24), 0);
+    ui_grow(ui_size(ui_button(r, "Remove", on_clear_paper, 0), 84, 24), 0);
+
+    ui_grow(ui_label(page,
+                     "saved to ~/.leahrc and restored when settings next starts"),
+            0);
+    ui_spacer(page);
+}
+
+/* --- sound ----------------------------------------------------------------- */
+
+static struct ui_view* g_vol_slider;
+static struct ui_view* g_vol_text;
+static struct ui_view* g_mute;
+
+static void show_volume(void)
+{
+    char v[16];
+    const int now = audio_volume();
+    if (g_vol_slider != 0) g_vol_slider->value = now;
+    if (g_vol_text != 0) {
+        snprintf(v, sizeof(v), "%d%%", now);
+        ui_set_text(g_vol_text, v);
+    }
+    if (g_mute != 0) ui_set_text(g_mute, now == 0 ? "Unmute" : "Mute");
+}
+
+static void on_volume(struct ui_view* v, void* user)
+{
+    (void)user;
+    set_audio_volume(v->value);
+    show_volume();
+}
+
+static void on_mute(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    const int now = audio_volume();
+    if (now == 0) {
+        set_audio_volume(g_vol_before_mute);
+    } else {
+        g_vol_before_mute = now;
+        set_audio_volume(0);
+    }
+    show_volume();
+}
+
+static void on_tone(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    test_tone();
+    ui_set_text(g_note_label, g_note);
+}
+
+static void build_sound(struct ui_view* page)
+{
+    g_vol_slider = g_vol_text = g_mute = 0;
     if (!g_audio.present) {
-        wg_text(SIDEBAR + 14, 62, "no audio device found", WG_DIM);
+        ui_grow(ui_label(page, "no audio device found"), 0);
+        ui_spacer(page);
         return;
     }
 
-    const int vol = audio_volume();
-    wg_text(SIDEBAR + 14, VOL_Y + 4, "volume", WG_DIM);
-    wg_slider_draw(VOL_X, VOL_Y, VOL_W, vol, 100);
-    {
-        char v[16];
-        snprintf(v, sizeof(v), "%d%%", vol);
-        wg_text(VOL_X + VOL_W + 12, VOL_Y + 4, v, WG_INK);
-    }
+    struct ui_view* g = ui_group(page, "Output", UI_STACK_V, 12, 6);
+    ui_grow(g, 0);
+    ui_size(g, 0, 3 * 30 + 28);
 
-    wg_button(VOL_X, VOL_Y + 30, 74, 22, vol == 0 ? "Unmute" : "Mute", vol == 0);
-    wg_button(VOL_X + 82, VOL_Y + 30, 90, 22, "Test tone", 0);
+    struct ui_view* r = ui_box(g, UI_STACK_H, 0, 10);
+    ui_size(r, 0, 24);
+    ui_grow(r, 0);
+    ui_grow(ui_label(r, "Volume"), 0);
+    g_vol_slider = ui_slider(r, audio_volume(), 100);
+    ui_on(g_vol_slider, on_volume, 0);
+    g_vol_text = ui_grow(ui_size(ui_label(r, "0%"), 44, 24), 0);
 
-    wg_text(SIDEBAR + 14, VOL_Y + 74, "output", WG_DIM);
-    wg_text_clipped(VOL_X, VOL_Y + 74, g_audio.name, WG_INK,
-                    (int)g_w - VOL_X - 20);
+    r = ui_box(g, UI_STACK_H, 0, 10);
+    ui_size(r, 0, 26);
+    ui_grow(r, 0);
+    g_mute = ui_grow(ui_size(ui_button(r, "Mute", on_mute, 0), 84, 24), 0);
+    ui_grow(ui_size(ui_button(r, "Test Tone", on_tone, 0), 100, 24), 0);
+    ui_spacer(r);
 
-    wg_text(SIDEBAR + 14, VOL_Y + 96, "format", WG_DIM);
-    {
-        char f[64];
-        snprintf(f, sizeof(f), "%u Hz, %u channels, 16-bit",
-                 g_audio.rate, g_audio.channels);
-        wg_text(VOL_X, VOL_Y + 96, f, WG_INK);
-    }
+    kv(g, "Device", g_audio.name);
 
-    wg_text_clipped(SIDEBAR + 14, VOL_Y + 130,
-                    "the volume is saved to ~/.leahrc and restored at login",
-                    WG_DIM, (int)g_w - SIDEBAR - 28);
+    char f[64];
+    snprintf(f, sizeof(f), "%u Hz, %u channels, 16-bit", g_audio.rate,
+             g_audio.channels);
+    struct ui_view* d = ui_group(page, "Format", UI_STACK_V, 12, 2);
+    ui_grow(d, 0);
+    ui_size(d, 0, 24 + 28);
+    kv(d, "Stream", f);
+
+    ui_grow(ui_label(page,
+                     "the volume is saved to ~/.leahrc and restored at login"),
+            0);
+    ui_spacer(page);
+    show_volume();
 }
 
-static void draw_network(void)
-{
-    wg_text(SIDEBAR + 14, 16, "Network", WG_INK);
-    wg_fill(SIDEBAR + 14, 34, (int)g_w - SIDEBAR - 28, 1, WG_DIM);
+/* --- network --------------------------------------------------------------- */
 
+static void build_network(struct ui_view* page)
+{
     struct netinfo ni;
     char line[64];
     if (netinfo(&ni) != 0) {
-        wg_text(SIDEBAR + 14, 56, "no interface is configured", WG_DIM);
+        ui_grow(ui_label(page, "no interface is configured"), 0);
+        ui_spacer(page);
         return;
     }
+    struct ui_view* g = ui_group(page, "Interface", UI_STACK_V, 12, 2);
+    ui_grow(g, 0);
+    ui_size(g, 0, 4 * 24 + 28);
+
     snprintf(line, sizeof(line), "%u.%u.%u.%u", (ni.ip >> 24) & 0xFF,
              (ni.ip >> 16) & 0xFF, (ni.ip >> 8) & 0xFF, ni.ip & 0xFF);
-    kv(56, "address", line);
+    kv(g, "Address", line);
     snprintf(line, sizeof(line), "%u.%u.%u.%u", (ni.netmask >> 24) & 0xFF,
-             (ni.netmask >> 16) & 0xFF, (ni.netmask >> 8) & 0xFF, ni.netmask & 0xFF);
-    kv(76, "netmask", line);
+             (ni.netmask >> 16) & 0xFF, (ni.netmask >> 8) & 0xFF,
+             ni.netmask & 0xFF);
+    kv(g, "Netmask", line);
     snprintf(line, sizeof(line), "%u.%u.%u.%u", (ni.gateway >> 24) & 0xFF,
-             (ni.gateway >> 16) & 0xFF, (ni.gateway >> 8) & 0xFF, ni.gateway & 0xFF);
-    kv(96, "gateway", line);
-    snprintf(line, sizeof(line), "%02x:%02x:%02x:%02x:%02x:%02x",
-             ni.mac[0], ni.mac[1], ni.mac[2], ni.mac[3], ni.mac[4], ni.mac[5]);
-    kv(116, "hardware", line);
-    wg_text_clipped(SIDEBAR + 14, 150,
-                    "the address is fixed at boot; there is no DHCP client yet",
-                    WG_DIM, (int)g_w - SIDEBAR - 28);
+             (ni.gateway >> 16) & 0xFF, (ni.gateway >> 8) & 0xFF,
+             ni.gateway & 0xFF);
+    kv(g, "Gateway", line);
+    snprintf(line, sizeof(line), "%02x:%02x:%02x:%02x:%02x:%02x", ni.mac[0],
+             ni.mac[1], ni.mac[2], ni.mac[3], ni.mac[4], ni.mac[5]);
+    kv(g, "Hardware", line);
+
+    ui_grow(ui_label(page,
+                     "the address is fixed at boot; there is no DHCP client yet"),
+            0);
+    ui_spacer(page);
 }
 
-static void draw_users(void)
+/* --- users ----------------------------------------------------------------- */
+
+static struct ui_view* g_name_field;
+static struct ui_view* g_pass_field;
+
+static void take_fields(void)
 {
-    wg_text(SIDEBAR + 14, 16, "Users and groups", WG_INK);
-    wg_fill(SIDEBAR + 14, 34, (int)g_w - SIDEBAR - 28, 1, WG_DIM);
-
-    field(&g_f_name, "account", g_uname, g_ufield == 1, 0);
-    field(&g_f_pass, "password", g_upass, g_ufield == 2, 1);
-    wg_button(g_b_add.x, g_b_add.y, g_b_add.w, g_b_add.h, "Create", 0);
-    wg_button(g_b_pass.x, g_b_pass.y, g_b_pass.w, g_b_pass.h, "Set password", 0);
-
-    wg_text(SIDEBAR + 14, 176, "permissions", WG_DIM);
-    wg_text_clipped(SIDEBAR + 90, 176, "who may look inside the home directory",
-                    WG_DIM, (int)g_w - SIDEBAR - 105);
-    wg_button(g_b_priv.x, g_b_priv.y, g_b_priv.w, g_b_priv.h,
-              "Private (0700)", 0);
-    wg_button(g_b_open.x, g_b_open.y, g_b_open.w, g_b_open.h,
-              "Readable by all (0755)", 0);
-
-    wg_text_clipped(SIDEBAR + 14, 268,
-                    getuid() == 0 ? "you are root: you may change any account"
-                                  : "only root may create accounts",
-                    WG_DIM, (int)g_w - SIDEBAR - 28);
+    if (g_name_field != 0)
+        snprintf(g_uname, sizeof(g_uname), "%s", ui_text(g_name_field));
+    if (g_pass_field != 0)
+        snprintf(g_upass, sizeof(g_upass), "%s", ui_text(g_pass_field));
 }
 
-static void draw_about(void)
+static void after_account(void)
 {
-    wg_text(SIDEBAR + 14, 16, "About", WG_INK);
-    wg_fill(SIDEBAR + 14, 34, (int)g_w - SIDEBAR - 28, 1, WG_DIM);
+    /* add_user and reset_password clear the password once it has been used;
+     * the field has to be cleared with it, or the next press sends whatever is
+     * still on screen. */
+    if (g_pass_field != 0)
+        ui_set_text(g_pass_field, g_upass);
+    ui_set_text(g_note_label, g_note);
+}
 
-    wg_text(SIDEBAR + 14, 54, "leahOS", WG_INK);
-    kv(78,  "kind", "a UNIX-like system for x86-64");
-    kv(98,  "built", "from scratch: no third-party bootloader,");
-    kv(118, "", "no libc, no runtime");
-    kv(142, "kernel", "NASM and C++23, higher half at -2 GiB");
-    kv(162, "storage", "ext2/3/4 read and write, AHCI, USB");
-    kv(182, "network", "e1000, IPv4, ARP, ICMP, UDP, DNS, TCP");
-    kv(202, "desktop", "a window server in userland on shared memory");
+static void on_create(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    take_fields();
+    add_user();
+    after_account();
+}
+
+static void on_set_password(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    take_fields();
+    reset_password();
+    after_account();
+}
+
+static void on_private(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    take_fields();
+    set_home_mode(0700);
+    ui_set_text(g_note_label, g_note);
+}
+
+static void on_shared(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    take_fields();
+    set_home_mode(0755);
+    ui_set_text(g_note_label, g_note);
+}
+
+static void build_users(struct ui_view* page)
+{
+    struct ui_view* g = ui_group(page, "Account", UI_STACK_V, 12, 6);
+    ui_grow(g, 0);
+    ui_size(g, 0, 3 * 30 + 28);
+
+    struct ui_view* r = ui_box(g, UI_STACK_H, 0, 10);
+    ui_size(r, 0, 24);
+    ui_grow(r, 0);
+    ui_grow(ui_size(ui_label(r, "Name"), 76, 24), 0);
+    g_name_field = ui_field(r, g_uname);
+
+    r = ui_box(g, UI_STACK_H, 0, 10);
+    ui_size(r, 0, 24);
+    ui_grow(r, 0);
+    ui_grow(ui_size(ui_label(r, "Password"), 76, 24), 0);
+    /* A secure field, which is what this always wanted: the old one drew its
+     * own dots because there was nothing that did. */
+    g_pass_field = ui_secure(r);
+    ui_set_text(g_pass_field, g_upass);
+
+    r = ui_box(g, UI_STACK_H, 0, 10);
+    ui_size(r, 0, 26);
+    ui_grow(r, 0);
+    ui_grow(ui_size(ui_label(r, ""), 76, 24), 0);
+    ui_grow(ui_size(ui_button(r, "Create", on_create, 0), 96, 24), 0);
+    ui_grow(ui_size(ui_button(r, "Set Password", on_set_password, 0), 120, 24), 0);
+    ui_spacer(r);
+
+    struct ui_view* p = ui_group(page, "Home Directory", UI_STACK_V, 12, 6);
+    ui_grow(p, 0);
+    ui_size(p, 0, 2 * 30 + 28);
+    ui_grow(ui_label(p, "who may look inside it"), 0);
+    r = ui_box(p, UI_STACK_H, 0, 10);
+    ui_size(r, 0, 26);
+    ui_grow(r, 0);
+    ui_grow(ui_size(ui_button(r, "Private (0700)", on_private, 0), 130, 24), 0);
+    ui_grow(ui_size(ui_button(r, "Readable by All (0755)", on_shared, 0),
+                    180, 24), 0);
+    ui_spacer(r);
+
+    ui_grow(ui_label(page, getuid() == 0
+                           ? "you are root: you may change any account"
+                           : "only root may create accounts"), 0);
+    ui_spacer(page);
+}
+
+/* --- about ----------------------------------------------------------------- */
+
+static void build_about(struct ui_view* page)
+{
+    struct ui_view* g = ui_group(page, "leahOS", UI_STACK_V, 12, 2);
+    ui_grow(g, 0);
+    ui_size(g, 0, 7 * 24 + 28);
+    kv(g, "Kind", "a UNIX-like system for x86-64");
+    kv(g, "Built", "from scratch: no third-party bootloader, no libc");
+    kv(g, "Kernel", "NASM and C++23, higher half at -2 GiB");
+    kv(g, "Storage", "ext2/3/4 read and write, AHCI, USB");
+    kv(g, "Network", "e1000, IPv4, ARP, ICMP, UDP, DNS, TCP");
+    kv(g, "Desktop", "a window server in userland on shared memory");
 
     struct mem_info m;
     char line[64];
     if (mem_info(&m) == 0) {
         snprintf(line, sizeof(line), "%llu MiB usable",
                  (unsigned long long)(m.usable / (1024 * 1024)));
-        kv(222, "memory", line);
+        kv(g, "Memory", line);
+    } else {
+        kv(g, "Memory", "unknown");
     }
-    wg_text_clipped(SIDEBAR + 14, 254, "README.md is the long version",
-                    WG_DIM, (int)g_w - SIDEBAR - 28);
+    ui_grow(ui_label(page, "README.md is the long version"), 0);
+    ui_spacer(page);
 }
 
-static void draw(void)
-{
-    wg_glass_clear();
+/* --- the window ------------------------------------------------------------ */
 
-    /* The sidebar, sunken so it reads as a place rather than a row of buttons. */
-    /* Full height and a shade apart from the page beside it, rather than a
-     * grey rectangle that stops wherever the list of pages happens to end. */
-    wg_sidebar(0, 0, SIDEBAR, (int)g_h);
-    /* The page itself, held in a container inset from the sidebar and the
-     * window's edges. */
-    wg_container(SIDEBAR + 6, 6, (int)g_w - SIDEBAR - 12, (int)g_h - 12, 6);
-    wg_bevel(0, 0, SIDEBAR, (int)g_h, 0);
-    for (int i = 0; i < PAGES; ++i) {
-        const int y = 10 + i * ROW_H;
-        if (i == g_page) {
-            wg_fill(4, y, SIDEBAR - 8, ROW_H - 2, WG_FACE);
-            wg_bevel(4, y, SIDEBAR - 8, ROW_H - 2, 1);
-        }
-        wg_text(14, y + 3, kPages[i], WG_INK);
-    }
+static void build(void)
+{
+    ui_reset();
+    g_name_field = g_pass_field = 0;
+
+    struct ui_view* root = ui_box(0, UI_STACK_H, 0, 0);
+
+    struct ui_view* side = ui_sidebar(root, page_name, PAGES, 0);
+    side->selected = g_page;
+    ui_size(side, SIDEBAR, 0);
+    ui_grow(side, 0);
+    ui_on(side, on_page, 0);
+
+    struct ui_view* page = ui_box(root, UI_STACK_V, 14, 10);
+    ui_grow(page, 1);
+    ui_grow(ui_size(ui_label(page, kPages[g_page]), 0, 22), 0);
 
     switch (g_page) {
-    case PAGE_GENERAL: draw_general();    break;
-    case PAGE_APPEAR:  draw_appearance(); break;
-    case PAGE_SOUND:   draw_sound();      break;
-    case PAGE_NETWORK: draw_network();    break;
-    case PAGE_USERS:   draw_users();      break;
-    default:           draw_about();      break;
+    case PAGE_GENERAL: build_general(page);    break;
+    case PAGE_APPEAR:  build_appearance(page); break;
+    case PAGE_SOUND:   build_sound(page);      break;
+    case PAGE_NETWORK: build_network(page);    break;
+    case PAGE_USERS:   build_users(page);      break;
+    default:           build_about(page);      break;
     }
 
-    wg_fill(0, (int)g_h - 20, (int)g_w, 20, WG_FACE);
-    wg_text_clipped(8, (int)g_h - 18, g_note, WG_DIM, (int)g_w - 16);
+    g_note_label = ui_grow(ui_size(ui_label(page, g_note), 0, 18), 0);
+    g_app.root = root;
+}
+
+static int on_event(struct app* a, const struct win_event* e)
+{
+    (void)e;
+    if (!g_rebuild)
+        return 0;
+    g_rebuild = 0;
+    build();
+    app_relayout(a);
+    return 1;
+}
+
+static void on_sheet(struct app* a, int result)
+{
+    if (result != 1)
+        return;
+    set_wallpaper(app_sheet_path(a));
+    ui_set_text(g_note_label, g_note);
 }
 
 int main(int argc, char** argv)
 {
-    const int wx = argc > 1 ? atoi_simple(argv[1]) : 150;
-    const int wy = argc > 2 ? atoi_simple(argv[2]) : 100;
-    if (wg_font() != 0)
-        return 1;
-
     /* The desktop's own control block, which is public precisely so that a
      * client like this can find it. */
     const int cid = shm_open(WS_CONTROL_KEY, 0, 0);
@@ -624,144 +857,12 @@ int main(int argc, char** argv)
     apply_saved_theme();
     apply_saved_audio();
 
-    const int id = win_create(wx, wy, g_w, g_h, "Settings");
-    /* Its pixels carry alpha, so the glass reaches past the title bar. */
-    if (id >= 0) {
-        win_set_alpha(id);
-        win_set_sidebar(id, SIDEBAR);
-    }
-    if (id < 0) {
-        printf("settings: no window server\n");
-        return 1;
-    }
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    win_set_min_size(id, 620, 360);
-    wg_target(g_px, g_w, g_h);
-    draw();
-    win_present(id);
-
-    for (;;) {
-        struct win_event e;
-        while (win_poll(id, &e)) {
-            if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
-
-            if (dlg_active() && e.type != WIN_EVENT_RESIZE) {
-                if (dlg_event(&e) == DLG_ACCEPT)
-                    set_wallpaper(dlg_path());
-                draw();
-                dlg_draw((int)g_w, (int)g_h);
-                win_present(id);
-                continue;
-            }
-
-            if (e.type == WIN_EVENT_RESIZE) {
-                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
-                g_px = win_map(id);
-                if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
-            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_vol_drag) {
-                set_audio_volume(wg_slider_value(VOL_X, VOL_W, e.x, 100));
-            } else if (e.type == WIN_EVENT_MOUSE_UP) {
-                g_vol_drag = 0;
-            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                if (e.x < SIDEBAR) {
-                    const int i = (e.y - 10) / ROW_H;
-                    if (i >= 0 && i < PAGES) { g_page = i; g_note[0] = '\0'; }
-                } else if (g_page == PAGE_SOUND && g_audio.present) {
-                    if (wg_slider_hit(VOL_X, VOL_Y, VOL_W, e.x, e.y)) {
-                        g_vol_drag = 1;
-                        set_audio_volume(
-                            wg_slider_value(VOL_X, VOL_W, e.x, 100));
-                    } else if (e.y >= VOL_Y + 30 && e.y < VOL_Y + 52) {
-                        if (e.x >= VOL_X && e.x < VOL_X + 74) {
-                            /* Mute remembers where it came back to, so it is a
-                             * toggle rather than a trip to zero and a guess. */
-                            const int now = audio_volume();
-                            if (now == 0) {
-                                set_audio_volume(g_vol_before_mute);
-                            } else {
-                                g_vol_before_mute = now;
-                                set_audio_volume(0);
-                            }
-                        } else if (e.x >= VOL_X + 82 && e.x < VOL_X + 172) {
-                            test_tone();
-                        }
-                    }
-                } else if (g_page == PAGE_APPEAR) {
-                    /* The same geometry the page draws itself with: three
-                     * groups, each a heading and its rows. */
-                    const int x = SIDEBAR + 16, w = (int)g_w - SIDEBAR - 32;
-                    const int y1 = 58;
-                    const int y2 = y1 + 2 * WG_ROW_H + 34;
-                    const int y3 = y2 + 2 * WG_ROW_H + 34;
-                    const int inrow = e.y >= 0;
-
-                    if (inrow && e.y >= y1 + 4 && e.y < y1 + 26) {
-                        if (e.x >= x + w - 170 && e.x < x + w - 94)
-                            apply_preset(MODE_LIGHT);
-                        else if (e.x >= x + w - 90 && e.x < x + w - 14)
-                            apply_preset(MODE_DARK);
-                    } else if (inrow && e.y >= y1 + WG_ROW_H + 4 &&
-                               e.y < y1 + WG_ROW_H + 26 && g_ws != 0) {
-                        if (e.x >= x + w - 170 && e.x < x + w - 94)
-                            { g_ws->theme.blur = 0; theme_changed(); }
-                        else if (e.x >= x + w - 90 && e.x < x + w - 14)
-                            { g_ws->theme.blur = 1; theme_changed(); }
-                    } else if (inrow && e.y >= y3 + 4 && e.y < y3 + 26 &&
-                               g_ws != 0) {
-                        if (e.x >= x + w - 170 && e.x < x + w - 94)
-                            { g_ws->theme.text_scale = 1; theme_changed(); }
-                        else if (e.x >= x + w - 90 && e.x < x + w - 14)
-                            { g_ws->theme.text_scale = 2; theme_changed(); }
-                    } else if (inrow && e.y >= y3 + WG_ROW_H + 4 &&
-                               e.y < y3 + WG_ROW_H + 26 && g_ws != 0) {
-                        for (int i = 0; i < WS_PATTERN_COUNT && i < 4; ++i) {
-                            const int bx = x + w - 14 - (4 - i) * 62;
-                            if (e.x >= bx && e.x < bx + 58)
-                                { g_ws->theme.pattern = (uint32_t)i;
-                                  theme_changed(); }
-                        }
-                    } else if (inrow && e.y >= y3 + WG_ROW_H * 2 + 4 &&
-                               e.y < y3 + WG_ROW_H * 2 + 26) {
-                        if (e.x >= x + w - 200 && e.x < x + w - 84)
-                            dlg_save(PATH_WALLPAPERS, "");
-                        else if (e.x >= x + w - 80 && e.x < x + w - 14)
-                            set_wallpaper("");
-                    }
-
-                } else if (g_page == PAGE_USERS) {
-                    if (inside(&g_f_name, e.x, e.y))      g_ufield = 1;
-                    else if (inside(&g_f_pass, e.x, e.y)) g_ufield = 2;
-                    else if (inside(&g_b_add, e.x, e.y))  add_user();
-                    else if (inside(&g_b_pass, e.x, e.y)) reset_password();
-                    else if (inside(&g_b_priv, e.x, e.y)) set_home_mode(0700);
-                    else if (inside(&g_b_open, e.x, e.y)) set_home_mode(0755);
-                    else g_ufield = 0;
-                }
-            } else if (e.type == WIN_EVENT_KEY &&
-                       (e.key == WIN_KEY_UP || e.key == WIN_KEY_DOWN)) {
-                /* The sidebar is a list, so it walks like one. */
-                const int to = g_page + (e.key == WIN_KEY_DOWN ? 1 : -1);
-                if (to >= 0 && to < PAGES) { g_page = to; g_note[0] = '\0'; }
-            } else if (e.type == WIN_EVENT_KEY && g_page == PAGE_USERS) {
-                char* f = g_ufield == 1 ? g_uname : g_ufield == 2 ? g_upass : 0;
-                if (f == 0)
-                    continue;
-                const char c = (char)e.key;
-                unsigned n = (unsigned)strlen(f);
-                if (c == '\b' || c == 0x7F) { if (n > 0) f[n - 1] = '\0'; }
-                else if (c == '\n' || c == '\r') g_ufield = g_ufield == 1 ? 2 : 0;
-                else if ((unsigned char)c >= 32 && n + 1 < 63)
-                    { f[n] = c; f[n + 1] = '\0'; }
-            } else {
-                continue;
-            }
-            draw();
-            dlg_draw((int)g_w, (int)g_h);
-            win_present(id);
-        }
-        msleep(15);
-    }
+    g_app.title = "Settings";
+    g_app.width = 660; g_app.height = 400;
+    g_app.min_width = 620; g_app.min_height = 360;
+    g_app.sidebar = SIDEBAR;
+    g_app.event = on_event;
+    g_app.sheet_done = on_sheet;
+    build();
+    return app_run(&g_app, argc, argv);
 }

@@ -41,6 +41,11 @@ struct app {
     unsigned    sidebar;                /* width of a full-height sidebar, or 0
                                          * - the title bar is tinted to match */
     int         opaque;                 /* 1 to opt out of the glass */
+    /* 1 to draw the title strip yourself. The server then stops treating a
+     * press there as a drag, which is what lets controls sit on the same line
+     * as the title - and makes it the window's job to call win_move_begin for
+     * the parts of that line which are not controls. */
+    int         client_title;
 
     /* An interface built from components. Set this and draw/event become
      * optional: app_run lays the tree out over the window, routes events into
@@ -58,6 +63,20 @@ struct app {
     /* An event that is not the close box, a resize, or the menu - those are
      * handled before this is called. Return 1 to redraw. */
     int (*event)(struct app* a, const struct win_event* e);
+
+    /* Before the components rather than after them, for the one thing that
+     * has to be: an overlay that is modal. A file dialogue drawn over the
+     * window is in front of every control in it, and a press that lands on a
+     * button underneath must not reach that button. Return non-zero to say the
+     * event was taken and stop it there.
+     *
+     * Only for that. Ordinary handling belongs in `event`, where a view has
+     * already had its say. */
+    int (*filter)(struct app* a, const struct win_event* e);
+
+    /* And what that overlay draws, painted over the components and under the
+     * pop-up menu - which is the order they sit in on screen. */
+    void (*overlay)(struct app* a);
 
     /* Called every `tick_ms` milliseconds, or never when that is 0. Return 1
      * to redraw, which is what stops a monitor that changes twice a second
@@ -93,6 +112,12 @@ struct app {
     uint32_t*  px;                      /* its pixels */
     unsigned   w, h;                    /* its current size */
     int        quit;                    /* set by app_quit */
+    /* Whether a component already took the event `event` is being called
+     * with. The handler is called either way - an application may well want to
+     * know about a click its list has just dealt with - but anything that acts
+     * on a bare press has to look at this, or a menu item chosen over a
+     * document also lands in the document. */
+    int        handled;
     int        status;                  /* what main should return */
 
     /* The sheet's own window, filled in by app_sheet. */

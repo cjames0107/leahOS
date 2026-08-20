@@ -11,6 +11,7 @@
  */
 
 #include <app.h>
+#include <ui.h>
 #include <dialog.h>
 #include <image.h>
 #include <stdio.h>
@@ -20,8 +21,8 @@
 #include <widget.h>
 #include <window.h>
 
-#define TOOLBAR_H 92
-#define STATUS_H  18
+#define TOOLBAR_H 40
+#define STATUS_H  22
 
 #define T_PENCIL 0
 #define T_LINE   1
@@ -31,7 +32,7 @@
 #define TOOLS    5
 
 static uint32_t* g_px;
-static unsigned  g_w = 460, g_h = 360;
+static unsigned  g_w = 640, g_h = 420;
 
 static int g_tool = T_PENCIL;
 static uint32_t g_colour = 0x000080;
@@ -41,37 +42,6 @@ static char g_note[96] = "click a tool, drag on the canvas";
 static int g_drawing, g_ax, g_ay, g_lx, g_ly;
 
 static const char* kToolName[TOOLS] = { "Pencil", "Line", "Rect", "Fill", "Eraser" };
-
-/* The ink is mixed rather than chosen from a tray. Twelve fixed colours are
- * twelve pictures you can paint; three sliders are all of them. */
-#define PICK_X 6
-#define PICK_Y 28
-#define PICK_W 288
-static int g_pick_drag = -1;
-
-struct box { int x, y, w, h; };
-static struct box g_tool_box[TOOLS];
-static struct box g_size_box[3];
-static struct box g_png = { 306, 30, 64, 20 };
-static struct box g_gif = { 306, 54, 64, 20 };
-static struct box g_clr = { 376, 30, 64, 20 };
-
-static int inside(const struct box* b, int x, int y)
-{
-    return x >= b->x && y >= b->y && x < b->x + b->w && y < b->y + b->h;
-}
-
-static void layout(void)
-{
-    for (int i = 0; i < TOOLS; ++i) {
-        g_tool_box[i].x = 6 + i * 58; g_tool_box[i].y = 5;
-        g_tool_box[i].w = 56; g_tool_box[i].h = 20;
-    }
-    for (int i = 0; i < 3; ++i) {
-        g_size_box[i].x = 306 + i * 26; g_size_box[i].y = 5;
-        g_size_box[i].w = 24; g_size_box[i].h = 20;
-    }
-}
 
 /* The canvas is the window buffer below the toolbar - so saving is just a crop
  * of what the compositor already shows. */
@@ -176,9 +146,12 @@ static void save_to(const char* path, int png)
     }
 }
 
+static void say(const char* text);
+
 /* Ask where, rather than choosing for the user. */
 static struct app g_app;
-static void draw_chrome(void);
+/* Ask where, rather than choosing for the user. */
+static struct app g_app;
 
 /* Where the picture goes, once the sheet has been answered. */
 static void saved(struct app* a, int result)
@@ -189,7 +162,7 @@ static void saved(struct app* a, int result)
      * never drew a pixel into this one. That is the whole reason it is a
      * window - what a dialogue covers here is the picture, and there is no
      * copy of the picture to put back. */
-    draw_chrome();
+    say(g_note);
 }
 
 static void save(int png)
@@ -197,27 +170,61 @@ static void save(int png)
     g_pending_png = png;
     g_app.sheet_done = saved;
     app_sheet_save(&g_app, "/", png ? "picture.png" : "picture.gif");
-    snprintf(g_note, sizeof(g_note), "choose where to save");
+    say("choose where to save");
 }
 
-static void draw_chrome(void)
-{
-    wg_fill(0, 0, (int)g_w, TOOLBAR_H, WG_FACE);
-    for (int i = 0; i < TOOLS; ++i)
-        wg_button(g_tool_box[i].x, g_tool_box[i].y, g_tool_box[i].w,
-                  g_tool_box[i].h, kToolName[i], g_tool == i);
-    wg_rgb_draw(PICK_X, PICK_Y, PICK_W, g_colour);
-    for (int i = 0; i < 3; ++i) {
-        char s[4] = { (char)('1' + i), 0 };
-        wg_button(g_size_box[i].x, g_size_box[i].y, g_size_box[i].w,
-                  g_size_box[i].h, s, g_size == i + 1);
-    }
-    wg_button(g_clr.x, g_clr.y, g_clr.w, g_clr.h, "Clear", 0);
-    wg_button(g_png.x, g_png.y, g_png.w, g_png.h, "PNG", 0);
-    wg_button(g_gif.x, g_gif.y, g_gif.w, g_gif.h, "GIF", 0);
+static void on_png(struct ui_view* v, void* user);
+static void on_gif(struct ui_view* v, void* user);
 
-    wg_fill(0, (int)g_h - STATUS_H, (int)g_w, STATUS_H, WG_FACE);
-    wg_text_clipped(6, (int)g_h - STATUS_H + 1, g_note, WG_INK, (int)g_w - 12);
+/* --- the toolbar, as components -------------------------------------------
+ *
+ * Five tools as one segmented control, a colour well that opens a mixer, the
+ * brush size as a stepper, and three buttons. It was five buttons, three
+ * buttons, three more buttons and an RGB picker, each at a rectangle written
+ * down twice - once to draw it and once to decide whether it had been pressed
+ * - in ninety-two pixels of chrome. The tree places them now, and the mixer
+ * comes out of the well instead of sitting open all the time.
+ */
+
+static struct ui_view* g_note_label;
+
+static const char* tool_name(void* user, int i)
+{
+    (void)user;
+    return (i >= 0 && i < TOOLS) ? kToolName[i] : "";
+}
+
+static void on_tool(struct ui_view* v, void* user)
+{
+    (void)user;
+    g_tool = v->on;
+}
+
+static void on_ink(struct ui_view* v, void* user)
+{
+    (void)user;
+    g_colour = (uint32_t)v->value;
+}
+
+static void on_size(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (v->value < 1) v->value = 1;
+    g_size = v->value;
+}
+
+static void say(const char* text)
+{
+    snprintf(g_note, sizeof(g_note), "%s", text);
+    if (g_note_label != 0)
+        ui_set_text(g_note_label, g_note);
+}
+
+static void on_clear(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    clear_canvas();
+    say("cleared");
 }
 
 static int on_event(struct app* a, const struct win_event* e);
@@ -225,9 +232,41 @@ static void on_draw(struct app* a);
 
 int main(int argc, char** argv)
 {
+    struct ui_view* root = ui_box(0, UI_STACK_V, 0, 0);
+
+    struct ui_view* bar = ui_box(root, UI_STACK_H, 8, 8);
+    ui_grow(ui_size(bar, 0, TOOLBAR_H), 0);
+
+    struct ui_view* tools = ui_segmented(bar, tool_name, TOOLS, 0);
+    tools->on = g_tool;
+    ui_grow(ui_size(tools, 250, 24), 0);
+    ui_on(tools, on_tool, 0);
+
+    ui_on(ui_grow(ui_size(ui_colour(bar, g_colour), 54, 24), 0), on_ink, 0);
+
+    struct ui_view* size = ui_stepper(bar, g_size, 8);
+    ui_grow(ui_size(size, 72, 24), 0);
+    ui_on(size, on_size, 0);
+
+    ui_spacer(bar);
+    ui_grow(ui_size(ui_button(bar, "Clear", on_clear, 0), 64, 24), 0);
+    ui_grow(ui_size(ui_button(bar, "PNG", on_png, 0), 56, 24), 0);
+    ui_grow(ui_size(ui_button(bar, "GIF", on_gif, 0), 56, 24), 0);
+
+    /* The canvas: nothing at all, so that nothing draws over the picture. */
+    ui_grow(ui_spacer(root), 1);
+
+    struct ui_view* foot = ui_box(root, UI_STACK_H, 6, 0);
+    ui_grow(ui_size(foot, 0, STATUS_H), 0);
+    g_note_label = ui_grow(ui_label(foot, g_note), 1);
+
+    g_app.root = root;
     g_app.title = "Paint";
     g_app.width = g_w; g_app.height = g_h;
-    g_app.min_width = 450; g_app.min_height = 260;
+    /* Wide enough for the whole toolbar: the controls are laid out
+     * left to right and the last of them is Save, which is not a control to
+     * let fall off the end. */
+    g_app.min_width = 600; g_app.min_height = 300;
     g_app.draw = on_draw;
     g_app.event = on_event;
     /* Alpha, so the glass reaches into it like every other window. The canvas
@@ -255,38 +294,24 @@ static void on_draw(struct app* a)
     static int ready;
     adopt(a);
     if (!ready) {
-        /* What main used to do before the loop started. */
-        layout();
         clear_canvas();
         ready = 1;
     }
-    draw_chrome();
+    /* The bands the components sit in. Nothing paints the canvas between them,
+     * which is what keeps the picture: it is the buffer itself. */
+    wg_fill(0, 0, (int)g_w, TOOLBAR_H, WG_FACE);
+    wg_fill(0, (int)g_h - STATUS_H, (int)g_w, STATUS_H, WG_FACE);
 }
 
 static int on_event(struct app* a, const struct win_event* e)
 {
     adopt(a);
     if (e->type == WIN_EVENT_RESIZE) {
-        layout();
         clear_canvas();         /* the buffer is new and starts blank */
         return 1;
     }
     if (e->type == WIN_EVENT_MOUSE_DOWN) {
-        int handled = 0;
-        for (int i = 0; i < TOOLS; ++i)
-            if (inside(&g_tool_box[i], e->x, e->y)) { g_tool = i; handled = 1; }
-        g_pick_drag = wg_rgb_hit(PICK_X, PICK_Y, PICK_W, e->x, e->y);
-        if (g_pick_drag >= 0) {
-            g_colour = wg_rgb_move(g_colour, g_pick_drag, PICK_X, PICK_W, e->x);
-            handled = 1;
-        }
-        for (int i = 0; i < 3; ++i)
-            if (inside(&g_size_box[i], e->x, e->y)) { g_size = i + 1; handled = 1; }
-        if (inside(&g_clr, e->x, e->y)) { clear_canvas(); handled = 1; }
-        else if (inside(&g_png, e->x, e->y)) { save(1); handled = 1; }
-        else if (inside(&g_gif, e->x, e->y)) { save(0); handled = 1; }
-
-        if (!handled && e->y >= canvas_top()) {
+        if (e->y >= canvas_top() && e->y < canvas_top() + canvas_h()) {
             const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
             g_ax = g_lx = e->x; g_ay = g_ly = e->y;
             if (g_tool == T_FILL) {
@@ -300,10 +325,6 @@ static int on_event(struct app* a, const struct win_event* e)
         }
         return 1;
     }
-    if (e->type == WIN_EVENT_MOUSE_MOVE && g_pick_drag >= 0) {
-        g_colour = wg_rgb_move(g_colour, g_pick_drag, PICK_X, PICK_W, e->x);
-        return 1;
-    }
     if (e->type == WIN_EVENT_MOUSE_MOVE && g_drawing) {
         if (g_tool == T_PENCIL || g_tool == T_ERASE) {
             const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
@@ -313,7 +334,6 @@ static int on_event(struct app* a, const struct win_event* e)
         return 1;
     }
     if (e->type == WIN_EVENT_MOUSE_UP) {
-        g_pick_drag = -1;
         if (g_drawing && g_tool == T_LINE)
             line(g_ax, g_ay, e->x, e->y, g_colour);
         else if (g_drawing && g_tool == T_RECT)
@@ -330,4 +350,16 @@ static int on_event(struct app* a, const struct win_event* e)
         return 1;
     }
     return 0;
+}
+
+static void on_png(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    save(1);
+}
+
+static void on_gif(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    save(0);
 }

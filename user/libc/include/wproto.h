@@ -53,7 +53,14 @@
  * for the whole interface is what makes it read as one interface. */
 #define WS_CORNER       8
 
-#define WS_MAX_WINDOWS 16
+/* How many windows can exist at once.
+ *
+ * It was 16, which a desktop reaches: the desktop itself, a terminal and a
+ * dozen applications is an ordinary afternoon, and the sixteenth window did
+ * not open. Worse, it failed silently from the person's point of view - the
+ * application started, could not get a slot, and exited. The block is sized
+ * with sizeof, so this costs a few hundred bytes of shared memory. */
+#define WS_MAX_WINDOWS 32
 #define WS_EVENT_SLOTS 32
 #define WS_TITLE_LEN   32
 

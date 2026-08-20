@@ -46,6 +46,9 @@ void wg_target(uint32_t* pixels, unsigned width, unsigned height)
     g_px = pixels;
     g_w = width;
     g_h = height;
+    /* A new target is a new window: whatever was clipped belonged to the old
+     * one. */
+    wg_clip_none();
 }
 
 /* The proportional font, opened once and shared by every control.
@@ -64,8 +67,37 @@ static struct font* face(void)
     return g_face;
 }
 
-/* The surface draw.c wants, over whatever wg_target was pointed at. No clip:
- * a client owns every pixel of its own window. */
+/* Where drawing is allowed to land.
+ *
+ * A window's own edges, until something narrows it. A view that draws a list
+ * with a pixel scroll puts a half-shown row above its own top edge, and with
+ * nothing to stop it that row lands in the toolbar; the browser's answer was
+ * to paint the toolbar again afterwards, which works right up until the thing
+ * on top is a component drawn by the tree in tree order.
+ *
+ * Held as a rectangle rather than a stack. One at a time is all any of this
+ * needs, and a stack is a thing to get wrong in a drawing loop. */
+static int g_cx, g_cy, g_cw, g_ch;
+
+void wg_clip(int x, int y, int w, int h)
+{
+    g_cx = x; g_cy = y; g_cw = w; g_ch = h;
+}
+
+void wg_clip_none(void)
+{
+    g_cx = g_cy = 0;
+    g_cw = (int)g_w;
+    g_ch = (int)g_h;
+}
+
+static int clipped_out(int x, int y)
+{
+    return x < g_cx || y < g_cy || x >= g_cx + g_cw || y >= g_cy + g_ch;
+}
+
+/* The surface draw.c wants, over whatever wg_target was pointed at, carrying
+ * the clip so the rounded and blended paths honour it too. */
 static void blend_px(int x, int y, uint32_t over);
 
 static struct surface canvas(void)
@@ -74,7 +106,10 @@ static struct surface canvas(void)
     s.pixels = g_px;
     s.w = (int)g_w;
     s.h = (int)g_h;
-    s.cx = s.cy = s.cw = s.ch = 0;
+    s.cx = g_cx;
+    s.cy = g_cy;
+    s.cw = g_cw;
+    s.ch = g_ch;
     return s;
 }
 
@@ -91,7 +126,7 @@ int wg_font(void)
 void wg_plot(int x, int y, uint32_t colour)
 {
     if (g_px == 0 || x < 0 || y < 0 ||
-        (unsigned)x >= g_w || (unsigned)y >= g_h)
+        (unsigned)x >= g_w || (unsigned)y >= g_h || clipped_out(x, y))
         return;
     g_px[(unsigned)y * g_w + (unsigned)x] = 0xFF000000u | colour;
 }
@@ -107,12 +142,12 @@ void wg_icon_scaled(int x, int y, const uint32_t* px, int sw, int sh,
         return;
     for (int row = 0; row < dh; ++row) {
         const int py = y + row;
-        if (py < 0 || (unsigned)py >= g_h)
+        if (py < 0 || (unsigned)py >= g_h || py < g_cy || py >= g_cy + g_ch)
             continue;
         const int sy = row * sh / dh;
         for (int col = 0; col < dw; ++col) {
             const int pxx = x + col;
-            if (pxx < 0 || (unsigned)pxx >= g_w)
+            if (pxx < 0 || (unsigned)pxx >= g_w || clipped_out(pxx, py))
                 continue;
             /* Nearest neighbour, which for halving a pixel-drawn icon means
              * taking every other pixel - the right answer for artwork with
@@ -143,6 +178,10 @@ void wg_fill(int x, int y, int w, int h, uint32_t colour)
     int x1 = x + w, y1 = y + h;
     if (x1 > (int)g_w) x1 = (int)g_w;
     if (y1 > (int)g_h) y1 = (int)g_h;
+    if (x0 < g_cx) x0 = g_cx;
+    if (y0 < g_cy) y0 = g_cy;
+    if (x1 > g_cx + g_cw) x1 = g_cx + g_cw;
+    if (y1 > g_cy + g_ch) y1 = g_cy + g_ch;
     if (g_px == 0)
         return;
     const uint32_t solid = 0xFF000000u | colour;
@@ -496,7 +535,7 @@ static void soft_shadow(int x, int y, int w, int h, int r)
 static void blend_px(int x, int y, uint32_t over)
 {
     if (g_px == 0 || x < 0 || y < 0 ||
-        (unsigned)x >= g_w || (unsigned)y >= g_h)
+        (unsigned)x >= g_w || (unsigned)y >= g_h || clipped_out(x, y))
         return;
     const unsigned ca = (over >> 24) & 0xFF;
     if (ca == 0)

@@ -34,6 +34,13 @@
 
 /* Point drawing at a buffer. Every call below clips to it, so a client can draw
  * in window coordinates without checking whether it fits. */
+/* Where drawing may land, in window coordinates. Set it around a view that
+ * draws past its own edges - a list with a pixel scroll, a canvas - so that
+ * what spills goes nowhere instead of onto the chrome. wg_clip_none puts it
+ * back to the whole window, which is also where wg_target leaves it. */
+void wg_clip(int x, int y, int w, int h);
+void wg_clip_none(void);
+
 void wg_target(uint32_t* pixels, unsigned width, unsigned height);
 
 /* Pick up the desktop's theme, so a client's selection highlight and body
