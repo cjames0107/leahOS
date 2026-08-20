@@ -13,7 +13,8 @@
  * and a spinner over a two-second operation is decoration.
  */
 
-#include <dialog.h>
+#include <app.h>
+#include <ui.h>
 #include <net.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,9 +27,6 @@
 #define ROW_H  26
 #define LINES  14
 
-static uint32_t* g_px;
-static unsigned  g_w = 620, g_h = 400;
-
 enum { PANE_INFO, PANE_PING, PANE_LOOKUP, PANE_ARP, PANE_COUNT };
 static const char* const kPanes[PANE_COUNT] = {
     "Interface", "Ping", "Lookup", "Neighbours"
@@ -38,22 +36,21 @@ static int g_pane;
 /* One text field, shared: only one pane has an input at a time, and giving
  * each its own would mean three ways to type the same kind of thing. */
 static char g_input[64] = "10.0.2.2";
-static int  g_focus;
 
 /* The output, as lines. Kept rather than printed so that a result stays on
  * screen while the next question is typed - which is the whole point of not
  * being a terminal. */
-static char g_out[LINES][96];
+static char g_out_lines[LINES][96];
 static int  g_lines;
 
 static void say(const char* text)
 {
     if (g_lines >= LINES) {
         for (int i = 1; i < LINES; ++i)
-            memcpy(g_out[i - 1], g_out[i], sizeof(g_out[0]));
+            memcpy(g_out_lines[i - 1], g_out_lines[i], sizeof(g_out_lines[0]));
         --g_lines;
     }
-    snprintf(g_out[g_lines++], sizeof(g_out[0]), "%s", text);
+    snprintf(g_out_lines[g_lines++], sizeof(g_out_lines[0]), "%s", text);
 }
 
 static void clear_out(void) { g_lines = 0; }
@@ -168,6 +165,11 @@ static void do_arp(void)
         say("nobody answered on the first fifteen addresses");
 }
 
+static int has_field(void)
+{
+    return g_pane == PANE_PING || g_pane == PANE_LOOKUP;
+}
+
 static void ask(void)
 {
     if (g_pane == PANE_INFO)        do_info();
@@ -176,135 +178,102 @@ static void ask(void)
     else                            do_arp();
 }
 
-/* --- drawing -------------------------------------------------------------- */
+/* --- the interface ---------------------------------------------------------
+ *
+ * A sidebar of questions and a pane that answers one. The output is a list
+ * rather than lines drawn by hand, so it scrolls when an answer is longer than
+ * the window - which the drawn version could not do.
+ */
 
-static int field_y(void) { return 52; }
-static int field_x(void) { return SIDE_W + 16; }
-static int field_w(void) { return (int)g_w - SIDE_W - 32 - 84; }
-static int go_x(void)    { return SIDE_W + 16 + field_w() + 8; }
+static struct app g_app;
+static struct ui_view* g_side;
+static struct ui_view* g_title;
+static struct ui_view* g_field;
+static struct ui_view* g_go;
+static struct ui_view* g_out;
 
-static int has_field(void) { return g_pane == PANE_PING || g_pane == PANE_LOOKUP; }
-
-static void draw(void)
+static const char* out_row(void* user, int row)
 {
-    wg_theme();
-    wg_glass_clear();
+    (void)user;
+    return (row >= 0 && row < g_lines) ? g_out_lines[row] : "";
+}
 
-    wg_sidebar(0, 0, SIDE_W, (int)g_h);
-    wg_text(14, 12, "Network", WG_DIM);
-    for (int i = 0; i < PANE_COUNT; ++i) {
-        const int y = 34 + i * ROW_H;
-        if (i == g_pane)
-            wg_row_select(6, y - 4, SIDE_W - 12, ROW_H);
-        wg_text(14, y, kPanes[i], wg_ink_colour());
-    }
+static const char* pane_row(void* user, int row)
+{
+    (void)user;
+    return (row >= 0 && row < PANE_COUNT) ? kPanes[row] : "";
+}
 
-    const int cx = SIDE_W + 16;
-    wg_text(cx, 16, kPanes[g_pane], wg_ink_colour());
-
+/* What the pane needs, after whatever just happened. */
+static void sync_pane(void)
+{
+    ui_set_text(g_title, kPanes[g_pane]);
     if (has_field()) {
-        wg_field(cx, field_y(), field_w(), 24, g_input, g_focus);
-        wg_button(go_x(), field_y(), 76, 24,
-                  g_pane == PANE_PING ? "Ping" : "Look up", 0);
+        g_field->flags &= ~UI_HIDDEN;
+        ui_set_text(g_go, g_pane == PANE_PING ? "Ping" : "Look up");
     } else {
-        wg_button(cx, field_y(), 76, 24, "Refresh", 0);
+        g_field->flags |= UI_HIDDEN;
+        ui_set_text(g_go, "Refresh");
     }
+    g_out->rows = g_lines;
+    app_relayout(&g_app);
+}
 
-    const int oy = field_y() + 38;
-    wg_container(cx, oy, (int)g_w - cx - 16, (int)g_h - oy - 12, 8);
-    for (int i = 0; i < g_lines; ++i) {
-        const int y = oy + 8 + i * WG_GLYPH_H;
-        if (y + WG_GLYPH_H > (int)g_h - 16)
-            break;
-        wg_text_clipped(cx + 8, y, g_out[i], wg_ink_colour(),
-                        (int)g_w - cx - 32);
-    }
-    if (g_lines == 0)
-        wg_text(cx + 8, oy + 8, "nothing asked yet", WG_DIM);
+static void on_pane(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (v->selected < 0 || v->selected >= PANE_COUNT)
+        return;
+    g_pane = v->selected;
+    clear_out();
+    /* The two panes with nothing to type answer at once; the two with a field
+     * wait to be told what to ask about. */
+    if (!has_field())
+        ask();
+    sync_pane();
+}
+
+static void on_go(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    snprintf(g_input, sizeof(g_input), "%s", ui_text(g_field));
+    ask();
+    sync_pane();
 }
 
 int main(int argc, char** argv)
 {
-    const int wx = argc > 1 ? atoi_simple(argv[1]) : 200;
-    const int wy = argc > 2 ? atoi_simple(argv[2]) : 130;
-    if (wg_font() != 0)
-        return 1;
-    const int id = win_create(wx, wy, g_w, g_h, "Network Utility");
-    if (id < 0) {
-        printf("netutil: no window server\n");
-        return 1;
-    }
-    win_set_alpha(id);
-    win_set_sidebar(id, SIDE_W);
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    win_set_min_size(id, 520, 320);
-    wg_target(g_px, g_w, g_h);
+    struct ui_view* root = ui_box(0, UI_STACK_H, 0, 0);
+
+    g_side = ui_sidebar(root, pane_row, PANE_COUNT, 0);
+    ui_on(g_side, on_pane, 0);
+    ui_size(g_side, 150, 0);
+    g_side->selected = 0;
+
+    struct ui_view* pane = ui_box(root, UI_STACK_V, 16, 10);
+    g_title = ui_label(pane, kPanes[0]);
+    ui_grow(g_title, 0);
+
+    struct ui_view* row = ui_box(pane, UI_STACK_H, 0, 8);
+    ui_size(row, 0, 26);
+    ui_grow(row, 0);
+    g_field = ui_field(row, g_input);
+    ui_on(g_field, on_go, 0);       /* Return in the field asks */
+    g_go = ui_button(row, "Refresh", on_go, 0);
+    ui_grow(g_go, 0);
+    ui_spacer(row);
+
+    g_out = ui_list(pane, out_row, 0, 0);
+
+    g_app.title = "Network Utility";
+    g_app.width = 620; g_app.height = 400;
+    g_app.min_width = 520; g_app.min_height = 320;
+    g_app.sidebar = 150;
+    g_app.root = root;
 
     do_info();
-    draw();
-    win_present(id);
-
-    for (;;) {
-        struct win_event e;
-        while (win_poll(id, &e)) {
-            if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
-
-            if (e.type == WIN_EVENT_RESIZE) {
-                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
-                g_px = win_map(id);
-                if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
-            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                if (e.x < SIDE_W) {
-                    const int hit = (e.y - 30) / ROW_H;
-                    if (hit >= 0 && hit < PANE_COUNT) {
-                        g_pane = hit;
-                        clear_out();
-                        g_focus = 0;
-                        /* The two panes with nothing to type answer at once;
-                         * the two with a field wait to be told what to ask
-                         * about. */
-                        if (!has_field())
-                            ask();
-                    }
-                } else if (e.y >= field_y() && e.y < field_y() + 24) {
-                    if (has_field() && e.x >= field_x() &&
-                        e.x < field_x() + field_w())
-                        g_focus = 1;
-                    else if (e.x >= (has_field() ? go_x() : field_x()) &&
-                             e.x < (has_field() ? go_x() : field_x()) + 76) {
-                        g_focus = 0;
-                        ask();
-                    }
-                }
-            } else if (e.type == WIN_EVENT_KEY) {
-                if (g_focus && has_field()) {
-                    const unsigned n = (unsigned)strlen(g_input);
-                    if (e.key == '\b' && n > 0)
-                        g_input[n - 1] = '\0';
-                    else if (e.key == '\n') { g_focus = 0; ask(); }
-                    else if (e.key >= ' ' && e.key < 127 &&
-                             n + 1 < sizeof(g_input)) {
-                        g_input[n] = (char)e.key;
-                        g_input[n + 1] = '\0';
-                    }
-                } else if (e.key == '\n') {
-                    ask();
-                } else if (e.key == WIN_KEY_DOWN && g_pane + 1 < PANE_COUNT) {
-                    ++g_pane; clear_out(); if (!has_field()) ask();
-                } else if (e.key == WIN_KEY_UP && g_pane > 0) {
-                    --g_pane; clear_out(); if (!has_field()) ask();
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            }
-            draw();
-            win_present(id);
-        }
-        msleep(15);
-    }
+    /* sync_pane needs the app laid out, which app_run does first. */
+    g_out->rows = g_lines;
+    g_field->flags |= UI_HIDDEN;
+    return app_run(&g_app, argc, argv);
 }

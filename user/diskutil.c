@@ -13,7 +13,8 @@
  * worse than one that does not offer it.
  */
 
-#include <dialog.h>
+#include <app.h>
+#include <ui.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,9 +26,6 @@
 #define SIDE_W  180
 #define MAX_FS  12
 #define ROW_H   34
-
-static uint32_t* g_px;
-static unsigned  g_w = 640, g_h = 420;
 
 struct volume {
     char device[32];
@@ -42,7 +40,6 @@ static int g_n;
 static int g_sel;
 static char g_report[1024] = "";
 static char g_note[96] = "";
-static int  g_scroll;                   /* into the report, in lines */
 
 /* /proc/mounts is the list, because it is what the system itself believes.
  * Asking vfsd directly would mean a second answer to the same question, and
@@ -97,7 +94,6 @@ static void verify(int repair)
 {
     unsigned fixed = 0;
     const long problems = fsck(repair, g_report, sizeof(g_report), &fixed);
-    g_scroll = 0;
     if (problems < 0) {
         snprintf(g_note, sizeof(g_note), "the filesystem could not be checked");
         return;
@@ -130,192 +126,186 @@ static void detach(void)
     reload();
 }
 
-/* Buttons live along the bottom of the content pane. */
-#define BTN_W 92
-#define BTN_H 26
-static int btn_y(void) { return (int)g_h - 12 - BTN_H; }
-static int btn_x(int i) { return SIDE_W + 16 + i * (BTN_W + 8); }
+/* --- the interface ---------------------------------------------------------
+ *
+ * A sidebar of volumes and a pane about the chosen one: what it is, how full,
+ * and what a check of it said. The capacity is a level rather than a bar drawn
+ * by hand, and the report is a list, so a long one scrolls.
+ */
 
-static void draw(void)
+static struct app g_app;
+static struct ui_view* g_side;
+static struct ui_view* g_where;
+static struct ui_view* g_what;
+static struct ui_view* g_bar;
+static struct ui_view* g_used_label;
+static struct ui_view* g_free_label;
+static struct ui_view* g_report_list;
+static struct ui_view* g_note_label;
+
+/* The report, cut into lines once, because a row callback that walked the
+ * text would walk it again per visible row per repaint. */
+#define REPORT_MAX 40
+static char g_report_line[REPORT_MAX][128];
+static int  g_report_n;
+
+static void split_report(void)
 {
-    wg_theme();
-    wg_glass_clear();
-
-    /* The sidebar runs the full height, and the volumes are its contents. */
-    wg_sidebar(0, 0, SIDE_W, (int)g_h);
-    wg_text(14, 12, "Volumes", WG_DIM);
-    for (int i = 0; i < g_n; ++i) {
-        const int y = 34 + i * ROW_H;
-        if (i == g_sel)
-            wg_row_select(6, y - 4, SIDE_W - 12, ROW_H);
-        wg_text_clipped(14, y, g_vol[i].at, wg_ink_colour(), SIDE_W - 28);
-        wg_text_clipped(14, y + 14, g_vol[i].device, WG_DIM, SIDE_W - 28);
+    g_report_n = 0;
+    const char* p = g_report;
+    while (*p != '\0' && g_report_n < REPORT_MAX) {
+        unsigned n = 0;
+        while (p[n] != '\0' && p[n] != '\n' &&
+               n + 1 < sizeof(g_report_line[0])) {
+            g_report_line[g_report_n][n] = p[n];
+            ++n;
+        }
+        g_report_line[g_report_n][n] = '\0';
+        if (n > 0) ++g_report_n;
+        p += n;
+        if (*p == '\n') ++p;
     }
+    if (g_report_list != 0)
+        g_report_list->rows = g_report_n;
+}
 
+static const char* report_row(void* user, int row)
+{
+    (void)user;
+    return (row >= 0 && row < g_report_n) ? g_report_line[row] : "";
+}
+
+static const char* volume_row(void* user, int row)
+{
+    (void)user;
+    return (row >= 0 && row < g_n) ? g_vol[row].at : "";
+}
+
+static void human(uint64_t bytes, char* out, unsigned max);
+
+/* Everything the pane says about whichever volume is chosen. */
+static void sync_pane(void)
+{
+    if (g_side != 0)
+        g_side->rows = g_n;
     if (g_sel < 0 || g_sel >= g_n) {
-        wg_text(SIDE_W + 16, 20, "nothing is mounted", WG_DIM);
+        ui_set_text(g_where, "nothing is mounted");
+        ui_set_text(g_what, "");
+        ui_set_text(g_used_label, "");
+        ui_set_text(g_free_label, "");
+        g_bar->value = 0;
+        ui_set_text(g_note_label, g_note);
         return;
     }
     const struct volume* v = &g_vol[g_sel];
-    const int cx = SIDE_W + 16;
     char line[128], a[32], b[32];
-
-    wg_text(cx, 14, v->at, wg_ink_colour());
+    ui_set_text(g_where, v->at);
     snprintf(line, sizeof(line), "%s on %s", v->type, v->device);
-    wg_text(cx, 34, line, WG_DIM);
+    ui_set_text(g_what, line);
 
     if (v->have_stat) {
         const uint64_t total = v->st.f_blocks * v->st.f_bsize;
         const uint64_t freeb = v->st.f_bfree * v->st.f_bsize;
         const uint64_t used  = total - freeb;
-
-        /* One bar, because the question a person actually has about a disk is
-         * "how much is left", and that is a proportion rather than a number. */
-        const int bw = (int)g_w - cx - 16;
-        wg_container(cx, 60, bw, 40, 8);
-        const int inner = bw - 16;
-        wg_fill(cx + 8, 76, inner, 12, WG_PAPER);
-        if (total > 0) {
-            int fill = (int)((used * (uint64_t)inner) / total);
-            if (fill > inner) fill = inner;
-            /* Red past nine tenths: at that point the number has stopped being
-             * information and started being a warning. */
-            wg_fill(cx + 8, 76, fill, 12,
-                    used * 10 > total * 9 ? 0xD2413Au : WG_ACCENT);
-        }
+        /* A level, not a bar: how full a disk is is exactly what a level is
+         * for, and it already turns red at the end that matters. */
+        g_bar->max = 1000;
+        g_bar->value = total > 0 ? (int)((total - used) * 1000 / total) : 0;
         human(used, a, sizeof(a));
         human(total, b, sizeof(b));
         snprintf(line, sizeof(line), "%s used of %s", a, b);
-        wg_text(cx, 108, line, wg_ink_colour());
+        ui_set_text(g_used_label, line);
         human(freeb, a, sizeof(a));
-        snprintf(line, sizeof(line), "%s free  -  %llu blocks of %llu bytes",
-                 a, (unsigned long long)v->st.f_blocks,
+        snprintf(line, sizeof(line), "%s free, in blocks of %llu bytes", a,
                  (unsigned long long)v->st.f_bsize);
-        wg_text(cx, 126, line, WG_DIM);
+        ui_set_text(g_free_label, line);
     } else {
-        wg_text(cx, 68, "not storage - nothing to measure", WG_DIM);
+        g_bar->value = 0;
+        ui_set_text(g_used_label, "not storage - nothing to measure");
+        ui_set_text(g_free_label, "");
     }
-
-    /* The report, when there is one. */
-    const int ry = 152;
-    const int rh = btn_y() - ry - 12;
-    if (rh > 20) {
-        wg_container(cx, ry, (int)g_w - cx - 16, rh, 8);
-        int y = ry + 8;
-        const char* p = g_report;
-        int skip = g_scroll;
-        while (*p != '\0' && y + WG_GLYPH_H < ry + rh) {
-            char text[128];
-            unsigned n = 0;
-            while (p[n] != '\0' && p[n] != '\n' && n + 1 < sizeof(text)) {
-                text[n] = p[n]; ++n;
-            }
-            text[n] = '\0';
-            p += n + (p[n] == '\n' ? 1 : 0);
-            if (skip > 0) { --skip; continue; }
-            wg_text_clipped(cx + 8, y, text, wg_ink_colour(),
-                            (int)g_w - cx - 32);
-            y += WG_GLYPH_H;
-        }
-        if (g_report[0] == '\0')
-            wg_text(cx + 8, ry + 8, "no check has been run", WG_DIM);
-    }
-
-    static const char* const kLabels[3] = { "Verify", "Repair", "Detach" };
-    for (int i = 0; i < 3; ++i)
-        wg_button(btn_x(i), btn_y(), BTN_W, BTN_H, kLabels[i], 0);
-    wg_text_clipped(btn_x(3) + 8, btn_y() + 5, g_note, WG_DIM,
-                    (int)g_w - btn_x(3) - 24);
+    ui_set_text(g_note_label, g_note);
+    split_report();
+    app_relayout(&g_app);
 }
 
-static const char* const kMenu[] = { "Verify", "Repair", "-", "Detach",
-                                     "Refresh" };
+static void on_volume(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (v->selected < 0 || v->selected >= g_n)
+        return;
+    g_sel = v->selected;
+    g_report[0] = '\0';
+    g_note[0] = '\0';
+    sync_pane();
+}
+
+static void on_verify(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    verify(0);
+    sync_pane();
+}
+
+static void on_repair(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    verify(1);
+    sync_pane();
+}
+
+static void on_detach(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    detach();
+    sync_pane();
+}
+
+static int on_tick(struct app* a)
+{
+    (void)a;
+    /* Free space moves while other programs run, and a capacity that only
+     * updates when clicked is a lie with a delay. */
+    reload();
+    sync_pane();
+    return 1;
+}
 
 int main(int argc, char** argv)
 {
-    const int wx = argc > 1 ? atoi_simple(argv[1]) : 160;
-    const int wy = argc > 2 ? atoi_simple(argv[2]) : 120;
-    if (wg_font() != 0)
-        return 1;
-    const int id = win_create(wx, wy, g_w, g_h, "Disk Utility");
-    if (id < 0) {
-        printf("diskutil: no window server\n");
-        return 1;
-    }
-    win_set_alpha(id);
-    win_set_sidebar(id, SIDE_W);
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    win_set_min_size(id, 520, 340);
-    wg_target(g_px, g_w, g_h);
-
     reload();
-    draw();
-    win_present(id);
 
-    unsigned since = 0;
-    for (;;) {
-        struct win_event e;
-        while (win_poll(id, &e)) {
-            if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
+    struct ui_view* root = ui_box(0, UI_STACK_H, 0, 0);
+    g_side = ui_sidebar(root, volume_row, g_n, 0);
+    ui_on(g_side, on_volume, 0);
+    ui_size(g_side, 180, 0);
+    g_side->selected = g_n > 0 ? 0 : -1;
 
-            if (menu_active() && e.type != WIN_EVENT_RESIZE) {
-                const int pick = menu_event(&e);
-                if (pick == 0)      verify(0);
-                else if (pick == 1) verify(1);
-                else if (pick == 3) detach();
-                else if (pick == 4) reload();
-                draw(); menu_draw(); win_present(id);
-                continue;
-            }
+    struct ui_view* pane = ui_box(root, UI_STACK_V, 16, 8);
+    g_where = ui_label(pane, ""); ui_grow(g_where, 0);
+    g_what  = ui_label(pane, ""); ui_grow(g_what, 0);
+    g_bar   = ui_level(pane, 0, 1000, 0);
+    ui_size(g_bar, 0, 16); ui_grow(g_bar, 0);
+    g_used_label = ui_label(pane, ""); ui_grow(g_used_label, 0);
+    g_free_label = ui_label(pane, ""); ui_grow(g_free_label, 0);
 
-            if (e.type == WIN_EVENT_RESIZE) {
-                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
-                g_px = win_map(id);
-                if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
-            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                if (e.button == 2) {
-                    menu_open(e.x, e.y, kMenu, 5);
-                } else if (e.x < SIDE_W) {
-                    const int hit = (e.y - 30) / ROW_H;
-                    if (hit >= 0 && hit < g_n) {
-                        g_sel = hit;
-                        g_report[0] = '\0';
-                        g_note[0] = '\0';
-                    }
-                } else if (e.y >= btn_y() && e.y < btn_y() + BTN_H) {
-                    for (int i = 0; i < 3; ++i)
-                        if (e.x >= btn_x(i) && e.x < btn_x(i) + BTN_W) {
-                            if (i == 0) verify(0);
-                            else if (i == 1) verify(1);
-                            else detach();
-                        }
-                }
-            } else if (e.type == WIN_EVENT_KEY) {
-                if (e.key == WIN_KEY_DOWN && g_sel + 1 < g_n) ++g_sel;
-                else if (e.key == WIN_KEY_UP && g_sel > 0) --g_sel;
-                else if (e.key == 'v') verify(0);
-                else if (e.key == 'r') reload();
-                else continue;
-            } else {
-                continue;
-            }
-            draw();
-            menu_draw();
-            win_present(id);
-        }
+    ui_grow(ui_separator(pane), 0);
+    g_report_list = ui_list(pane, report_row, 0, 0);
 
-        /* Every few seconds: free space moves while other programs run, and a
-         * capacity bar that only updates when clicked is a lie with a delay. */
-        if (++since >= 200) {
-            since = 0;
-            reload();
-            draw();
-            menu_draw();
-            win_present(id);
-        }
-        msleep(15);
-    }
+    struct ui_view* row = ui_box(pane, UI_STACK_H, 0, 8);
+    ui_size(row, 0, 26); ui_grow(row, 0);
+    ui_grow(ui_button(row, "Verify", on_verify, 0), 0);
+    ui_grow(ui_button(row, "Repair", on_repair, 0), 0);
+    ui_grow(ui_button(row, "Detach", on_detach, 0), 0);
+    ui_spacer(row);
+    g_note_label = ui_label(pane, ""); ui_grow(g_note_label, 0);
+
+    g_app.title = "Disk Utility";
+    g_app.width = 640; g_app.height = 420;
+    g_app.min_width = 520; g_app.min_height = 340;
+    g_app.sidebar = 180;
+    g_app.tick_ms = 3000;
+    g_app.tick = on_tick;
+    g_app.root = root;
+    return app_run(&g_app, argc, argv);
 }
