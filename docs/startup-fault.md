@@ -12,12 +12,20 @@ appears as a service that will not come back:
     audiod[66] faulted: unmapped address at 0x0, reading from 0x409f70
     init: audiod died 5 times; leaving it stopped
 
-0x409f70 is the first instruction of a function - `push %rbp` - and the address
-it faults on is exactly 0. A push writes to RSP-8, so RSP was 8: the stack
-pointer is *gone*, not merely exhausted. Since the kernel sets a correct RSP at
-exec (`frame.user_rsp = stack`, from a stack the loader checked), something
-inside the running program destroys it between entry and that call. RBP
-restored from a smashed frame by `leave` would do it.
+It faults on address 0, and the report says **reading**.
+
+That last word matters, and an earlier version of this document got it wrong.
+The address was disassembled to `push %rbp` at the start of a function, and
+from that came "RSP is 8, the stack pointer is gone" - which is a good story
+and is not what the machine said. A push is a *write*; the fault was a read.
+The disassembly was of a binary rebuilt after the event, so the address no
+longer meant what it had when the fault happened, and a fortnight of looking
+for a smashed stack came out of one stale objdump.
+
+What the report actually describes is a plain null dereference at a fixed code
+address, in a process that has just been exec'd and has not yet done anything
+of its own. `tools/vm/machine.py` now keeps the binaries whenever a run faults,
+so the next occurrence can be resolved against the image that produced it.
 
 ## What it depends on
 
@@ -37,6 +45,24 @@ next to it: harmless in one layout, fatal in another.
 It has been seen twice on unrelated changes - once when net, cred and audio
 were given call deadlines, which broke `cat` for reasons that made no sense
 either, and once here.
+
+## Audited and clean
+
+Every place the symptom could come from, read line by line:
+
+  - **Every `shm_map` in libc.** All thirteen check for null, including the two
+    that looked unguarded at a glance.
+  - **`position()`**, the one function that could plausibly hand back a null
+    for a dereference like this. It falls back to `&e->offset` rather than
+    returning 0, so `*position(e)` is always safe.
+  - **Signal delivery.** `push_signal_frame` validates the whole range it is
+    about to write with `user_range_ok` and kills the process rather than
+    entering a handler it cannot return from.
+  - **`malloc`.** A bump allocator over sbrk; the growth arithmetic is correct
+    for any request, including the ~780K the exec path asks for.
+  - **The entry point.** `ENTRY(_start)` is explicit in user.ld, so a shifted
+    link order cannot start a program in the middle of a function - which was
+    the best remaining theory for how a fresh process runs with a bad frame.
 
 ## Ruled out
 
@@ -66,8 +92,12 @@ With that:
     Between then and now libc gained a few kilobytes of code for unrelated
     reasons. That is all it took to move it.
   - **Eight BSS layouts, 8K to 120K, all clean.** Padding .bss does not
-    reproduce it, which says the sensitive axis is not the one that was
-    obviously suspicious.
+    reproduce it.
+  - **Six code layouts, 1K to 64K, all clean.** Nor does padding .text, which
+    was the better guess after BSS failed - code is what moved the bug last.
+
+Fourteen layouts on the two axes that could plausibly matter, and none of them
+brings it back.
 
 So the bug is not reachable by sweeping BSS, and the thing that moved it last
 was *code*. A sweep of text or data placement might find it; it might equally

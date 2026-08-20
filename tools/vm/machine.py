@@ -335,6 +335,38 @@ class Test:
         self.m.stop()
 
 
+def keep_binaries(name):
+    """Copy the ELFs aside when a run has faulted.
+
+    A user fault names an address, and turning an address back into a line
+    needs *the binary that faulted*. Twice now that binary had been rebuilt
+    before anyone looked, and the second time the wrong disassembly sent the
+    investigation a fortnight in the wrong direction - "the stack pointer is
+    gone" from an instruction that was not the one which ran.
+
+    The build directory is rewritten constantly and the fault is rare, so the
+    binaries are kept at the moment of the failure rather than hoped for
+    afterwards.
+    """
+    try:
+        with open(LOG, "r", errors="replace") as f:
+            text = f.read()
+        if "faulted" not in text and "stack smashed" not in text:
+            return
+    except OSError:
+        return
+    keep = os.path.join(ROOT, "build", "faulted-%s" % name)
+    try:
+        os.makedirs(keep, exist_ok=True)
+        import glob, shutil
+        for elf in glob.glob(os.path.join(ROOT, "build", "*.elf")):
+            shutil.copy2(elf, keep)
+        shutil.copy2(LOG, os.path.join(keep, "serial.log"))
+        print("  faulted: binaries kept in %s" % keep)
+    except OSError:
+        pass
+
+
 def main(name, body):
     """Run one test, print a line, and set the exit status."""
     import sys
@@ -344,6 +376,7 @@ def main(name, body):
         body(t)
     except Failure as e:
         print("FAIL  %s: %s" % (name, e))
+        keep_binaries(name)
         if t: t.stop()
         sys.exit(1)
     except Exception as e:                       # a broken harness, not a
@@ -354,6 +387,8 @@ def main(name, body):
     # way through. Demand paging landed with two faults in the log and a green
     # result, which is how this check came to exist.
     stray = t.faults()
+    if stray:
+        keep_binaries(name)
     if stray:
         print("FAIL  %s: %d unexpected fault(s)" % (name, len(stray)))
         for line in stray[:8]:

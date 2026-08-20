@@ -9,3 +9,4 @@ build/
 
 # Machine-local tool permissions; shared .claude/ config stays trackable.
 .claude/settings.local.json
+build/faulted-*/
