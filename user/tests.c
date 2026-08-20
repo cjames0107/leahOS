@@ -755,6 +755,24 @@ static int ui_test_branch(void* user, int row)
     return row == 0 ? 1 : 0;        /* the first row can be opened */
 }
 
+/* A two-level tree for the browser: three things at the top, two under each. */
+static int ui_test_cols(void* user, int column, const int* chosen)
+{
+    (void)user;
+    if (column == 0)
+        return 3;
+    return chosen[0] >= 0 ? 2 : 0;      /* nothing until the first is chosen */
+}
+
+static const char* ui_test_coltext(void* user, int column, int row,
+                                   const int* chosen)
+{
+    (void)user; (void)chosen;
+    static char text[32];
+    snprintf(text, sizeof(text), "c%dr%d", column, row);
+    return text;
+}
+
 static const char* ui_test_row(void* user, int row)
 {
     static const char* const kRows[3] = { "alpha", "beta", "gamma" };
@@ -985,6 +1003,112 @@ static void test_ui(void)
     const int was_len = (int)strlen(doc);
     tap_key(page, '\n');
     check("a text area takes a newline", (int)strlen(doc) == was_len + 1);
+
+    /* --- the third set of components ------------------------------------ */
+    ui_reset();
+    g_ui_fired = 0;
+
+    struct ui_view* third = ui_box(0, UI_STACK_V, 6, 4);
+    struct ui_view* secure = ui_secure(third);
+    ui_grow(secure, 0);
+    struct ui_view* find = ui_search(third, "Search");
+    ui_on(find, ui_test_action, 0);
+    ui_grow(find, 0);
+    struct ui_view* combo = ui_combo(third, "Send", ui_test_row, 3, 0);
+    ui_on(combo, ui_test_action, 0);
+    ui_grow(combo, 0);
+    struct ui_view* level = ui_level(third, 3, 10, 5);
+    ui_grow(level, 0);
+    struct ui_view* spin = ui_spinner(third);
+    ui_grow(spin, 0);
+    struct ui_view* cal = ui_calendar(third, 2026, 0, 15);   /* January 2026 */
+    ui_grow(cal, 0);
+    struct ui_view* over = ui_popover(third, secure);
+
+    ui_layout(third, all);
+
+    /* A password field keeps what was typed and shows something else. */
+    press(third, secure->frame.x + 4, secure->frame.y + 4);
+    tap_key(third, 'h'); tap_key(third, 'i');
+    check("a secure field holds what was typed",
+          strcmp(ui_text(secure), "hi") == 0);
+
+    /* A search reports every keystroke rather than waiting for Return, which
+     * is the whole difference between it and a plain field. */
+    g_ui_fired = 0;
+    press(third, find->frame.x + 30, find->frame.y + 4);
+    tap_key(third, 'a');
+    check("a search field reports as you type", g_ui_fired == 1);
+    /* And its cross empties it and says so once more. */
+    press(third, find->frame.x + find->frame.w - 10, find->frame.y + 4);
+    check("its cross empties it", ui_text(find)[0] == '\0');
+    check("and reports that too", g_ui_fired == 2);
+
+    /* A combo's two halves do different things. */
+    g_ui_fired = 0;
+    press(third, combo->frame.x + 4, combo->frame.y + 4);
+    check("a combo's button fires the action", g_ui_fired == 1);
+    check("and says it was the button", combo->selected == -1);
+    press(third, combo->frame.x + combo->frame.w - 8, combo->frame.y + 4);
+    check("its arrow opens the menu instead", combo->open != 0);
+
+    /* A discrete level rounds up, so any amount at all lights one block. */
+    check("a level knows its own segments", level->on == 5);
+
+    /* The spinner turns and comes back round. */
+    const int was_phase = spin->value;
+    ui_spin(spin);
+    check("a spinner advances", spin->value != was_phase);
+    for (int i = 0; i < 12; ++i)
+        ui_spin(spin);
+    check("and wraps rather than running off", spin->value == was_phase + 1 ||
+                                               spin->value < 12);
+
+    /* A popover takes no room until it is shown, which is what stops it
+     * pushing the layout around while it is hidden. */
+    const int before_y = cal->frame.y;
+    ui_popover_show(over, 1);
+    ui_layout(third, all);
+    check("showing a popover does not move its neighbours",
+          cal->frame.y == before_y);
+    check("and it is placed against its anchor",
+          over->frame.y >= secure->frame.y);
+    ui_popover_show(over, 0);
+
+    /* A browser's columns are a path, not four lists.
+     *
+     * Choosing again in an earlier column has to forget what was chosen after
+     * it - those choices described somewhere else. Without that the second
+     * column keeps showing what the first *used* to point at, which is the
+     * bug this arrangement exists to avoid. */
+    {
+        /* Its own tree, with room. Appended to the one above it the browser
+         * came last in a stack that was already full, was given no height, and
+         * every press meant for it landed outside it - which reads exactly
+         * like a browser that does not record anything. */
+        struct ui_view* bwrap = ui_box(0, UI_STACK_V, 0, 0);
+        struct ui_view* br = ui_browser(bwrap, 3, ui_test_cols,
+                                        ui_test_coltext, 0);
+        const struct ui_rect room = { 0, 0, 300, 200 };
+        ui_layout(bwrap, room);
+        const int each = br->frame.w / 3;
+        press(bwrap, br->frame.x + 4, br->frame.y + 2);
+        check("a browser records the column that was chosen in",
+              br->col_sel[0] == 0);
+        check("and the column after it fills in",
+              ui_test_cols(0, 1, br->col_sel) == 2);
+        press(bwrap, br->frame.x + each + 4, br->frame.y + br->row_h + 2);
+        check("a second column chooses independently", br->col_sel[1] == 1);
+        press(bwrap, br->frame.x + 4, br->frame.y + br->row_h + 2);
+        check("choosing again on the left forgets what was on the right",
+              br->col_sel[0] == 1 && br->col_sel[1] == -1);
+    }
+
+    /* The calendar: the 15th of January 2026 was a Thursday, so clicking the
+     * cell for the 1st has to land on the 1st and not on some other day. */
+    ui_layout(third, all);
+    check("a calendar starts on the date it was given",
+          cal->year == 2026 && cal->month == 0 && cal->day == 15);
 
     ui_reset();
 }

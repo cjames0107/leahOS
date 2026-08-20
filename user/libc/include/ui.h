@@ -51,6 +51,12 @@ typedef void (*ui_action)(struct ui_view* v, void* user);
  * would be a second one to keep in step. */
 typedef const char* (*ui_row_text)(void* user, int row);
 
+/* A browser's columns. `chosen` is what has been picked in every column so far,
+ * which is what decides the contents of the next one. */
+typedef int (*ui_col_count)(void* user, int column, const int* chosen);
+typedef const char* (*ui_col_text)(void* user, int column, int row,
+                                   const int* chosen);
+
 enum {
     UI_BOX,             /* lays its children out; draws nothing itself */
     UI_LABEL,
@@ -89,6 +95,24 @@ enum {
     UI_SCROLL,          /* a window onto a child taller than itself */
     UI_SPLIT,           /* two children and a divider that can be dragged */
     UI_IMAGE,           /* a picture */
+
+    /* --- the third set ------------------------------------------------------
+     *
+     * What the second set did not cover. Several of these are variations on
+     * something already here - a secure field is a field that will not show
+     * you what you typed - and are separate kinds rather than flags because
+     * the difference is in what they are *for*, and a caller should be able
+     * to say which one it wants by name.
+     */
+    UI_SECURE,          /* a field that shows bullets, for a password */
+    UI_SEARCH,          /* a field with a magnifier and a way to empty it */
+    UI_COMBO,           /* a button with a menu on one end */
+    UI_COLOUR,          /* a well showing a colour, opening a picker */
+    UI_LEVEL,           /* a rating or a level: battery, volume, signal */
+    UI_SPINNER,         /* work of unknown length, as motion rather than a bar */
+    UI_POPOVER,         /* transient content, anchored to what raised it */
+    UI_BROWSER,         /* columns, each listing what was chosen in the last */
+    UI_CALENDAR,        /* a month, with a day chosen */
 };
 
 /* How a box arranges its children. */
@@ -159,6 +183,22 @@ struct ui_view {
 
     /* Splits: where the divider is, as a distance from the leading edge. */
     int divider;
+
+    /* Browsers: which row is chosen in each column. A column shows what the
+     * column before it chose, which is the whole idea - the path through a
+     * hierarchy is visible all at once rather than one level at a time. */
+    int col_sel[4];
+
+    /* Calendars: what is being shown, and what is chosen in it. */
+    int year, month, day;
+
+    /* Popovers: the view they are anchored to, so they can be drawn beside it
+     * wherever the layout happens to have put it. */
+    struct ui_view* anchor;
+
+    /* Browsers ask for their columns rather than holding them. */
+    ui_col_count col_count;
+    ui_col_text  col_text;
 
     /* Popups and menu bars: which drop-down is showing, if any. */
     int open;
@@ -251,6 +291,62 @@ struct ui_view* ui_scroll(struct ui_view* parent);
 /* Two children with a divider between them. The first two views added are the
  * panes; `at` is where the divider starts. */
 struct ui_view* ui_split(struct ui_view* parent, int layout, int at);
+
+/* --- the third set --------------------------------------------------------- */
+
+/* A password field: the same editing, none of the display. What you typed is
+ * in ui_text as usual - the masking is only what is drawn, because a field
+ * that would not tell its own program the password would be useless. */
+struct ui_view* ui_secure(struct ui_view* parent);
+
+/* A search field. `action` fires on every keystroke rather than on Return,
+ * because searching as you type is the point; clicking the cross empties it
+ * and fires once more so the caller can put the unfiltered list back. */
+struct ui_view* ui_search(struct ui_view* parent, const char* placeholder);
+
+/* A button with a menu on one end: the button does the usual thing, the arrow
+ * offers the variations.
+ *
+ * One action serves both, and `selected` says which happened: -1 when the
+ * button itself was pressed, otherwise the item chosen. A second callback
+ * would mean two places to write the same handler in the common case where
+ * the button is just the first item. */
+struct ui_view* ui_combo(struct ui_view* parent, const char* label,
+                         ui_row_text items, int count, void* user);
+
+/* A colour, shown as a well and edited in a picker that opens under it.
+ * `value` is 0xRRGGBB and is what the action should read. */
+struct ui_view* ui_colour(struct ui_view* parent, uint32_t rgb);
+
+/* A level: how full, how strong, how loud. `segments` of 0 draws it as one
+ * continuous bar; anything else draws that many discrete blocks, which is what
+ * a rating or a signal strength wants. */
+struct ui_view* ui_level(struct ui_view* parent, int value, int max,
+                         int segments);
+
+/* Work of unknown length. Unlike a progress bar this says nothing about how
+ * far along it is, because that is exactly what is not known - it only says
+ * that something is still happening. Needs a tick to turn. */
+struct ui_view* ui_spinner(struct ui_view* parent);
+void ui_spin(struct ui_view* v);        /* one step, from the application's tick */
+
+/* Transient content beside the thing that raised it. Returns the popover,
+ * which is a box - put components in it as usual. It is shown until something
+ * outside it is pressed. */
+struct ui_view* ui_popover(struct ui_view* parent, struct ui_view* anchor);
+void ui_popover_show(struct ui_view* popover, int shown);
+
+/* Columns, each listing what the column before it chose. `count` answers how
+ * many rows a column has given the path so far, and `text` names one; both are
+ * asked for with the column index, so the application keeps its own tree and
+ * this keeps only which row is chosen where. */
+struct ui_view* ui_browser(struct ui_view* parent, int columns,
+                           ui_col_count count, ui_col_text text, void* user);
+
+/* A month, with a day chosen. Returns the view; the chosen date is in `year`,
+ * `month` (0..11) and `day`. */
+struct ui_view* ui_calendar(struct ui_view* parent, int year, int month,
+                            int day);
 
 /* Sizing, as a hint rather than a command: layout may give a view more when it
  * is set to grow, and never gives it less. */

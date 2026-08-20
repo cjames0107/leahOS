@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 void app_quit(struct app* a, int status)
@@ -214,6 +215,142 @@ struct ui_view* app_sheet_save(struct app* a, const char* dir,
     ui_spacer(row);
     ui_grow(ui_button(row, "Cancel", sheet_cancel_clicked, a), 0);
     ui_grow(ui_button(row, "Save", sheet_save_clicked, a), 0);
+    return root;
+}
+
+/* --- the file panel -------------------------------------------------------
+ *
+ * A sheet for choosing a file. The listing is taken once when the panel opens
+ * and again whenever a directory is entered, rather than being read per row:
+ * a row callback that hit the filesystem would read the whole directory once
+ * per visible line, per repaint.
+ */
+#define PANEL_MAX 128
+static struct dirent g_panel[PANEL_MAX];
+static int  g_panel_n;
+static char g_panel_dir[192];
+static struct ui_view* g_panel_list;
+static struct ui_view* g_panel_where;
+
+static void panel_read(void)
+{
+    g_panel_n = getdents(g_panel_dir, g_panel, PANEL_MAX);
+    if (g_panel_n < 0)
+        g_panel_n = 0;
+}
+
+static const char* panel_row(void* user, int row)
+{
+    (void)user;
+    if (row < 0 || row >= g_panel_n)
+        return "";
+    /* Directories are marked, because "enter" and "choose" are different
+     * things to do with a row and the person has to know which they will get. */
+    static char line[128];
+    if (g_panel[row].d_type == S_IFDIR)
+        snprintf(line, sizeof(line), "%s/", g_panel[row].d_name);
+    else
+        snprintf(line, sizeof(line), "%s", g_panel[row].d_name);
+    return line;
+}
+
+static void panel_chosen(struct ui_view* v, void* user)
+{
+    struct app* a = (struct app*)user;
+    const int row = v->selected;
+    if (row < 0 || row >= g_panel_n)
+        return;
+    if (g_panel[row].d_type != S_IFDIR) {
+        if (g_panel_dir[0] != '\0' &&
+            g_panel_dir[strlen(g_panel_dir) - 1] == '/')
+            snprintf(g_sheet_path, sizeof(g_sheet_path), "%s%s",
+                     g_panel_dir, g_panel[row].d_name);
+        else
+            snprintf(g_sheet_path, sizeof(g_sheet_path), "%s/%s",
+                     g_panel_dir, g_panel[row].d_name);
+        app_sheet_close(a, 1);
+        return;
+    }
+    /* A directory is entered rather than answered with. */
+    char into[192];
+    if (strcmp(g_panel[row].d_name, "..") == 0) {
+        snprintf(into, sizeof(into), "%s", g_panel_dir);
+        char* slash = strrchr(into, '/');
+        if (slash != 0 && slash != into) *slash = '\0';
+        else                             into[1] = '\0';
+    } else if (strcmp(g_panel_dir, "/") == 0) {
+        snprintf(into, sizeof(into), "/%s", g_panel[row].d_name);
+    } else {
+        snprintf(into, sizeof(into), "%s/%s", g_panel_dir,
+                 g_panel[row].d_name);
+    }
+    snprintf(g_panel_dir, sizeof(g_panel_dir), "%s", into);
+    panel_read();
+    if (g_panel_list != 0) {
+        g_panel_list->rows = g_panel_n;
+        g_panel_list->selected = -1;
+        g_panel_list->scroll = 0;
+    }
+    ui_set_text(g_panel_where, g_panel_dir);
+}
+
+struct ui_view* app_sheet_file(struct app* a, const char* dir)
+{
+    snprintf(g_panel_dir, sizeof(g_panel_dir), "%s", dir != 0 ? dir : "/");
+    g_sheet_path[0] = '\0';
+    panel_read();
+
+    struct ui_view* root = app_sheet(a, 460, 320);
+    if (root == 0)
+        return 0;
+    ui_grow(ui_label(root, "Choose a file"), 0);
+    g_panel_where = ui_label(root, g_panel_dir);
+    ui_grow(g_panel_where, 0);
+
+    g_panel_list = ui_list(root, panel_row, g_panel_n, 0);
+    ui_on(g_panel_list, panel_chosen, a);
+
+    struct ui_view* row = ui_box(root, UI_STACK_H, 0, 10);
+    ui_size(row, 0, 26);
+    ui_grow(row, 0);
+    ui_spacer(row);
+    ui_grow(ui_button(row, "Cancel", sheet_cancel_clicked, a), 0);
+    return root;
+}
+
+/* --- the date panel ------------------------------------------------------- */
+
+static struct ui_view* g_date_cal;
+
+static void date_ok(struct ui_view* v, void* user)
+{
+    (void)v;
+    struct app* a = (struct app*)user;
+    /* The answer goes back the way every other sheet's does, as text: a date
+     * is a string to whatever asked for one, and inventing a second way to
+     * return an answer would mean two of them to remember. */
+    if (g_date_cal != 0)
+        snprintf(g_sheet_path, sizeof(g_sheet_path), "%04d-%02d-%02d",
+                 g_date_cal->year, g_date_cal->month + 1, g_date_cal->day);
+    app_sheet_close(a, 1);
+}
+
+struct ui_view* app_sheet_date(struct app* a, int year, int month, int day)
+{
+    g_sheet_path[0] = '\0';
+    struct ui_view* root = app_sheet(a, 260, 250);
+    if (root == 0)
+        return 0;
+    ui_grow(ui_label(root, "Choose a date"), 0);
+    g_date_cal = ui_calendar(root, year, month, day);
+    ui_grow(g_date_cal, 0);
+
+    struct ui_view* row = ui_box(root, UI_STACK_H, 0, 10);
+    ui_size(row, 0, 26);
+    ui_grow(row, 0);
+    ui_spacer(row);
+    ui_grow(ui_button(row, "Cancel", sheet_cancel_clicked, a), 0);
+    ui_grow(ui_button(row, "Choose", date_ok, a), 0);
     return root;
 }
 

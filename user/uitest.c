@@ -22,10 +22,12 @@
 #include <string.h>
 #include <ui.h>
 
+#define PAGES 5
+
 static char g_said[96] = "nothing yet";
 static struct ui_view* g_report;
 static struct ui_view* g_progress;
-static struct ui_view* g_pages[4];
+static struct ui_view* g_pages[PAGES];
 static int g_page;
 
 static void say(const char* what)
@@ -36,20 +38,20 @@ static void say(const char* what)
 
 /* --- the pages ------------------------------------------------------------- */
 
-static const char* const kPageNames[4] = {
-    "Controls", "Text", "Lists", "Layout"
+static const char* const kPageNames[PAGES] = {
+    "Controls", "Text", "Lists", "Layout", "More"
 };
 static const char* page_name(void* user, int row)
 {
     (void)user;
-    return (row >= 0 && row < 4) ? kPageNames[row] : "";
+    return (row >= 0 && row < PAGES) ? kPageNames[row] : "";
 }
 
 static void on_page(struct ui_view* v, void* user)
 {
     (void)user;
     g_page = v->on;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < PAGES; ++i) {
         if (g_pages[i] == 0)
             continue;
         if (i == g_page) g_pages[i]->flags &= ~UI_HIDDEN;
@@ -347,6 +349,130 @@ static void build_layout(struct ui_view* page)
     }
 }
 
+/* --- the third set, shown ------------------------------------------------- */
+
+static struct ui_view* g_spinner;
+static struct ui_view* g_over;
+
+static void on_level(struct ui_view* v, void* user)
+{
+    (void)user;
+    char line[96];
+    snprintf(line, sizeof(line), "level %d", v->value);
+    say(line);
+}
+
+static void on_colour(struct ui_view* v, void* user)
+{
+    (void)user;
+    char line[96];
+    snprintf(line, sizeof(line), "colour %06x", (unsigned)v->value);
+    say(line);
+}
+
+static void on_combo(struct ui_view* v, void* user)
+{
+    (void)user;
+    char line[96];
+    if (v->selected < 0)
+        snprintf(line, sizeof(line), "%s pressed", ui_text(v));
+    else
+        snprintf(line, sizeof(line), "chose item %d", v->selected);
+    say(line);
+}
+
+static void on_find(struct ui_view* v, void* user)
+{
+    (void)user;
+    char line[96];
+    snprintf(line, sizeof(line), "searching for \"%s\"", ui_text(v));
+    say(line);
+}
+
+static void on_over(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    ui_popover_show(g_over, 1);
+    say("popover shown - press outside it");
+}
+
+static void on_day(struct ui_view* v, void* user)
+{
+    (void)user;
+    char line[96];
+    snprintf(line, sizeof(line), "chose %d/%d/%d", v->day, v->month + 1,
+             v->year);
+    say(line);
+}
+
+/* A little tree for the browser: three groups, each with a few members. */
+static int more_cols(void* user, int column, const int* chosen)
+{
+    (void)user;
+    if (column == 0) return 3;
+    if (column == 1) return chosen[0] >= 0 ? 4 : 0;
+    return chosen[1] >= 0 ? 2 : 0;
+}
+
+static const char* more_coltext(void* user, int column, int row,
+                                const int* chosen)
+{
+    (void)user;
+    static const char* const kTop[3] = { "Fruit", "Trees", "Birds" };
+    static char text[40];
+    if (column == 0)
+        return (row >= 0 && row < 3) ? kTop[row] : "";
+    if (column == 1) {
+        snprintf(text, sizeof(text), "%s %d",
+                 chosen[0] >= 0 ? kTop[chosen[0]] : "?", row + 1);
+        return text;
+    }
+    snprintf(text, sizeof(text), "detail %d", row + 1);
+    return text;
+}
+
+static int on_tick(struct app* app)
+{
+    (void)app;
+    /* Only when the page showing it is the one on screen: a spinner turning
+     * behind four hidden pages is a repaint per tick for nothing. */
+    if (g_page != 4 || g_spinner == 0)
+        return 0;
+    ui_spin(g_spinner);
+    return 1;
+}
+
+static void build_more(struct ui_view* page)
+{
+    struct ui_view* row = ui_box(page, UI_STACK_H, 0, 10);
+    ui_size(row, 0, 26); ui_grow(row, 0);
+    ui_on(ui_search(row, "Search"), on_find, 0);
+    ui_grow(ui_secure(row), 0);
+    ui_on(ui_combo(row, "Send", size_row, 4, 0), on_combo, 0);
+
+    struct ui_view* row2 = ui_box(page, UI_STACK_H, 0, 12);
+    ui_size(row2, 0, 26); ui_grow(row2, 0);
+    ui_on(ui_colour(row2, 0x2C6BED), on_colour, 0);
+    ui_on(ui_level(row2, 7, 10, 0), on_level, 0);       /* continuous */
+    ui_on(ui_level(row2, 3, 5, 5), on_level, 0);        /* discrete */
+    g_spinner = ui_spinner(row2);
+    ui_grow(g_spinner, 0);
+    struct ui_view* over_button = ui_button(row2, "Popover", on_over, 0);
+    ui_grow(over_button, 0);
+    ui_spacer(row2);
+
+    /* The popover hangs off the button and takes no room until it is shown. */
+    g_over = ui_popover(page, over_button);
+    ui_size(g_over, 220, 90);
+    ui_label(g_over, "Transient content,");
+    ui_label(g_over, "beside what raised it.");
+
+    struct ui_view* split = ui_split(page, UI_STACK_H, 330);
+    ui_browser(split, 3, more_cols, more_coltext, 0);
+    struct ui_view* right = ui_box(split, UI_STACK_V, 8, 4);
+    ui_on(ui_calendar(right, 2026, 7, 20), on_day, 0);
+}
+
 int main(int argc, char** argv)
 {
     static struct app a;
@@ -361,12 +487,12 @@ int main(int argc, char** argv)
     ui_on(bar, on_menu, 0);
     ui_grow(bar, 0);
 
-    struct ui_view* chooser = ui_segmented(root, page_name, 4, 0);
+    struct ui_view* chooser = ui_segmented(root, page_name, PAGES, 0);
     ui_on(chooser, on_page, &a);
     ui_size(chooser, 0, 26);
     ui_grow(chooser, 0);
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < PAGES; ++i) {
         g_pages[i] = ui_box(root, UI_STACK_V, 14, 8);
         if (i != 0)
             g_pages[i]->flags |= UI_HIDDEN;
@@ -375,11 +501,14 @@ int main(int argc, char** argv)
     build_text(g_pages[1]);
     build_lists(g_pages[2]);
     build_layout(g_pages[3]);
+    build_more(g_pages[4]);
 
     g_report = ui_label(root, g_said);
     ui_size(g_report, 0, 22);
     ui_grow(g_report, 0);
 
+    a.tick_ms = 90;             /* the spinner has to turn to mean anything */
+    a.tick = on_tick;
     a.title = "Elements";
     a.width = 700; a.height = 520;
     a.min_width = 560; a.min_height = 420;

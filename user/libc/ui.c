@@ -8,6 +8,7 @@
 
 #include <ui.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +33,9 @@ static struct ui_view* g_pressed;
 /* The view whose drop-down is showing. There is at most one: a second menu
  * opening closes the first, which is what a menu bar does. */
 static struct ui_view* g_dropped;
+/* The popover that is showing. One at a time, like the drop-downs: a second
+ * one over the first is not something a person can answer. */
+static struct ui_view* g_popover;
 
 void ui_reset(void)
 {
@@ -48,7 +52,7 @@ static int dropdown_box(struct ui_view* v, int* x, int* y, int* w, int* n)
 {
     if (v == 0)
         return 0;
-    if (v->kind == UI_POPUP && v->open) {
+    if ((v->kind == UI_POPUP || v->kind == UI_COMBO) && v->open) {
         *x = v->frame.x; *y = v->frame.y + v->frame.h;
         *w = v->frame.w; *n = v->rows;
         return 1;
@@ -449,6 +453,146 @@ struct ui_view* ui_split(struct ui_view* parent, int layout, int at)
     return v;
 }
 
+/* --- the third set -------------------------------------------------------- */
+
+struct ui_view* ui_secure(struct ui_view* parent)
+{
+    struct ui_view* v = ui_field(parent, "");
+    if (v != 0) v->kind = UI_SECURE;
+    return v;
+}
+
+struct ui_view* ui_search(struct ui_view* parent, const char* placeholder)
+{
+    struct ui_view* v = ui_field(parent, "");
+    if (v == 0) return 0;
+    v->kind = UI_SEARCH;
+    /* The placeholder lives where a label's text would: it is drawn when the
+     * field is empty and is never part of what the field contains. */
+    snprintf(v->col_title[0], sizeof(v->col_title[0]), "%s",
+             placeholder != 0 ? placeholder : "Search");
+    return v;
+}
+
+struct ui_view* ui_combo(struct ui_view* parent, const char* label,
+                         ui_row_text items, int count, void* user)
+{
+    struct ui_view* v = alloc_view(parent, UI_COMBO);
+    if (v == 0) return 0;
+    set_text(v, label);
+    v->row_text = items;
+    v->rows = count;
+    v->user = user;
+    v->open = 0;
+    v->selected = -1;
+    v->want_h = 26;
+    v->want_w = (int)strlen(v->text) * WG_GLYPH_W + 56;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_colour(struct ui_view* parent, uint32_t rgb)
+{
+    struct ui_view* v = alloc_view(parent, UI_COLOUR);
+    if (v == 0) return 0;
+    v->value = (int)(rgb & 0xFFFFFF);
+    v->want_h = 24;
+    v->want_w = 54;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_level(struct ui_view* parent, int value, int max,
+                         int segments)
+{
+    struct ui_view* v = alloc_view(parent, UI_LEVEL);
+    if (v == 0) return 0;
+    v->value = value;
+    v->max = max > 0 ? max : 100;
+    v->on = segments > 0 ? segments : 0;    /* 0 means one continuous bar */
+    v->want_h = 14;
+    v->want_w = 140;
+    return v;
+}
+
+struct ui_view* ui_spinner(struct ui_view* parent)
+{
+    struct ui_view* v = alloc_view(parent, UI_SPINNER);
+    if (v == 0) return 0;
+    v->want_h = 20;
+    v->want_w = 20;
+    v->max = 12;                /* twelve spokes, one lit at a time */
+    return v;
+}
+
+void ui_spin(struct ui_view* v)
+{
+    if (v != 0 && v->kind == UI_SPINNER)
+        v->value = (v->value + 1) % (v->max > 0 ? v->max : 12);
+}
+
+struct ui_view* ui_popover(struct ui_view* parent, struct ui_view* anchor)
+{
+    struct ui_view* v = ui_box(parent, UI_STACK_V, 10, 6);
+    if (v == 0) return 0;
+    v->kind = UI_POPOVER;
+    v->anchor = anchor;
+    v->flags |= UI_HIDDEN;      /* until something asks for it */
+    v->grow = 0;
+    v->want_w = 200;
+    v->want_h = 120;
+    return v;
+}
+
+void ui_popover_show(struct ui_view* v, int shown)
+{
+    if (v == 0 || v->kind != UI_POPOVER)
+        return;
+    if (shown) {
+        if (g_popover != 0 && g_popover != v)
+            g_popover->flags |= UI_HIDDEN;
+        v->flags &= ~UI_HIDDEN;
+        g_popover = v;
+    } else {
+        v->flags |= UI_HIDDEN;
+        if (g_popover == v)
+            g_popover = 0;
+    }
+}
+
+struct ui_view* ui_browser(struct ui_view* parent, int columns,
+                           ui_col_count count, ui_col_text text, void* user)
+{
+    struct ui_view* v = alloc_view(parent, UI_BROWSER);
+    if (v == 0) return 0;
+    if (columns < 1) columns = 1;
+    if (columns > 4) columns = 4;
+    v->cols = columns;
+    v->col_count = count;
+    v->col_text = text;
+    v->user = user;
+    v->grow = 1;
+    v->row_h = WG_GLYPH_H + 4;
+    for (int i = 0; i < 4; ++i)
+        v->col_sel[i] = -1;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
+struct ui_view* ui_calendar(struct ui_view* parent, int year, int month,
+                            int day)
+{
+    struct ui_view* v = alloc_view(parent, UI_CALENDAR);
+    if (v == 0) return 0;
+    v->year = year;
+    v->month = month;
+    v->day = day;
+    v->want_w = 210;
+    v->want_h = 170;
+    v->flags |= UI_FOCUSABLE;
+    return v;
+}
+
 struct ui_view* ui_size(struct ui_view* v, int w, int h)
 {
     if (v != 0) { v->want_w = w; v->want_h = h; }
@@ -558,9 +702,25 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
         return;
     }
 
+    /* Popovers are placed against their anchor rather than stacked, so they
+     * are laid out after the others and take none of the room. */
+    for (struct ui_view* c = v->child; c != 0; c = c->next) {
+        if (c->kind != UI_POPOVER || (c->flags & UI_HIDDEN) != 0)
+            continue;
+        const struct ui_view* at = c->anchor != 0 ? c->anchor : v;
+        struct ui_rect r = { at->frame.x, at->frame.y + at->frame.h + 6,
+                             c->want_w, c->want_h };
+        /* Kept inside the window: a popover that hangs off the edge is a
+         * popover with its content cut off. */
+        if (r.x + r.w > into.x + into.w) r.x = into.x + into.w - r.w;
+        if (r.x < into.x) r.x = into.x;
+        if (r.y + r.h > into.y + into.h) r.y = at->frame.y - r.h - 6;
+        ui_layout(c, r);
+    }
+
     int visible = 0, fixed = 0, weight = 0;
     for (struct ui_view* c = v->child; c != 0; c = c->next) {
-        if ((c->flags & UI_HIDDEN) != 0)
+        if ((c->flags & UI_HIDDEN) != 0 || c->kind == UI_POPOVER)
             continue;
         ++visible;
         fixed += horizontal ? c->want_w : c->want_h;
@@ -577,7 +737,7 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
     int at = horizontal ? inner.x : inner.y;
     int given = 0, seen = 0;
     for (struct ui_view* c = v->child; c != 0; c = c->next) {
-        if ((c->flags & UI_HIDDEN) != 0)
+        if ((c->flags & UI_HIDDEN) != 0 || c->kind == UI_POPOVER)
             continue;
         ++seen;
         int extra = 0;
@@ -638,6 +798,37 @@ static struct ui_view* hit(struct ui_view* v, int x, int y)
             return deeper;
     }
     return v->kind == UI_BOX ? 0 : v;
+}
+
+/* --- dates, for the calendar ----------------------------------------------
+ *
+ * The weekday is asked of the library rather than computed: timegm turns a
+ * broken-down date back into a time_t and gmtime_r fills in tm_wday on the way
+ * out, which is shorter than Zeller and impossible to get wrong by one. Noon
+ * rather than midnight so no arithmetic can land the moment on the day before.
+ */
+static int ui_days_in(int year, int month)
+{
+    static const int kLength[12] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+    if (month < 0 || month > 11)
+        return 30;
+    const int leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    return (month == 1 && leap) ? 29 : kLength[month];
+}
+
+static int ui_first_weekday(int year, int month)
+{
+    struct tm t;
+    memset(&t, 0, sizeof(t));
+    t.tm_year = year - 1900;
+    t.tm_mon = month;
+    t.tm_mday = 1;
+    t.tm_hour = 12;
+    const time_t when = timegm(&t);
+    struct tm back;
+    if (gmtime_r(&when, &back) == 0)
+        return 0;
+    return back.tm_wday;
 }
 
 /* How far along a line the caret sits.
@@ -710,6 +901,15 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         return 0;
 
     if (e->type == WIN_EVENT_MOUSE_DOWN) {
+        /* A popover answers before anything beneath it, and a press outside it
+         * puts it away - which is what "transient" means. */
+        if (g_popover != 0 && (g_popover->flags & UI_HIDDEN) == 0) {
+            struct ui_view* inside = hit(g_popover, e->x, e->y);
+            if (inside == 0 && !in_rect(&g_popover->frame, e->x, e->y)) {
+                ui_popover_show(g_popover, 0);
+                return 1;
+            }
+        }
         /* An open drop-down answers first, wherever it is over. It is drawn
          * above its neighbours, so it has to be hit above them too - otherwise
          * choosing an item activates whatever the item happens to cover. */
@@ -721,7 +921,7 @@ int ui_event(struct ui_view* root, const struct win_event* e)
                 e->x >= dx && e->x < dx + dw &&
                 e->y >= dy && e->y < dy + dn * rh) {
                 const int item = (e->y - dy) / rh;
-                if (d->kind == UI_POPUP) {
+                if (d->kind == UI_POPUP || d->kind == UI_COMBO) {
                     d->selected = item;
                     d->open = 0;
                 } else {
@@ -738,7 +938,8 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             /* Anywhere else shuts it, and the press goes on to whatever it
              * landed on - which is what makes a menu dismiss without eating
              * the click that dismissed it. */
-            if (d->kind == UI_POPUP) d->open = 0; else d->open = -1;
+            if (d->kind == UI_POPUP || d->kind == UI_COMBO) d->open = 0;
+            else                                            d->open = -1;
             g_dropped = 0;
         }
         struct ui_view* v = hit(root, e->x, e->y);
@@ -870,7 +1071,64 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             /* Only the divider itself: the panes are children and were hit
              * first, so reaching here means the gap between them. */
             g_pressed = v;
-        } else if (v->kind == UI_FIELD) {
+        } else if (v->kind == UI_COMBO) {
+            /* The arrow end opens the menu; the rest is the button. Split at
+             * the arrow's width so a press near the edge does what it looks
+             * like it will do. */
+            if (e->x >= v->frame.x + v->frame.w - 24) {
+                v->open = !v->open;
+                g_dropped = v->open ? v : 0;
+            } else {
+                v->selected = -1;       /* -1: the button, not an item */
+                if (v->action) v->action(v, v->user);
+            }
+        } else if (v->kind == UI_COLOUR) {
+            v->open = !v->open;
+        } else if (v->kind == UI_BROWSER) {
+            const int each = v->cols > 0 ? v->frame.w / v->cols : v->frame.w;
+            const int col = each > 0 ? (e->x - v->frame.x) / each : 0;
+            if (col >= 0 && col < v->cols) {
+                const int row = (e->y - v->frame.y) / v->row_h;
+                const int n = v->col_count != 0
+                            ? v->col_count(v->user, col, v->col_sel) : 0;
+                if (row >= 0 && row < n) {
+                    v->col_sel[col] = row;
+                    /* Everything to the right described the old choice and
+                     * describes nothing now. Clearing it is what makes the
+                     * columns a path rather than four independent lists. */
+                    for (int k = col + 1; k < 4; ++k)
+                        v->col_sel[k] = -1;
+                    v->selected = col;
+                    if (v->action) v->action(v, v->user);
+                }
+            }
+        } else if (v->kind == UI_CALENDAR) {
+            /* Which cell, in the grid drawn below the weekday initials. */
+            const int cw = v->frame.w / 7;
+            const int ch = (v->frame.h - WG_GLYPH_H - 22) / 6;
+            if (cw > 0 && ch > 0) {
+                const int col = (e->x - v->frame.x) / cw;
+                const int row = (e->y - v->frame.y - WG_GLYPH_H - 22) / ch;
+                if (col >= 0 && col < 7 && row >= 0 && row < 6) {
+                    const int first = ui_first_weekday(v->year, v->month);
+                    const int day = row * 7 + col - first + 1;
+                    if (day >= 1 && day <= ui_days_in(v->year, v->month)) {
+                        v->day = day;
+                        if (v->action) v->action(v, v->user);
+                    }
+                }
+            }
+        } else if (v->kind == UI_FIELD || v->kind == UI_SECURE ||
+                   v->kind == UI_SEARCH) {
+            /* The cross at the end of a search field empties it, and says so,
+             * because whatever was filtered has to be put back. */
+            if (v->kind == UI_SEARCH && v->text[0] != '\0' &&
+                e->x >= v->frame.x + v->frame.w - 22) {
+                v->text[0] = '\0';
+                v->caret = 0;
+                if (v->action) v->action(v, v->user);
+                return 1;
+            }
             /* The caret lands where it was clicked, as near as the glyph width
              * allows. */
             /* Measured the same way it is drawn: walk the string until the
@@ -929,8 +1187,16 @@ int ui_event(struct ui_view* root, const struct win_event* e)
 
     if (e->type == WIN_EVENT_KEY && g_focus != 0) {
         struct ui_view* v = g_focus;
-        if (v->kind == UI_FIELD)
-            return field_key(v, e->key);
+        if (v->kind == UI_FIELD || v->kind == UI_SECURE ||
+            v->kind == UI_SEARCH) {
+            const int changed = field_key(v, e->key);
+            /* A search reports every keystroke: filtering as you type is the
+             * whole difference between it and a field you press Return in. */
+            if (changed && v->kind == UI_SEARCH && v->action != 0 &&
+                e->key != '\n' && e->key != '\r')
+                v->action(v, v->user);
+            return changed;
+        }
         if (v->kind == UI_TEXT && v->buffer != 0) {
             const int n = (int)strlen(v->buffer);
             if (v->caret > n) v->caret = n;
@@ -1056,6 +1322,8 @@ static void draw_overlay(void)
     draw_dropdown(v, x, y, w,
                   v->kind == UI_MENUBAR ? (ui_row_text)v->icon_of : v->row_text,
                   n, v->kind == UI_POPUP ? v->selected : -1);
+    if (g_popover != 0 && (g_popover->flags & UI_HIDDEN) == 0)
+        ui_draw(g_popover);
 }
 
 /* One drop-down: a popup's list of choices, or a menu bar's items. They are the
@@ -1198,6 +1466,179 @@ void ui_draw(struct ui_view* v)
         if (v->draw != 0)
             v->draw(v, v->user);
         break;
+
+    case UI_SECURE: {
+        /* Bullets, one per character. The length shows, which is what a person
+         * needs to see that a keystroke arrived; the characters do not. */
+        char dots[UI_TEXT_MAX];
+        int n = (int)strlen(v->text);
+        if (n > (int)sizeof(dots) - 1) n = (int)sizeof(dots) - 1;
+        for (int i = 0; i < n; ++i)
+            dots[i] = '*';
+        dots[n] = '\0';
+        wg_field(f.x, f.y, f.w, f.h, dots, focused);
+        if (focused) {
+            const int cx = f.x + 8 + caret_x(dots, v->caret);
+            if (cx < f.x + f.w - 4)
+                wg_fill(cx, f.y + 5, 1, f.h - 10, wg_ink_colour());
+        }
+        break;
+    }
+
+    case UI_SEARCH: {
+        const int empty = v->text[0] == '\0';
+        wg_field(f.x, f.y, f.w, f.h, empty ? v->col_title[0] : v->text,
+                 focused);
+        /* A magnifier: a ring and a handle, small enough to read as a hint
+         * rather than as a control. */
+        const int gx = f.x + 8, gy = f.y + f.h / 2;
+        wg_fill(gx + 1, gy - 4, 5, 1, WG_DIM);
+        wg_fill(gx + 1, gy + 2, 5, 1, WG_DIM);
+        wg_fill(gx, gy - 3, 1, 5, WG_DIM);
+        wg_fill(gx + 6, gy - 3, 1, 5, WG_DIM);
+        wg_fill(gx + 7, gy + 3, 3, 1, WG_DIM);
+        if (!empty) {
+            /* And a cross to empty it, only when there is something to empty:
+             * a control that does nothing is one to wonder about. */
+            const int cx2 = f.x + f.w - 16, cy2 = f.y + f.h / 2;
+            for (int i = -3; i <= 3; ++i) {
+                wg_fill(cx2 + i, cy2 + i, 1, 1, WG_DIM);
+                wg_fill(cx2 + i, cy2 - i, 1, 1, WG_DIM);
+            }
+        }
+        if (focused && !empty) {
+            const int cx3 = f.x + 22 + caret_x(v->text, v->caret);
+            if (cx3 < f.x + f.w - 20)
+                wg_fill(cx3, f.y + 5, 1, f.h - 10, wg_ink_colour());
+        }
+        break;
+    }
+
+    case UI_COMBO: {
+        wg_button(f.x, f.y, f.w, f.h, "", v == g_pressed);
+        wg_text_clipped(f.x + 12, f.y + (f.h - WG_GLYPH_H) / 2, v->text,
+                        wg_ink_colour(), f.w - 40);
+        /* A line and an arrow at the end, so the two halves read as two
+         * things: the button, and the choices behind it. */
+        wg_fill(f.x + f.w - 24, f.y + 4, 1, f.h - 8, WG_DIM);
+        for (int i = 0; i < 4; ++i)
+            wg_fill(f.x + f.w - 16 + i, f.y + f.h / 2 - 2 + i, 8 - 2 * i, 1,
+                    wg_ink_colour());
+        break;
+    }
+
+    case UI_COLOUR: {
+        /* The well: the colour itself, in a frame, so a colour close to the
+         * window's own is still visibly a swatch and not a gap. */
+        wg_fill(f.x, f.y, f.w, f.h, 0xFF000000u | (uint32_t)v->value);
+        wg_glass_outline(f.x, f.y, f.w, f.h, 4, 1,
+                         wg_glass_on() ? 0x8CFFFFFFu : 0x40000000u);
+        if (focused)
+            wg_fill(f.x, f.y + f.h + 1, f.w, 1, WG_ACCENT);
+        break;
+    }
+
+    case UI_LEVEL: {
+        if (v->on > 0) {
+            /* Discrete: blocks, of which some are lit. A rating out of five,
+             * a signal out of four - things that are counted, not measured. */
+            const int gap = 3;
+            const int each = (f.w - gap * (v->on - 1)) / v->on;
+            const int lit = v->max > 0 ? (v->value * v->on + v->max - 1) / v->max
+                                       : 0;
+            for (int i = 0; i < v->on; ++i)
+                wg_fill(f.x + i * (each + gap), f.y, each, f.h,
+                        i < lit ? WG_ACCENT
+                                : (wg_glass_on() ? 0x40FFFFFFu : WG_SHADOW));
+        } else {
+            wg_glass_fill(f.x, f.y, f.w, f.h, f.h / 2,
+                          wg_glass_on() ? 0x2EFFFFFFu : WG_PAPER);
+            int fill = v->max > 0 ? (f.w - 2) * v->value / v->max : 0;
+            if (fill < 0) fill = 0;
+            if (fill > f.w - 2) fill = f.w - 2;
+            /* Red when nearly empty rather than nearly full: this is a level,
+             * and the alarming end of a level is the bottom. */
+            wg_fill(f.x + 1, f.y + 1, fill, f.h - 2,
+                    (v->max > 0 && v->value * 5 < v->max) ? 0xD2413Au
+                                                          : WG_ACCENT);
+        }
+        break;
+    }
+
+    case UI_SPINNER: {
+        /* Twelve spokes around a centre, fading behind the lit one. Motion is
+         * the message: a bar would claim to know how far along it is. */
+        const int cx4 = f.x + f.w / 2, cy4 = f.y + f.h / 2;
+        const int r = (f.w < f.h ? f.w : f.h) / 2 - 2;
+        static const int kDx[12] = { 0, 1, 2, 2, 2, 1, 0, -1, -2, -2, -2, -1 };
+        static const int kDy[12] = { -2, -2, -1, 0, 1, 2, 2, 2, 1, 0, -1, -2 };
+        for (int i = 0; i < 12; ++i) {
+            const int age = (i - v->value + 12) % 12;
+            const unsigned a = age < 6 ? (unsigned)(0xF0 - age * 0x28) : 0x18;
+            const int px2 = cx4 + kDx[i] * r / 2;
+            const int py2 = cy4 + kDy[i] * r / 2;
+            wg_glass_fill(px2 - 1, py2 - 1, 3, 3, 1,
+                          (a << 24) | (wg_ink_colour() & 0xFFFFFF));
+        }
+        break;
+    }
+
+    case UI_POPOVER:
+        /* A panel with a shadow, over whatever it was raised beside. Its
+         * children are drawn by the walk below, as any box's are. */
+        wg_glass_fill(f.x, f.y, f.w, f.h, 10,
+                      wg_glass_on() ? 0x99FFFFFFu : wg_base_colour());
+        wg_glass_outline(f.x, f.y, f.w, f.h, 10, 1,
+                         wg_glass_on() ? 0x66FFFFFFu : 0x33000000u);
+        break;
+
+    case UI_BROWSER: {
+        const int each = v->cols > 0 ? f.w / v->cols : f.w;
+        for (int c = 0; c < v->cols; ++c) {
+            const int x = f.x + c * each;
+            content_surface(&(struct ui_rect){ x, f.y, each - 2, f.h });
+            const int n = v->col_count != 0
+                        ? v->col_count(v->user, c, v->col_sel) : 0;
+            const int page = f.h / v->row_h;
+            for (int i = 0; i < n && i < page; ++i) {
+                const int y = f.y + i * v->row_h;
+                if (i == v->col_sel[c])
+                    wg_row_select(x + 2, y, each - 6, v->row_h);
+                const char* t = v->col_text != 0
+                    ? v->col_text(v->user, c, i, v->col_sel) : "";
+                wg_text_clipped(x + 8, y + 2, t != 0 ? t : "",
+                                wg_ink_colour(), each - 20);
+            }
+        }
+        break;
+    }
+
+    case UI_CALENDAR: {
+        static const char* const kDays[7] = { "S","M","T","W","T","F","S" };
+        const int cw = f.w / 7;
+        for (int d = 0; d < 7; ++d)
+            wg_text(f.x + d * cw + (cw - WG_GLYPH_W) / 2, f.y + 2, kDays[d],
+                    WG_DIM);
+        const int top = f.y + WG_GLYPH_H + 22;
+        const int ch = (f.h - WG_GLYPH_H - 22) / 6;
+        const int first = ui_first_weekday(v->year, v->month);
+        const int count = ui_days_in(v->year, v->month);
+        for (int day = 1; day <= count; ++day) {
+            const int slot = first + day - 1;
+            const int col = slot % 7, row = slot / 7;
+            if (row >= 6)
+                break;
+            const int x = f.x + col * cw, y = top + row * ch;
+            if (day == v->day)
+                wg_row_select(x + 1, y, cw - 2, ch - 1);
+            char num[4];
+            snprintf(num, sizeof(num), "%d", day);
+            const int tw = (int)strlen(num) * WG_GLYPH_W;
+            wg_text(x + (cw - tw) / 2, y + (ch - WG_GLYPH_H) / 2, num,
+                    wg_ink_colour());
+        }
+        break;
+    }
 
     case UI_SEPARATOR:
         /* A hairline down the middle of the room it was given, so the space
@@ -1452,7 +1893,8 @@ void ui_draw(struct ui_view* v)
     }
 
     for (struct ui_view* c = v->child; c != 0; c = c->next)
-        ui_draw(c);
+        if (c->kind != UI_POPOVER)
+            ui_draw(c);
 
     /* The open drop-down is not drawn here.
      *
