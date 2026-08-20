@@ -18,7 +18,8 @@
  * itself.
  */
 
-#include <dialog.h>
+#include <app.h>
+#include <ui.h>
 #include <proc.h>
 #include <wproto.h>
 #include <signal.h>
@@ -33,20 +34,14 @@
 #define ROW_H   16
 #define MAX_P   96
 
-static uint32_t* g_px;
-static unsigned  g_w = 520, g_h = 400;
-
 static struct proc_info g_procs[MAX_P];
 static int g_n;
 static uint64_t g_last_ticks[MAX_P];
 static uint32_t g_last_pid[MAX_P];
 static uint64_t g_delta[MAX_P];
 static uint64_t g_delta_total;
-static int g_sel = -1;
-static int g_scroll;
 static char g_note[96] = "right-click a task for actions";
 
-static int g_bar_drag;
 
 static const char* state_name(uint32_t s)
 {
@@ -82,194 +77,134 @@ static void refresh(void)
     }
 }
 
-static int rows_visible(void)
+/* --- the interface ---------------------------------------------------------
+ *
+ * A table. The columns were six calls to wg_text at hand-counted offsets and a
+ * scrollbar this file drove itself; they are declared once now, and a cell is
+ * asked for by row and column.
+ */
+
+static struct app g_app;
+static struct ui_view* g_table;
+static struct ui_view* g_count;
+static char g_count_text[32];
+
+static const char* task_cell(void* user, int row, int col)
 {
-    const int n = ((int)g_h - HEAD_H - 20) / ROW_H;
-    return n > 0 ? n : 1;
-}
-
-static int bar_x(void) { return (int)g_w - 6 - WG_SCROLL_W; }
-static int list_h(void) { return (int)g_h - HEAD_H - 20; }
-
-static void scroll_to(int first)
-{
-    const int most = g_n - rows_visible();
-    if (first > most) first = most;
-    if (first < 0) first = 0;
-    g_scroll = first;
-}
-
-static void draw(void)
-{
-    wg_theme();
-    wg_glass_clear();
-
-    char line[96];
-    snprintf(line, sizeof(line), "%d tasks", g_n);
-    wg_text(10, 8, line, WG_DIM);
-
-    const int top = HEAD_H;
-    wg_text(10, top - 16, "pid", WG_DIM);
-    wg_text(56, top - 16, "name", WG_DIM);
-    wg_text(180, top - 16, "state", WG_DIM);
-    wg_text(250, top - 16, "cpu", WG_DIM);
-    wg_text(320, top - 16, "memory", WG_DIM);
-    wg_text(420, top - 16, "uid", WG_DIM);
-
-    wg_fill(4, top, (int)g_w - 8, list_h(), wg_body_colour());
-    wg_bevel(4, top, (int)g_w - 8, list_h(), 0);
-    wg_scrollbar_v(bar_x(), top, list_h(), g_scroll, rows_visible(),
-                   g_n > 0 ? g_n : 1);
-
-    const int rows = rows_visible();
-    for (int r = 0; r < rows; ++r) {
-        const int i = g_scroll + r;
-        if (i >= g_n)
-            break;
-        const int y = top + 2 + r * ROW_H;
-        if (i == g_sel)
-            wg_row_select(6, y, (int)g_w - 12, ROW_H);
-
-        snprintf(line, sizeof(line), "%u", g_procs[i].pid);
-        wg_text(10, y, line, WG_INK);
-        /* A thread is shown indented under its group, so the shape of a process
-         * with threads is visible at a glance. */
-        const int thread = (g_procs[i].tgid != 0 &&
-                            g_procs[i].tgid != g_procs[i].pid);
-        wg_text_clipped(56 + (thread ? 10 : 0), y, g_procs[i].name,
-                        thread ? WG_DIM : WG_INK, 120);
-        wg_text(180, y, state_name(g_procs[i].state), WG_INK);
-
+    (void)user;
+    static char text[64];
+    if (row < 0 || row >= g_n)
+        return "";
+    const struct proc_info* p = &g_procs[row];
+    switch (col) {
+    case 0:
+        snprintf(text, sizeof(text), "%u", p->pid);
+        return text;
+    case 1:
+        /* A thread is shown indented under its group, so the shape of a
+         * process with threads is visible at a glance. */
+        if (p->tgid != 0 && p->tgid != p->pid)
+            snprintf(text, sizeof(text), "  %s", p->name);
+        else
+            snprintf(text, sizeof(text), "%s", p->name);
+        return text;
+    case 2:
+        return state_name(p->state);
+    case 3: {
         const unsigned pct = g_delta_total > 0
-            ? (unsigned)(g_delta[i] * 100 / g_delta_total) : 0;
-        snprintf(line, sizeof(line), "%u%%", pct);
-        wg_text(250, y, line, WG_INK);
-        /* A short bar beside the number: the eye finds the busy row faster
-         * than it reads six numbers. */
-        if (pct > 0)
-            wg_fill(286, y + 5, (int)(pct * 28 / 100) + 1, 6, WG_ACCENT);
-
-        snprintf(line, sizeof(line), "%llu K",
-                 (unsigned long long)(g_procs[i].bytes / 1024));
-        wg_text(320, y, line, WG_INK);
-        snprintf(line, sizeof(line), "%u", g_procs[i].uid);
-        wg_text(420, y, line, WG_INK);
+            ? (unsigned)(g_delta[row] * 100 / g_delta_total) : 0;
+        snprintf(text, sizeof(text), "%u%%", pct);
+        return text;
     }
+    case 4:
+        snprintf(text, sizeof(text), "%llu K",
+                 (unsigned long long)(p->bytes / 1024));
+        return text;
+    default:
+        snprintf(text, sizeof(text), "%u", p->uid);
+        return text;
+    }
+}
 
-    wg_fill(0, (int)g_h - 20, (int)g_w, 20, WG_FACE);
-    wg_text_clipped(8, (int)g_h - 18, g_note, WG_DIM, (int)g_w - 16);
+static void sync_table(void)
+{
+    g_table->rows = g_n;
+    snprintf(g_count_text, sizeof(g_count_text), "%d tasks", g_n);
+    ui_set_text(g_count, g_count_text);
+}
+
+static int on_tick(struct app* a)
+{
+    (void)a;
+    refresh();
+    sync_table();
+    return 1;
+}
+
+static void end_task(struct app* a)
+{
+    const int row = g_table->selected;
+    if (row < 0 || row >= g_n)
+        return;
+    const uint32_t pid = g_procs[row].pid;
+    if (kill((int)pid, SIGTERM) == 0)
+        snprintf(g_note, sizeof(g_note), "asked %u to stop", pid);
+    else
+        snprintf(g_note, sizeof(g_note), "could not signal %u", pid);
+    refresh();
+    sync_table();
+    (void)a;
 }
 
 static const char* const kMenu[] = { "End task", "-", "Refresh now" };
 
+static int on_menu(struct app* a, int pick)
+{
+    if (pick == 0)      end_task(a);
+    else if (pick == 2) { refresh(); sync_table(); }
+    return 1;
+}
+
+static int on_event(struct app* a, const struct win_event* e)
+{
+    (void)a;
+    /* The table has the arrows and the selection; this is only the shortcut
+     * that the menu also offers. */
+    if (e->type == WIN_EVENT_KEY && e->key == 'k') {
+        end_task(a);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
-    const int wx = argc > 1 ? atoi_simple(argv[1]) : 180;
-    const int wy = argc > 2 ? atoi_simple(argv[2]) : 140;
-    if (wg_font() != 0)
-        return 1;
-    const int id = win_create(wx, wy, g_w, g_h, "Tasks");
-    /* Its pixels carry alpha, so the glass reaches into it. */
-    if (id >= 0)
-        win_set_alpha(id);
-    if (id < 0) {
-        printf("taskman: no window server\n");
-        return 1;
-    }
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    win_set_min_size(id, 460, 260);
-    wg_target(g_px, g_w, g_h);
+    struct ui_view* root = ui_box(0, UI_STACK_V, 8, 6);
+    g_count = ui_label(root, "");
+    ui_grow(g_count, 0);
+
+    g_table = ui_table(root, task_cell, 0, 0);
+    ui_column(g_table, "pid", 60);
+    ui_column(g_table, "name", 140);
+    ui_column(g_table, "state", 80);
+    ui_column(g_table, "cpu", 60);
+    ui_column(g_table, "memory", 90);
+    ui_column(g_table, "uid", 50);
 
     refresh();
-    draw();
-    win_present(id);
+    sync_table();
 
-    unsigned since = 0;
-    for (;;) {
-        struct win_event e;
-        while (win_poll(id, &e)) {
-            if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
-
-            if (menu_active() && e.type != WIN_EVENT_RESIZE) {
-                const int pick = menu_event(&e);
-                if (pick == 0 && g_sel >= 0 && g_sel < g_n) {
-                    const uint32_t pid = g_procs[g_sel].pid;
-                    if (kill((int)pid, SIGTERM) == 0)
-                        snprintf(g_note, sizeof(g_note), "asked %u to stop", pid);
-                    else
-                        snprintf(g_note, sizeof(g_note), "could not signal %u", pid);
-                    refresh();
-                } else if (pick == 2) {
-                    refresh();
-                }
-                draw();
-                menu_draw();
-                win_present(id);
-                continue;
-            }
-
-            if (e.type == WIN_EVENT_RESIZE) {
-                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
-                g_px = win_map(id);
-                if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
-            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                if (e.x >= bar_x() && e.y >= HEAD_H) {
-                    if (wg_scroll_on_thumb_v(e.y, HEAD_H, list_h(), g_scroll,
-                                             rows_visible(), g_n > 0 ? g_n : 1))
-                        g_bar_drag = 1;
-                    else
-                        scroll_to(wg_scroll_hit_v(e.x, e.y, bar_x(), HEAD_H,
-                            list_h(), g_scroll, rows_visible(),
-                            g_n > 0 ? g_n : 1));
-                    draw(); menu_draw(); win_present(id);
-                    continue;
-                }
-                const int hit = g_scroll + (e.y - HEAD_H - 2) / ROW_H;
-                if (e.y >= HEAD_H && hit >= 0 && hit < g_n)
-                    g_sel = hit;
-                if (e.button == 2 && g_sel >= 0)
-                    menu_open(e.x, e.y, kMenu, 3);
-            } else if (e.type == WIN_EVENT_MOUSE_UP) {
-                g_bar_drag = 0;
-            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_bar_drag) {
-                scroll_to(wg_scroll_drag_v(e.y, HEAD_H, list_h(),
-                                           rows_visible(), g_n > 0 ? g_n : 1));
-            } else if (e.type == WIN_EVENT_KEY) {
-                /* Arrows move the selection and drag the view along with it,
-                 * which is what makes a long list navigable without a mouse. */
-                if (e.key == WIN_KEY_DOWN || e.key == WIN_KEY_UP) {
-                    if (e.key == WIN_KEY_DOWN && g_sel + 1 < g_n) ++g_sel;
-                    else if (e.key == WIN_KEY_UP && g_sel > 0) --g_sel;
-                    if (g_sel < g_scroll) scroll_to(g_sel);
-                    else if (g_sel >= g_scroll + rows_visible())
-                        scroll_to(g_sel - rows_visible() + 1);
-                } else if (e.key == WIN_KEY_RIGHT) {
-                    scroll_to(g_scroll + rows_visible());
-                } else if (e.key == WIN_KEY_LEFT) {
-                    scroll_to(g_scroll - rows_visible());
-                } else if (e.key == 'r') refresh();
-                else if (e.key == 'k' && g_sel >= 0 && g_sel < g_n)
-                    kill((int)g_procs[g_sel].pid, SIGTERM);
-            } else {
-                continue;
-            }
-            draw();
-            menu_draw();
-            win_present(id);
-        }
-
-        /* Twice a second: often enough to feel live, seldom enough that the
-         * monitor is not itself the busiest thing on the list. */
-        if (++since >= 33) {
-            since = 0;
-            refresh();
-            draw();
-            menu_draw();
-            win_present(id);
-        }
-        msleep(15);
-    }
+    g_app.title = "Tasks";
+    g_app.width = 560; g_app.height = 400;
+    g_app.min_width = 460; g_app.min_height = 260;
+    /* Twice a second: often enough to feel live, seldom enough that the
+     * monitor is not itself the busiest thing on the list. */
+    g_app.tick_ms = 500;
+    g_app.tick = on_tick;
+    g_app.event = on_event;
+    g_app.menu = kMenu;
+    g_app.menu_count = 3;
+    g_app.menu_pick = on_menu;
+    g_app.root = root;
+    return app_run(&g_app, argc, argv);
 }

@@ -13,6 +13,8 @@
 
 #include <audio.h>
 #include <sound.h>
+#include <app.h>
+#include <ui.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,8 +22,6 @@
 #include <widget.h>
 #include <window.h>
 
-static uint32_t* g_px;
-static unsigned  g_w = 460, g_h = 210;
 
 static struct sound* g_sound;
 static char g_path[256];
@@ -42,22 +42,9 @@ static int g_volume = 70;
 #define FEED_SAMPLES 8192
 static int16_t g_feed[FEED_SAMPLES];
 
-#define BAR_X 16
-#define BAR_Y 96
-#define BAR_H 14
 
-struct box { int x, y, w, h; };
-static struct box g_b_play = {  16, 130, 62, 24 };
-static struct box g_b_stop = {  84, 130, 62, 24 };
-static struct box g_b_vdn  = { 300, 130, 26, 24 };
-static struct box g_b_vup  = { 330, 130, 26, 24 };
 
-static int inside(const struct box* b, int x, int y)
-{
-    return x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h;
-}
 
-static int bar_w(void) { return (int)g_w - 2 * BAR_X; }
 
 static void say(const char* text)
 {
@@ -155,46 +142,6 @@ static void draw_time(char* out, int max, unsigned long frames)
     snprintf(out, (unsigned)max, "%lu:%02lu", seconds / 60, seconds % 60);
 }
 
-static void draw(void)
-{
-    wg_glass_clear();
-
-    wg_text_clipped(16, 14, g_name[0] ? g_name : "no file", WG_INK, (int)g_w - 32);
-    wg_text_clipped(16, 36, g_note, WG_DIM, (int)g_w - 32);
-
-    /* The progress bar, sunken, with the played part filled. */
-    const int bw = bar_w();
-    wg_fill(BAR_X, BAR_Y, bw, BAR_H, WG_PAPER);
-    wg_bevel(BAR_X, BAR_Y, bw, BAR_H, 0);
-    const unsigned long at = g_sound ? snd_position(g_sound) : 0;
-    if (g_total > 0 && bw > 4) {
-        long filled = (long)((double)(bw - 4) * (double)at / (double)g_total);
-        if (filled < 0) filled = 0;
-        if (filled > bw - 4) filled = bw - 4;
-        wg_fill(BAR_X + 2, BAR_Y + 2, (int)filled, BAR_H - 4, wg_sel_colour());
-    }
-
-    char left[24], right[24];
-    draw_time(left, sizeof(left), at);
-    draw_time(right, sizeof(right), g_total);
-    wg_text(BAR_X, BAR_Y + BAR_H + 6, left, WG_DIM);
-    wg_text((int)g_w - BAR_X - 8 * (int)strlen(right), BAR_Y + BAR_H + 6,
-            right, WG_DIM);
-
-    wg_button(g_b_play.x, g_b_play.y, g_b_play.w, g_b_play.h,
-              g_playing ? "Pause" : "Play", g_playing);
-    wg_button(g_b_stop.x, g_b_stop.y, g_b_stop.w, g_b_stop.h, "Stop", 0);
-
-    wg_text(190, g_b_play.y + 6, "volume", WG_DIM);
-    wg_button(g_b_vdn.x, g_b_vdn.y, g_b_vdn.w, g_b_vdn.h, "-", 0);
-    wg_button(g_b_vup.x, g_b_vup.y, g_b_vup.w, g_b_vup.h, "+", 0);
-    char vol[16];
-    snprintf(vol, sizeof(vol), "%d%%", g_volume);
-    wg_text(364, g_b_play.y + 6, vol, WG_INK);
-
-    wg_text(16, (int)g_h - 22, "space plays, arrows seek", WG_DIM);
-}
-
 /* --- seeking ---------------------------------------------------------------- */
 
 static void seek_to(unsigned long frame)
@@ -217,129 +164,148 @@ static void seek_by(long seconds)
     seek_to(at < 0 ? 0 : (unsigned long)at);
 }
 
+/* --- the interface ---------------------------------------------------------
+ *
+ * Two buttons, a stepper for the volume, and the position as a level. The bar
+ * was drawn by hand and seeked by arithmetic on its own rectangle; a level
+ * knows where it is, and the layout knows where the level is.
+ */
+
+/* Whether there is a sound device at all. A local in the old main, which is
+ * why every function that wants it had to be part of that loop. */
+static int have_audio;
+
+static struct app g_app;
+static struct ui_view* g_name_label;
+static struct ui_view* g_note_label;
+static struct ui_view* g_pos;
+static struct ui_view* g_times;
+static struct ui_view* g_play_button;
+static struct ui_view* g_vol;
+static char g_time_text[48];
+
+static void sync_state(void)
+{
+    const unsigned long at = g_sound ? snd_position(g_sound) : 0;
+    char left[24], right[24];
+    draw_time(left, sizeof(left), at);
+    draw_time(right, sizeof(right), g_total);
+    snprintf(g_time_text, sizeof(g_time_text), "%s  of  %s", left, right);
+    ui_set_text(g_times, g_time_text);
+    ui_set_text(g_name_label, g_name[0] ? g_name : "no file");
+    ui_set_text(g_note_label, g_note);
+    ui_set_text(g_play_button, g_playing ? "Pause" : "Play");
+    g_pos->max = g_total > 0 ? (int)(g_total / 1000 + 1) : 1;
+    g_pos->value = g_total > 0 ? (int)(at / 1000) : 0;
+    g_vol->value = g_volume;
+}
+
+/* Play and pause are the same button, which is why they are the same
+ * function: pausing drops what is queued rather than stopping the device, so
+ * resuming picks up where the position already is. */
+static void toggle_play(void)
+{
+    if (g_sound == 0 || !have_audio)
+        return;
+    g_playing = !g_playing;
+    if (!g_playing)
+        audio_stop();
+    say(g_playing ? "playing" : "paused");
+}
+
+static void on_play(struct ui_view* v, void* u)
+{
+    (void)v; (void)u;
+    toggle_play();
+    sync_state();
+}
+
+static void on_stop(struct ui_view* v, void* u)
+{
+    (void)v; (void)u;
+    g_playing = 0;
+    audio_stop();
+    seek_to(0);
+    say("stopped");
+    sync_state();
+}
+
+static void on_volume(struct ui_view* v, void* user)
+{
+    (void)user;
+    g_volume = v->value;
+    audio_set_volume(g_volume);
+    sync_state();
+}
+
+static int on_tick(struct app* a)
+{
+    (void)a;
+    pump();
+    sync_state();
+    return 1;
+}
+
+static int on_event(struct app* a, const struct win_event* e)
+{
+    (void)a;
+    if (e->type != WIN_EVENT_KEY)
+        return 0;
+    if (e->key == ' ')                    toggle_play();
+    else if (e->key == WIN_KEY_LEFT)      seek_by(-5);
+    else if (e->key == WIN_KEY_RIGHT)     seek_by(5);
+    else return 0;
+    sync_state();
+    return 1;
+}
+
 int main(int argc, char** argv)
 {
-    if (wg_font() != 0)
-        return 1;
+    struct ui_view* root = ui_box(0, UI_STACK_V, 16, 8);
+    g_name_label = ui_label(root, "no file");  ui_grow(g_name_label, 0);
+    g_note_label = ui_label(root, "");         ui_grow(g_note_label, 0);
+
+    g_pos = ui_level(root, 0, 1, 0);
+    ui_size(g_pos, 0, 14);
+    ui_grow(g_pos, 0);
+    g_times = ui_label(root, "");
+    ui_grow(g_times, 0);
+
+    struct ui_view* row = ui_box(root, UI_STACK_H, 0, 10);
+    ui_size(row, 0, 26);
+    ui_grow(row, 0);
+    g_play_button = ui_button(row, "Play", on_play, 0);
+    ui_grow(g_play_button, 0);
+    ui_grow(ui_button(row, "Stop", on_stop, 0), 0);
+    ui_grow(ui_label(row, "volume"), 0);
+    g_vol = ui_stepper(row, 80, 100);
+    ui_on(g_vol, on_volume, 0);
+    ui_grow(g_vol, 0);
+    ui_spacer(row);
+
+    ui_grow(ui_label(root, "space plays, arrows seek"), 0);
+    ui_spacer(root);
 
     struct audio_info info;
-    const int have_audio = (audio_info(&info) == 0 && info.present);
+    have_audio = (audio_info(&info) == 0 && info.present);
+    if (!have_audio)
+        say("no sound device");
 
-    const int id = win_create(240, 140, g_w, g_h, "Music");
-
-    /* Its pixels carry alpha, so the glass reaches into it. */
-
-    if (id >= 0)
-
-        win_set_alpha(id);
-    if (id < 0) {
-        printf("player: no window server\n");
-        return 1;
-    }
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    win_set_min_size(id, 380, 190);
-    wg_target(g_px, g_w, g_h);
-
-    if (argc > 1) {
+    if (argc > 1 && argv[1][0] != '\0' && argv[1][0] != '-') {
         open_file(argv[1]);
         if (g_sound != 0 && have_audio)
-            g_playing = 1;
+            g_playing = 1;      /* a file named on the command line plays */
     } else {
         say(snd_formats());
     }
-    if (!have_audio)
-        say("no sound device: nothing to play through");
-    g_volume = audio_volume();
+    sync_state();
 
-    draw();
-    win_present(id);
-
-    unsigned long last_shown = ~0ul;
-    for (;;) {
-        struct win_event e;
-        int dirty = 0;
-
-        while (win_poll(id, &e)) {
-            if (e.type == WIN_EVENT_CLOSE) {
-                audio_stop();
-                win_destroy(id);
-                return 0;
-            }
-            if (e.type == WIN_EVENT_RESIZE) {
-                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
-                g_px = win_map(id);
-                if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
-                /* The controls sit along the bottom, so they move with it. */
-                const int row = (int)g_h - 80;
-                g_b_play.y = g_b_stop.y = g_b_vdn.y = g_b_vup.y = row;
-                g_b_vup.x = (int)g_w - 40;
-                g_b_vdn.x = (int)g_w - 70;
-                dirty = 1;
-            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                if (inside(&g_b_play, e.x, e.y)) {
-                    if (g_sound != 0 && have_audio) {
-                        g_playing = !g_playing;
-                        if (!g_playing)
-                            audio_stop();       /* pause: drop what is queued */
-                        say(g_playing ? "playing" : "paused");
-                    }
-                } else if (inside(&g_b_stop, e.x, e.y)) {
-                    g_playing = 0;
-                    audio_stop();
-                    seek_to(0);
-                    say("stopped");
-                } else if (inside(&g_b_vdn, e.x, e.y)) {
-                    g_volume = audio_set_volume(g_volume - 10);
-                } else if (inside(&g_b_vup, e.x, e.y)) {
-                    g_volume = audio_set_volume(g_volume + 10);
-                } else if (e.y >= BAR_Y - 4 && e.y < BAR_Y + BAR_H + 4 &&
-                           g_total > 0) {
-                    /* Click the bar to go there. */
-                    const int bw = bar_w();
-                    long rel = e.x - BAR_X - 2;
-                    if (rel < 0) rel = 0;
-                    if (rel > bw - 4) rel = bw - 4;
-                    seek_to((unsigned long)((double)g_total * (double)rel /
-                                            (double)(bw - 4)));
-                }
-                dirty = 1;
-            } else if (e.type == WIN_EVENT_KEY) {
-                switch (e.key) {
-                case ' ':
-                    if (g_sound != 0 && have_audio) {
-                        g_playing = !g_playing;
-                        if (!g_playing)
-                            audio_stop();
-                        say(g_playing ? "playing" : "paused");
-                    }
-                    break;
-                case 'k': seek_by(-5); break;   /* the arrows the server sends */
-                case 'l': seek_by(5); break;
-                case '[': g_volume = audio_set_volume(g_volume - 10); break;
-                case ']': g_volume = audio_set_volume(g_volume + 10); break;
-                default: continue;
-                }
-                dirty = 1;
-            }
-        }
-
-        pump();
-
-        /* Repaint when the second changes rather than every time round: the
-         * bar moves in seconds and a busy repaint would compete with the very
-         * loop that has to keep the audio queue fed. */
-        const unsigned long now = g_sound ? snd_position(g_sound) / AUDIO_RATE : 0;
-        if (now != last_shown) {
-            last_shown = now;
-            dirty = 1;
-        }
-        if (dirty) {
-            draw();
-            win_present(id);
-        }
-        msleep(10);
-    }
+    g_app.title = "Music";
+    g_app.width = 440; g_app.height = 240;
+    g_app.min_width = 380; g_app.min_height = 200;
+    g_app.tick_ms = 200;
+    g_app.tick = on_tick;
+    g_app.event = on_event;
+    g_app.root = root;
+    return app_run(&g_app, argc, argv);
 }

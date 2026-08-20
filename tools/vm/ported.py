@@ -4,7 +4,9 @@ sys.path.insert(0, os.path.join(os.getcwd(), "tools/vm"))
 from machine import main, Failure
 
 APPS = [("Clock", "clock"), ("Console", "console"),
-        ("Disk Utility", "diskutil"), ("Network Utility", "netutil")]
+        ("Disk Utility", "diskutil"), ("Network Utility", "netutil"),
+        ("Tasks", "taskman"), ("Resource Monitor", "resmon"),
+        ("Images", "imgview"), ("Music", "player")]
 
 def body(t):
     for name, exe in APPS:
