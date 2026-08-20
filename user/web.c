@@ -20,7 +20,8 @@
  * a flow of styled runs is the whole job.
  */
 
-#include <dialog.h>
+#include <app.h>
+#include <ui.h>
 #include <net.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,9 +42,6 @@
 #define TAB_H        28
 #define BAR_H        34
 #define HEAD_H       (TAB_H + BAR_H)
-
-static uint32_t* g_px;
-static unsigned  g_w = 900, g_h = 600;
 
 /* A run of text with one style. The whole document is a list of these, which
  * is what a page is once scripting and boxes are off the table. */
@@ -89,8 +87,6 @@ static struct run g_runs[TABS_MAX][RUNS_MAX];
 static struct link g_links[TABS_MAX][LINKS_MAX];
 static char       g_raw[PAGE_MAX];
 
-static char g_url_edit[URL_MAX];
-static int  g_url_focus;
 
 enum { SIDE_NONE, SIDE_MARKS, SIDE_HISTORY };
 static int g_side = SIDE_NONE;
@@ -597,8 +593,10 @@ static void bookmark(void)
 
 /* --- layout and drawing ---------------------------------------------------- */
 
-static int content_x(void) { return g_side == SIDE_NONE ? 0 : SIDE_W; }
-static int content_w(void) { return (int)g_w - content_x() - WG_SCROLL_W - 8; }
+/* The page's room, handed over by the layout. */
+static struct ui_rect g_page;
+static int content_x(void) { return g_page.x; }
+static int content_w(void) { return g_page.w - WG_SCROLL_W - 8; }
 
 /* Lay the runs out and draw them, recording where each link landed so a click
  * can be turned back into an href. One pass does both because the layout is
@@ -608,7 +606,7 @@ static int flow(int draw_it)
     struct tab* t = cur();
     const int x0 = content_x() + 16;
     const int wide = content_w() - 24;
-    int x = x0, y = HEAD_H + 12 - t->scroll;
+    int x = x0, y = g_page.y + 12 - t->scroll;
     int line_h = WG_GLYPH_H + 4;
 
     for (int i = 0; i < t->links_n; ++i)
@@ -622,7 +620,7 @@ static int flow(int draw_it)
         if (r->br && x > x0) { x = x0; y += line_h; }
         if (r->heading && x > x0) { x = x0; y += line_h; }
         if (r->item) {
-            if (draw_it && y > HEAD_H && y < (int)g_h)
+            if (draw_it && y > g_page.y - line_h && y < g_page.y + g_page.h)
                 wg_text(x0 - 10, y, "-", WG_DIM);
         }
 
@@ -641,7 +639,7 @@ static int flow(int draw_it)
             const int ww = (int)n * WG_GLYPH_W * scale;
             if (x + ww > x0 + wide && x > x0) { x = x0; y += line_h; }
 
-            if (draw_it && y > HEAD_H - line_h && y < (int)g_h) {
+            if (draw_it && y > g_page.y - line_h && y < g_page.y + g_page.h) {
                 uint32_t ink = wg_ink_colour();
                 if (r->link >= 0) ink = WG_ACCENT;
                 else if (r->heading || r->bold) ink = wg_ink_colour();
@@ -662,175 +660,217 @@ static int flow(int draw_it)
     return y + t->scroll + 40;      /* the document's height */
 }
 
-static void draw(void)
-{
-    wg_theme();
-    wg_glass_clear();
-    struct tab* t = cur();
+/* --- the interface ---------------------------------------------------------
+ *
+ * Tabs, a toolbar and a sidebar are components; the page is a custom view,
+ * because laying out a document is what this program is and no component does
+ * it. What the port buys is that the page's room comes from the layout, so the
+ * sidebar's width stops being a number this file repeats.
+ */
 
-    /* Tabs, then the toolbar directly beneath: one band, no dead space. */
-    int tx = 8;
-    const int tw = 150;
+static struct app g_app;
+static struct ui_view* g_tabbar;
+static struct ui_view* g_urlfield;
+static struct ui_view* g_sidelist;
+static struct ui_view* g_status;
+static char g_status_text[128];
+
+static const char* tab_title(void* user, int row)
+{
+    (void)user;
+    int seen = 0;
     for (int i = 0; i < TABS_MAX; ++i) {
         if (!g_tab[i].used)
             continue;
-        if (i == g_cur)
-            wg_row_select(tx, 4, tw, TAB_H - 6);
-        wg_text_clipped(tx + 10, 8, g_tab[i].title, wg_ink_colour(), tw - 26);
-        tx += tw + 4;
+        if (seen == row)
+            return g_tab[i].title;
+        ++seen;
     }
-    wg_pill(tx, 4, 26, TAB_H - 6, "+", 0);
+    return "";
+}
 
-    static const char* const kNav[3] = { "<", ">", "R" };
-    wg_pill_group(8, TAB_H + 4, 30, BAR_H - 10, 3, kNav, -1);
-    const int fx = 8 + 3 * 30 + 8;
-    const int fw = (int)g_w - fx - 8 - 3 * 76;
-    wg_field(fx, TAB_H + 4, fw, BAR_H - 10,
-             g_url_focus ? g_url_edit : t->url, g_url_focus);
-    wg_button((int)g_w - 8 - 3 * 76, TAB_H + 4, 72, BAR_H - 10, "Bookmark", 0);
-    wg_button((int)g_w - 8 - 2 * 76, TAB_H + 4, 72, BAR_H - 10, "Marks",
-              g_side == SIDE_MARKS);
-    wg_button((int)g_w - 8 - 76, TAB_H + 4, 72, BAR_H - 10, "History",
-              g_side == SIDE_HISTORY);
+static int tab_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < TABS_MAX; ++i)
+        if (g_tab[i].used) ++n;
+    return n;
+}
 
-    if (g_side != SIDE_NONE) {
-        wg_sidebar(0, HEAD_H, SIDE_W, (int)g_h - HEAD_H);
-        wg_text(14, HEAD_H + 8, g_side == SIDE_MARKS ? "Bookmarks" : "History",
-                WG_DIM);
-        const int n = g_side == SIDE_MARKS ? g_marks_n : g_history_n;
-        for (int i = 0; i < n; ++i) {
-            const int y = HEAD_H + 30 + i * 20;
-            if (y > (int)g_h - 20)
-                break;
-            const char* label = g_side == SIDE_MARKS
-                ? g_mark_title[i] : g_history[g_history_n - 1 - i];
-            wg_text_clipped(14, y, label, wg_ink_colour(), SIDE_W - 28);
+static const char* side_row(void* user, int row)
+{
+    (void)user;
+    if (g_side == SIDE_MARKS)
+        return (row >= 0 && row < g_marks_n) ? g_mark_title[row] : "";
+    return (row >= 0 && row < g_history_n) ? g_history[g_history_n - 1 - row]
+                                           : "";
+}
+
+static void sync_chrome(void)
+{
+    g_tabbar->rows = tab_count();
+    ui_set_text(g_urlfield, cur()->url);
+    snprintf(g_status_text, sizeof(g_status_text), "%s", cur()->status);
+    ui_set_text(g_status, g_status_text);
+    if (g_side == SIDE_NONE) {
+        g_sidelist->flags |= UI_HIDDEN;
+    } else {
+        g_sidelist->flags &= ~UI_HIDDEN;
+        g_sidelist->rows = g_side == SIDE_MARKS ? g_marks_n : g_history_n;
+    }
+    app_relayout(&g_app);
+}
+
+static void draw_page(struct ui_view* v, void* user)
+{
+    (void)user;
+    g_page = v->frame;
+    flow(1);
+    struct tab* t = cur();
+    const int height = flow(0);
+    if (height > g_page.h)
+        wg_scrollbar_v(g_page.x + g_page.w - WG_SCROLL_W, g_page.y, g_page.h,
+                       t->scroll, g_page.h, height);
+}
+
+static void on_tab(struct ui_view* v, void* user)
+{
+    (void)user;
+    int seen = 0;
+    for (int i = 0; i < TABS_MAX; ++i) {
+        if (!g_tab[i].used)
+            continue;
+        if (seen == v->on) { g_cur = i; break; }
+        ++seen;
+    }
+    sync_chrome();
+}
+
+static void on_url(struct ui_view* v, void* user)
+{
+    (void)user;
+    load(cur(), ui_text(v), 1);
+    sync_chrome();
+}
+
+static void on_back(struct ui_view* v, void* u)    { (void)v; (void)u; go_back(); sync_chrome(); }
+static void on_forward(struct ui_view* v, void* u) { (void)v; (void)u; go_forward(); sync_chrome(); }
+static void on_reload(struct ui_view* v, void* u)  { (void)v; (void)u; load(cur(), cur()->url, 0); sync_chrome(); }
+static void on_newtab(struct ui_view* v, void* u)  { (void)v; (void)u; open_tab(0); sync_chrome(); }
+static void on_bookmark(struct ui_view* v, void* u){ (void)v; (void)u; bookmark(); sync_chrome(); }
+
+static void on_marks(struct ui_view* v, void* u)
+{
+    (void)v; (void)u;
+    g_side = g_side == SIDE_MARKS ? SIDE_NONE : SIDE_MARKS;
+    sync_chrome();
+}
+
+static void on_history(struct ui_view* v, void* u)
+{
+    (void)v; (void)u;
+    g_side = g_side == SIDE_HISTORY ? SIDE_NONE : SIDE_HISTORY;
+    sync_chrome();
+}
+
+static void on_side(struct ui_view* v, void* user)
+{
+    (void)user;
+    const int row = v->selected;
+    if (row < 0)
+        return;
+    if (g_side == SIDE_MARKS && row < g_marks_n)
+        load(cur(), g_marks[row], 1);
+    else if (g_side == SIDE_HISTORY && row < g_history_n)
+        load(cur(), g_history[g_history_n - 1 - row], 1);
+    sync_chrome();
+}
+
+static int on_event(struct app* a, const struct win_event* e)
+{
+    (void)a;
+    struct tab* t = cur();
+    if (e->type == WIN_EVENT_MOUSE_DOWN &&
+        e->x >= g_page.x && e->y >= g_page.y &&
+        e->y < g_page.y + g_page.h) {
+        for (int i = 0; i < t->links_n; ++i) {
+            const struct link* l = &t->links[i];
+            if (l->w > 0 && e->x >= l->x && e->x < l->x + l->w &&
+                e->y >= l->y && e->y < l->y + l->h) {
+                load(t, l->href, 1);
+                sync_chrome();
+                return 1;
+            }
         }
+        return 0;
     }
-
-    const int height = flow(1);
-    const int page = (int)g_h - HEAD_H;
-    wg_scrollbar_v((int)g_w - WG_SCROLL_W - 4, HEAD_H, page, t->scroll, page,
-                   height > page ? height : page);
-
-    wg_text_clipped(content_x() + 10, (int)g_h - 18, t->status, WG_DIM,
-                    (int)g_w - content_x() - 20);
+    if (e->type == WIN_EVENT_KEY) {
+        if (e->key == WIN_KEY_DOWN)       t->scroll += 40;
+        else if (e->key == WIN_KEY_UP)    t->scroll = t->scroll > 40 ? t->scroll - 40 : 0;
+        else return 0;
+        return 1;
+    }
+    return 0;
 }
 
 static const char* const kMenu[] = { "New tab", "Close tab", "-",
                                      "Bookmark this page", "Reload" };
 
+static int on_menu(struct app* a, int pick)
+{
+    (void)a;
+    if (pick == 0)      open_tab(0);
+    else if (pick == 1) close_tab(g_cur);
+    else if (pick == 3) bookmark();
+    else if (pick == 4) load(cur(), cur()->url, 0);
+    sync_chrome();
+    return 1;
+}
+
 int main(int argc, char** argv)
 {
-    if (wg_font() != 0)
-        return 1;
-    const int id = win_create(120, 80, g_w, g_h, "Web");
-    if (id < 0) {
-        printf("web: no window server\n");
-        return 1;
-    }
-    win_set_alpha(id);
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    win_set_min_size(id, 560, 360);
-    wg_target(g_px, g_w, g_h);
-
     load_list(MARKS_PATH, g_marks, &g_marks_n, g_mark_title, MARKS_MAX);
     load_list(HISTORY_PATH, g_history, &g_history_n, 0, HISTORY_MAX);
+    open_tab(argc > 1 && argv[1][0] != '-' ? argv[1] : 0);
 
-    open_tab(argc > 1 ? argv[1] : 0);
-    draw();
-    win_present(id);
+    struct ui_view* root = ui_box(0, UI_STACK_V, 0, 0);
 
-    for (;;) {
-        struct win_event e;
-        while (win_poll(id, &e)) {
-            struct tab* t = cur();
-            if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
+    g_tabbar = ui_tabs(root, tab_title, tab_count(), 0);
+    ui_on(g_tabbar, on_tab, 0);
+    ui_grow(g_tabbar, 0);
 
-            if (menu_active() && e.type != WIN_EVENT_RESIZE) {
-                const int pick = menu_event(&e);
-                if (pick == 0)      open_tab(0);
-                else if (pick == 1) close_tab(g_cur);
-                else if (pick == 3) bookmark();
-                else if (pick == 4) load(t, t->url, 0);
-                draw(); menu_draw(); win_present(id);
-                continue;
-            }
+    struct ui_view* bar = ui_box(root, UI_STACK_H, 8, 6);
+    ui_size(bar, 0, 38);
+    ui_grow(bar, 0);
+    ui_grow(ui_button(bar, "<", on_back, 0), 0);
+    ui_grow(ui_button(bar, ">", on_forward, 0), 0);
+    ui_grow(ui_button(bar, "R", on_reload, 0), 0);
+    ui_grow(ui_button(bar, "+", on_newtab, 0), 0);
+    g_urlfield = ui_field(bar, "");
+    ui_on(g_urlfield, on_url, 0);
+    ui_grow(g_urlfield, 1);
+    ui_grow(ui_button(bar, "Bookmark", on_bookmark, 0), 0);
+    ui_grow(ui_button(bar, "Marks", on_marks, 0), 0);
+    ui_grow(ui_button(bar, "History", on_history, 0), 0);
 
-            if (e.type == WIN_EVENT_RESIZE) {
-                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
-                g_px = win_map(id);
-                if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
-            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                if (e.button == 2) {
-                    menu_open(e.x, e.y, kMenu, 5);
-                } else if (e.y < TAB_H) {
-                    int tx2 = 8, hit = -1;
-                    for (int i = 0; i < TABS_MAX; ++i) {
-                        if (!g_tab[i].used) continue;
-                        if (e.x >= tx2 && e.x < tx2 + 150) { hit = i; break; }
-                        tx2 += 154;
-                    }
-                    if (hit >= 0) g_cur = hit;
-                    else if (e.x >= tx2 && e.x < tx2 + 26) open_tab(0);
-                } else if (e.y < HEAD_H) {
-                    const int bx = (int)g_w - 8 - 3 * 76;
-                    if (e.x < 8 + 30)            go_back();
-                    else if (e.x < 8 + 60)       go_forward();
-                    else if (e.x < 8 + 90)       load(t, t->url, 0);
-                    else if (e.x >= bx && e.x < bx + 72)          bookmark();
-                    else if (e.x >= bx + 76 && e.x < bx + 148)
-                        g_side = g_side == SIDE_MARKS ? SIDE_NONE : SIDE_MARKS;
-                    else if (e.x >= bx + 152)
-                        g_side = g_side == SIDE_HISTORY ? SIDE_NONE : SIDE_HISTORY;
-                    else {
-                        g_url_focus = 1;
-                        snprintf(g_url_edit, URL_MAX, "%s", t->url);
-                    }
-                } else if (g_side != SIDE_NONE && e.x < SIDE_W) {
-                    const int i = (e.y - HEAD_H - 26) / 20;
-                    const int n = g_side == SIDE_MARKS ? g_marks_n : g_history_n;
-                    if (i >= 0 && i < n)
-                        load(t, g_side == SIDE_MARKS ? g_marks[i]
-                                : g_history[g_history_n - 1 - i], 1);
-                } else {
-                    /* A link, if the click landed on one. */
-                    for (int i = 0; i < t->links_n; ++i) {
-                        const struct link* l = &t->links[i];
-                        if (l->w > 0 && e.x >= l->x && e.x < l->x + l->w &&
-                            e.y >= l->y && e.y < l->y + l->h) {
-                            load(t, l->href, 1);
-                            break;
-                        }
-                    }
-                }
-            } else if (e.type == WIN_EVENT_KEY) {
-                if (g_url_focus) {
-                    const unsigned n = (unsigned)strlen(g_url_edit);
-                    if (e.key == '\b' && n > 0) g_url_edit[n - 1] = '\0';
-                    else if (e.key == '\n') {
-                        g_url_focus = 0;
-                        load(t, g_url_edit, 1);
-                    } else if (e.key >= ' ' && e.key < 127 && n + 1 < URL_MAX) {
-                        g_url_edit[n] = (char)e.key;
-                        g_url_edit[n + 1] = '\0';
-                    }
-                } else if (e.key == WIN_KEY_DOWN) t->scroll += 40;
-                else if (e.key == WIN_KEY_UP)
-                    t->scroll = t->scroll > 40 ? t->scroll - 40 : 0;
-                else if (e.key == WIN_KEY_LEFT)  go_back();
-                else if (e.key == WIN_KEY_RIGHT) go_forward();
-                else continue;
-            } else {
-                continue;
-            }
-            draw();
-            menu_draw();
-            win_present(id);
-        }
-        msleep(15);
-    }
+    struct ui_view* body = ui_box(root, UI_STACK_H, 0, 0);
+    g_sidelist = ui_sidebar(body, side_row, 0, 0);
+    ui_on(g_sidelist, on_side, 0);
+    ui_size(g_sidelist, SIDE_W, 0);
+    g_sidelist->flags |= UI_HIDDEN;
+    ui_custom(body, draw_page, 0);
+
+    g_status = ui_label(root, "");
+    ui_grow(g_status, 0);
+    sync_chrome();
+
+    g_app.title = "Web";
+    g_app.width = 900; g_app.height = 600;
+    g_app.min_width = 560; g_app.min_height = 360;
+    g_app.event = on_event;
+    g_app.menu = kMenu;
+    g_app.menu_count = 5;
+    g_app.menu_pick = on_menu;
+    g_app.root = root;
+    return app_run(&g_app, argc, argv);
 }

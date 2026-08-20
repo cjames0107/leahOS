@@ -30,6 +30,8 @@
 #include <signal.h>
 #include <termios.h>
 #include <unistd.h>
+#include <app.h>
+#include <ui.h>
 #include <widget.h>
 #include <window.h>
 
@@ -98,6 +100,23 @@ static long g_view;             /* the top line of the window */
 static int  g_follow = 1;       /* is the view pinned to the bottom? */
 static int  g_cur_c;
 static volatile int g_dirty = 1;
+static int g_dragging;      /* is the scrollbar thumb being held? */
+static struct app g_app;
+
+/* Take the framework's buffer and size. */
+static void adopt_window(void)
+{
+    extern struct app g_app;
+    g_px = g_app.px;
+    if (g_app.w != 0) g_win_w = g_app.w;
+    if (g_app.h != 0) g_win_h = g_app.h;
+}
+
+/* The line being typed, assembled here rather than in the shell: a pipe has no
+ * line discipline, so nothing between the keyboard and the shell would
+ * otherwise know that backspace means anything. */
+static char g_line[512];
+static unsigned g_line_len;
 static volatile int g_shell_done;
 
 static int g_from_shell;        /* read end of the shell's output */
@@ -437,8 +456,15 @@ static int text_width(void)
     return w < GLYPH_W ? GLYPH_W : w;
 }
 
-static void repaint(int id)
+static void repaint(struct ui_view* view, void* user)
 {
+    (void)view; (void)user;
+    /* The window's pixels and size, taken every time rather than remembered.
+     * The old main assigned these once after win_map and again on every
+     * resize; the framework owns the buffer now, and a terminal holding a
+     * stale pointer writes its glyphs into a mapping nobody is showing - or
+     * past the end of the one that is, which is what it did. */
+    adopt_window();
     mutex_lock(&g_lock);
     for (int r = 0; r < g_rows; ++r) {
         const char* row = row_of(g_view + r);
@@ -481,7 +507,6 @@ static void repaint(int id)
     wg_scrollbar_v((int)g_win_w - WG_SCROLL_W, 0, (int)g_win_h,
                    (int)(g_view - g_first), g_rows, (int)line_count());
     mutex_unlock(&g_lock);
-    win_present(id);
 }
 
 /* Put the view back at the bottom, which is where typing belongs: a key
@@ -651,134 +676,97 @@ static int start_shell(void)
     return pid;
 }
 
-int main(int argc, char** argv)
+/* --- the interface ---------------------------------------------------------
+ *
+ * The grid is a custom view: it is a character cell array with its own
+ * scrollback, colours and cursor, and nothing in the component library is
+ * shaped like that. What the framework takes over is the window, the loop and
+ * the repainting - including the part this program got wrong nowhere else but
+ * had to write anyway.
+ */
+
+static int on_tick(struct app* a)
 {
-    const int x = argc > 1 ? atoi_simple(argv[1]) : 60;
-    const int y = argc > 2 ? atoi_simple(argv[2]) : 60;
+    (void)a;
+    /* The reader thread sets g_dirty when output arrives. Repainting is the
+     * framework's, so this only answers whether anything changed. */
+    if (g_shell_done) {
+        app_quit(a, 0);
+        return 0;
+    }
+    if (!g_dirty)
+        return 0;
+    g_dirty = 0;
+    return 1;
+}
 
-    if (fb_font(g_font) != 0) {
-        printf("term: cannot read the console font\n");
+static int on_event(struct app* a, const struct win_event* event)
+{
+    if (event->type == WIN_EVENT_RESIZE) {
+        (void)a;
+        adopt_window();
+        resize_grid();
         return 1;
     }
 
-    /* Eighty columns of text plus the bar, so the terminal is still the
-     * eighty columns everything assumes and the scrollbar is not taken out of
-     * them. */
-    g_win_w = 80 * GLYPH_W + WG_SCROLL_W;
-    g_win_h = 24 * GLYPH_H;
-    const int id = win_create(x, y, g_win_w, g_win_h, "Terminal");
-    /* Every pixel of this window is written by the glyph loop or the strips
-     * beside it, so it is safe to have the server read the alpha byte. */
-    if (id >= 0)
-        win_set_alpha(id);
-    if (id < 0) {
-        printf("term: no window server\n");
+    /* The scrollbar. The position is this program's, as the widget expects:
+     * the bar is told where the view is and asked where a click wants it, and
+     * nothing about the history belongs to it. */
+    if (event->type == WIN_EVENT_MOUSE_UP) {
+        g_dragging = 0;
+        return 0;
+    }
+    if (event->type == WIN_EVENT_MOUSE_MOVE) {
+        if (!g_dragging)
+            return 0;
+        mutex_lock(&g_lock);
+        g_view = g_first + wg_scroll_drag_v(event->y, 0, (int)g_win_h, g_rows,
+                                            (int)line_count());
+        if (g_view < g_first)      g_view = g_first;
+        if (g_view > last_view())  g_view = last_view();
+        g_follow = g_view == last_view();
+        mutex_unlock(&g_lock);
         return 1;
     }
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    wg_theme();                 /* the bar is drawn in the desktop's colours */
-    /* Below this the shell's prompt has nowhere to go. */
-    win_set_min_size(id, 20 * GLYPH_W + WG_SCROLL_W, 4 * GLYPH_H);
-
-    term_clear();
-    resize_grid();
-
-    if (start_shell() < 0) {
-        printf("term: cannot start a shell\n");
-        win_destroy(id);
+    if (event->type == WIN_EVENT_MOUSE_DOWN) {
+        const int bar_x = (int)g_win_w - WG_SCROLL_W;
+        if (event->x < bar_x)
+            return 0;               /* a click in the text, not the bar */
+        mutex_lock(&g_lock);
+        const int first = (int)(g_view - g_first);
+        const int span  = (int)line_count();
+        if (wg_scroll_on_thumb_v(event->y, 0, (int)g_win_h, first, g_rows,
+                                 span)) {
+            g_dragging = 1;
+        } else {
+            g_view = g_first + wg_scroll_hit_v(event->x, event->y, bar_x, 0,
+                                               (int)g_win_h, first, g_rows,
+                                               span);
+            if (g_view < g_first)     g_view = g_first;
+            if (g_view > last_view()) g_view = last_view();
+            g_follow = g_view == last_view();
+        }
+        mutex_unlock(&g_lock);
         return 1;
     }
-    thread_create(reader_thread, 0);
+    if (event->type != WIN_EVENT_KEY)
+        return 0;
 
-    /* Assembled here rather than in the shell, because a pipe has no line
-     * discipline: nothing between the keyboard and the shell would otherwise
-     * know that backspace means anything. */
-    char line[512];
-    unsigned len = 0;
-    int dragging = 0;           /* is the scrollbar's thumb being held? */
-
-    for (;;) {
-        struct win_event event;
-        while (win_poll(id, &event)) {
-            if (event.type == WIN_EVENT_RESIZE) {
-                g_win_w = (unsigned)event.x;
-                g_win_h = (unsigned)event.y;
-                g_px = win_map(id);
-                if (g_px == 0)
-                    return 1;
-                resize_grid();
-                continue;
-            }
-            if (event.type == WIN_EVENT_CLOSE)
-                goto done;
-
-            /* The scrollbar. The position is this program's, as the widget
-             * expects: the bar is told where the view is and asked where a
-             * click wants it, and nothing about the history belongs to it. */
-            if (event.type == WIN_EVENT_MOUSE_DOWN ||
-                event.type == WIN_EVENT_MOUSE_MOVE ||
-                event.type == WIN_EVENT_MOUSE_UP) {
-                const int bar_x = (int)g_win_w - WG_SCROLL_W;
-
-                if (event.type == WIN_EVENT_MOUSE_UP) {
-                    dragging = 0;
-                    continue;
-                }
-                if (event.type == WIN_EVENT_MOUSE_MOVE) {
-                    if (!dragging)
-                        continue;
-                    mutex_lock(&g_lock);
-                    g_view = g_first + wg_scroll_drag_v(event.y, 0,
-                                                        (int)g_win_h, g_rows,
-                                                        (int)line_count());
-                    if (g_view < g_first)      g_view = g_first;
-                    if (g_view > last_view())  g_view = last_view();
-                    g_follow = g_view == last_view();
-                    mutex_unlock(&g_lock);
-                    g_dirty = 1;
-                    continue;
-                }
-                if (event.x < bar_x)
-                    continue;               /* a click in the text, not the bar */
-
-                mutex_lock(&g_lock);
-                const int first = (int)(g_view - g_first);
-                const int span  = (int)line_count();
-                if (wg_scroll_on_thumb_v(event.y, 0, (int)g_win_h,
-                                         first, g_rows, span)) {
-                    dragging = 1;
-                } else {
-                    g_view = g_first + wg_scroll_hit_v(event.x, event.y, bar_x,
-                                                       0, (int)g_win_h,
-                                                       first, g_rows, span);
-                    if (g_view < g_first)     g_view = g_first;
-                    if (g_view > last_view()) g_view = last_view();
-                    g_follow = g_view == last_view();
-                }
-                mutex_unlock(&g_lock);
-                g_dirty = 1;
-                continue;
-            }
-
-            if (event.type != WIN_EVENT_KEY)
-                continue;
 
             /* Typing goes to the bottom, wherever the view happened to be. */
             mutex_lock(&g_lock);
             follow_bottom();
             mutex_unlock(&g_lock);
 
-            const char ch = (char)event.key;
+            const char ch = (char)event->key;
 
             /* Before the line editor, because these are not text and must not
              * be assembled into a line: Ctrl-C during a half-typed command
              * interrupts the job and throws the half away, which is what
              * every terminal does and what a person expects. */
             if (control_key(ch)) {
-                len = 0;
-                continue;
+                g_line_len = 0;
+                return 1;
             }
 
             /* Raw mode: the byte goes down as it is, with no line to wait for
@@ -795,28 +783,28 @@ int main(int argc, char** argv)
                     g_dirty = 1;
                 }
                 write(g_to_shell, &ch, 1);
-                len = 0;
-                continue;
+                g_line_len = 0;
+                return 1;
             }
 
             if (ch == '\n' || ch == '\r') {
                 mutex_lock(&g_lock);
                 term_putc('\n');
                 mutex_unlock(&g_lock);
-                line[len] = '\n';
-                write(g_to_shell, line, len + 1);
-                len = 0;
+                g_line[g_line_len] = '\n';
+                write(g_to_shell, g_line, g_line_len + 1);
+                g_line_len = 0;
                 g_dirty = 1;
             } else if (ch == '\b' || ch == 0x7F) {
-                if (len > 0) {
-                    --len;
+                if (g_line_len > 0) {
+                    --g_line_len;
                     mutex_lock(&g_lock);
                     term_putc('\b');
                     mutex_unlock(&g_lock);
                     g_dirty = 1;
                 }
-            } else if ((unsigned char)ch >= 32 && len + 1 < sizeof(line)) {
-                line[len++] = ch;
+            } else if ((unsigned char)ch >= 32 && g_line_len + 1 < sizeof(g_line)) {
+                g_line[g_line_len++] = ch;
                 if ((flags & ECHO) != 0) {
                     mutex_lock(&g_lock);
                     term_putc(ch);
@@ -824,24 +812,41 @@ int main(int argc, char** argv)
                     g_dirty = 1;
                 }
             }
-        }
+    return 1;
+}
 
-        if (g_dirty) {
-            g_dirty = 0;
-            repaint(id);
-        }
-
-        /* The shell has gone; so should the window. */
-        if (g_shell_done)
-            break;
-
-        msleep(15);
+int main(int argc, char** argv)
+{
+    if (fb_font(g_font) != 0) {
+        printf("term: cannot read the console font\n");
+        return 1;
     }
 
-done:
-    /* Closing this end is what tells the shell to stop, if it has not already:
-     * its next read returns end-of-file. */
-    close(g_to_shell);
-    win_destroy(id);
-    return 0;
+    struct ui_view* root = ui_box(0, UI_STACK_V, 0, 0);
+    ui_custom(root, repaint, 0);
+
+    /* Eighty columns of text plus the bar, so the terminal is still the eighty
+     * columns everything assumes and the scrollbar is not taken out of them. */
+    g_app.title = "Terminal";
+    g_app.width = 80 * GLYPH_W + WG_SCROLL_W;
+    g_app.height = 24 * GLYPH_H;
+    /* Below this the shell's prompt has nowhere to go. */
+    g_app.min_width = 20 * GLYPH_W + WG_SCROLL_W;
+    g_app.min_height = 4 * GLYPH_H;
+    g_app.tick_ms = 15;
+    g_app.tick = on_tick;
+    g_app.event = on_event;
+    g_app.root = root;
+
+    /* An empty grid before the shell writes into it: main used to do this
+     * between creating the window and starting the shell. */
+    term_clear();
+
+    if (start_shell() < 0) {
+        printf("term: cannot start a shell\n");
+        return 1;
+    }
+    thread_create(reader_thread, 0);
+
+    return app_run(&g_app, argc, argv);
 }
