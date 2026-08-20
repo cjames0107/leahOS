@@ -33,6 +33,7 @@
 #include <string.h>
 #include <svg.h>
 #include <unistd.h>
+#include <window.h>
 #include <wproto.h>
 
 /* --- the palette ---------------------------------------------------------
@@ -72,8 +73,18 @@
  * covers it, so nothing is drawn in it - a grow box with three diagonal lines
  * belongs to the chrome this replaces. Its height is what a pointer needs to
  * find, not what an eye needs to see. */
-#define GRIP_H       8
-#define GRIP_W       16
+/* The corner a pointer grabs to resize. It is not a band of its own any more.
+ *
+ * There used to be eight pixels of frame below every window's content, kept
+ * because that was what the grip was drawn in. Then the grip stopped being
+ * drawn - the panel covers it and nothing goes in it - and the band stayed, so
+ * every window on the desktop had a blank white strip along its bottom edge
+ * that did nothing and could not be explained by looking at it.
+ *
+ * The grab is a square at the bottom-right instead, over the last few pixels
+ * of the content. That is where a pointer already goes to resize, and it costs
+ * the window nothing. */
+#define GRIP_REACH   18     /* how far up and left of the corner it grabs */
 
 /* Polling rates. Fast enough that the pointer does not feel detached, slow
  * enough that the server is not a busy-wait. */
@@ -114,17 +125,101 @@ static uint32_t*         g_back;        /* the whole screen, composed off-line *
 static unsigned char     g_font[256 * 16];
 
 /* Per-slot server-side state. The client owns the shared block; this is what
- * only the server needs to know. */
-static uint32_t* g_pixels[WS_MAX_WINDOWS];   /* the client's pixels, mapped here */
-static uint32_t  g_mapped_gen[WS_MAX_WINDOWS];
-static uint32_t  g_pixel_gen[WS_MAX_WINDOWS];  /* which segment generation is mapped */
-static unsigned long g_pixel_bytes[WS_MAX_WINDOWS];
+ * only the server needs to know.
+ *
+ * Grown rather than declared. Slots come from a chain of banks now - see the
+ * note in wproto.h - and the number of them rises while the machine runs, so
+ * every table indexed by a slot has to rise with it. */
+static uint32_t** g_pixels;   /* the client's pixels, mapped here */
+static uint32_t*  g_mapped_gen;
+static uint32_t*  g_pixel_gen;  /* which segment generation is mapped */
+static unsigned long* g_pixel_bytes;
 /* The server's own copy of each window's size, taken once and checked. The
  * client's fields stay writable by the client; these do not. */
-static unsigned  g_width[WS_MAX_WINDOWS];
-static unsigned  g_height[WS_MAX_WINDOWS];
-static int       g_order[WS_MAX_WINDOWS];    /* front to back; [0] is focused */
-static int       g_count;
+static unsigned*  g_width;
+static unsigned*  g_height;
+static int*       g_order;    /* front to back; [0] is focused */
+static int        g_count;
+static int        g_slots;    /* how many slots those tables hold */
+
+/* The rest of the per-slot state, declared here with the others so that the
+ * one function which grows them all can see them. What each is for is
+ * explained where it is used. */
+static uint32_t* g_move_seen;
+static uint32_t** g_blur;
+static int*       g_blur_w;
+static int*       g_blur_h;
+static unsigned*  g_blur_stamp;
+static int*       g_blur_valid;
+static unsigned* g_generation;
+
+
+/* One window's shared record. Every use goes through here rather than through
+ * an array subscript, because the table is a chain of banks and the bank a
+ * slot lives in may not be mapped in this process yet.
+ *
+ * A slot that cannot be reached answers with a record that is permanently
+ * free, rather than with a null the twenty-five call sites below would each
+ * have to check. Every one of them already handles a free slot - that is what
+ * a window that has closed looks like - and a compositor that dereferences a
+ * null takes the whole desktop with it. Writes to it go nowhere, which is the
+ * right thing to do to a window that does not exist. */
+static struct ws_window g_nowhere;
+
+static struct ws_window* win(int slot)
+{
+    struct ws_window* w = ws_slot(slot);
+    if (w != 0)
+        return w;
+    memset(&g_nowhere, 0, sizeof(g_nowhere));
+    return &g_nowhere;
+}
+
+/* Follow the client side: whenever a bank appears, the server's own tables
+ * have to reach as far as the table it describes. Returns 0 if they could not
+ * be grown, in which case the ones already there are still valid and the new
+ * slots are simply not looked at this pass. */
+static int track_slots(void)
+{
+    const int want = ws_slot_count();
+    if (want <= g_slots)
+        return 1;
+    struct { void** at; unsigned long each; } table[] = {
+        { (void**)&g_pixels,      sizeof(uint32_t*)     },
+        { (void**)&g_mapped_gen,  sizeof(uint32_t)      },
+        { (void**)&g_pixel_gen,   sizeof(uint32_t)      },
+        { (void**)&g_pixel_bytes, sizeof(unsigned long) },
+        { (void**)&g_width,       sizeof(unsigned)      },
+        { (void**)&g_height,      sizeof(unsigned)      },
+        { (void**)&g_order,       sizeof(int)           },
+        { (void**)&g_move_seen,   sizeof(uint32_t)      },
+        { (void**)&g_blur,        sizeof(uint32_t*)     },
+        { (void**)&g_blur_w,      sizeof(int)           },
+        { (void**)&g_blur_h,      sizeof(int)           },
+        { (void**)&g_blur_stamp,  sizeof(unsigned)      },
+        { (void**)&g_blur_valid,  sizeof(int)           },
+        { (void**)&g_generation,  sizeof(unsigned)      },
+    };
+    for (unsigned t = 0; t < sizeof(table) / sizeof(table[0]); ++t) {
+        void* grown = malloc(table[t].each * (unsigned long)want);
+        if (grown == 0)
+            return 0;
+        memset(grown, 0, table[t].each * (unsigned long)want);
+        if (*table[t].at != 0)
+            memcpy(grown, *table[t].at, table[t].each * (unsigned long)g_slots);
+        free(*table[t].at);
+        *table[t].at = grown;
+    }
+    /* Two of those tables do not mean zero when they are empty: an order
+     * entry names a slot, and slot 0 is a real one, and a mapped generation of
+     * zero is a generation a client can actually be at. */
+    for (int i = g_slots; i < want; ++i) {
+        g_order[i] = -1;
+        g_pixel_gen[i] = 0xFFFFFFFFu;
+    }
+    g_slots = want;
+    return 1;
+}
 
 /* --- damage ---------------------------------------------------------------
  *
@@ -152,7 +247,6 @@ static int g_cursor_x, g_cursor_y;
 static int g_last_cursor_x = -1, g_last_cursor_y = -1;
 static int g_dragging = -1, g_drag_dx, g_drag_dy;
 /* The last move_request seen per window, so a bump is noticed once. */
-static uint32_t g_move_seen[WS_MAX_WINDOWS];
 /* Resizing draws a rubber-band outline and commits on release, rather than
  * reallocating the client's segment on every pixel of pointer movement. */
 static int g_resizing = -1;
@@ -395,7 +489,7 @@ static void control_box(const struct ws_window* w, int which, int* x, int* y)
 /* A desktop window is all content: no border, no title bar, no grip. */
 static int is_desktop(int slot)
 {
-    return (g_control->windows[slot].flags & WS_FLAG_DESKTOP) != 0;
+    return (win(slot)->flags & WS_FLAG_DESKTOP) != 0;
 }
 
 /* A sheet has no chrome of any kind: no title bar, no controls, no grip. It is
@@ -403,7 +497,7 @@ static int is_desktop(int slot)
  * and when it goes belongs to the application. */
 static int is_sheet(int slot)
 {
-    return (g_control->windows[slot].flags & WS_FLAG_SHEET) != 0;
+    return (win(slot)->flags & WS_FLAG_SHEET) != 0;
 }
 
 static unsigned frame_width(int slot)
@@ -416,7 +510,7 @@ static unsigned frame_width(int slot)
 static int client_title(int slot)
 {
     return !is_desktop(slot) &&
-           (g_control->windows[slot].flags & WS_FLAG_CLIENT_TITLE) != 0;
+           (win(slot)->flags & WS_FLAG_CLIENT_TITLE) != 0;
 }
 
 /* Where the client's pixels begin, relative to the frame's top. A sheet has no
@@ -438,7 +532,7 @@ static unsigned frame_height(int slot)
     if (is_sheet(slot))
         return g_height[slot] + BORDER * 2;
     /* The client's own height already includes the strip when it draws it. */
-    return g_height[slot] + BORDER * 2 + GRIP_H +
+    return g_height[slot] + BORDER * 2 +
            (client_title(slot) ? 0 : TITLE_HEIGHT);
 }
 
@@ -446,7 +540,7 @@ static unsigned frame_height(int slot)
  * expressed in. */
 static struct rect frame_rect(int slot)
 {
-    struct ws_window* w = &g_control->windows[slot];
+    struct ws_window* w = win(slot);
     struct rect r;
     r.x = w->x; r.y = w->y;
     r.w = (int)frame_width(slot); r.h = (int)frame_height(slot);
@@ -472,14 +566,9 @@ static struct rect frame_rect(int slot)
  * backdrop at every position, so every frame is a genuine miss. That is not a
  * shortcoming of the cache, it is what moving a window means.
  */
-static uint32_t* g_blur[WS_MAX_WINDOWS];
-static int       g_blur_w[WS_MAX_WINDOWS], g_blur_h[WS_MAX_WINDOWS];
-static unsigned  g_blur_stamp[WS_MAX_WINDOWS];
-static int       g_blur_valid[WS_MAX_WINDOWS];
 
 /* Bumped whenever a window is going to be repainted, which is exactly when
  * anything about it that a window above could see has changed. */
-static unsigned  g_generation[WS_MAX_WINDOWS];
 static unsigned  g_paper_generation;
 
 static void blur_cache_drop(int slot)
@@ -496,7 +585,7 @@ static void mix(unsigned* h, unsigned v)
 
 static unsigned backdrop_stamp(int slot)
 {
-    const struct ws_window* w = &g_control->windows[slot];
+    const struct ws_window* w = win(slot);
     unsigned h = 2166136261u;
 
     mix(&h, (unsigned)w->x);
@@ -512,7 +601,7 @@ static unsigned backdrop_stamp(int slot)
         ++at;
     for (int i = at + 1; i < g_count; ++i) {
         const int below = g_order[i];
-        const struct ws_window* b = &g_control->windows[below];
+        const struct ws_window* b = win(below);
         mix(&h, (unsigned)below);
         mix(&h, (unsigned)b->x);
         mix(&h, (unsigned)b->y);
@@ -535,11 +624,13 @@ static void damage_window(int slot)
 }
 
 /* The grow box, bottom-right, inside the grip bar. */
+/* The bottom-right corner of the frame, and the square inside it that resizes
+ * the window. */
 static void grow_box(int slot, int* x, int* y)
 {
-    struct ws_window* w = &g_control->windows[slot];
-    *x = w->x + (int)frame_width(slot) - BORDER - GRIP_W;
-    *y = w->y + (int)frame_height(slot) - BORDER - GRIP_H;
+    struct ws_window* w = win(slot);
+    *x = w->x + (int)frame_width(slot) - BORDER - GRIP_REACH;
+    *y = w->y + (int)frame_height(slot) - BORDER - GRIP_REACH;
 }
 
 /* Where the close box sits, in screen coordinates. On the left, as this era of
@@ -562,7 +653,7 @@ static void close_box(struct ws_window* w, int* x, int* y)
  */
 static void paint_backdrop(int slot, const struct surface* c)
 {
-    const struct ws_window* w = &g_control->windows[slot];
+    const struct ws_window* w = win(slot);
     const unsigned fw = frame_width(slot), fh = frame_height(slot);
 
     if (g_control->theme.blur == 0) {
@@ -662,7 +753,7 @@ static void cast_band(struct surface c, struct shadow* shade,
 
 static void draw_window(int slot, int focused)
 {
-    struct ws_window* w = &g_control->windows[slot];
+    struct ws_window* w = win(slot);
     const unsigned fw = frame_width(slot), fh = frame_height(slot);
 
     if (is_desktop(slot)) {
@@ -717,6 +808,29 @@ static void draw_window(int slot, int focused)
     }
 
     const uint32_t* px = g_pixels[slot];
+
+    /* Everything from here to `contents` draws the frame: the panel behind the
+     * window, the hairline round it, the title bar and the controls. None of
+     * that changes when a client repaints, and a client repainting damages
+     * only its content - so when the damage lies entirely inside the content
+     * area, all of it is work whose every pixel is painted over by the copy at
+     * the end.
+     *
+     * It was not free. The hairline is a rounded shape, so every row of it
+     * costs a coverage test at each end, and the title bar re-measures and
+     * re-shapes proportional text. On a terminal printing steadily that was
+     * the frame being rebuilt for every line of output. */
+    /* Opaque mode only. On the glass the backdrop and the wash *are* drawn
+     * under the content and the content is blended onto them, so skipping them
+     * would blend this frame onto the last one and the window would darken a
+     * shade every time it repainted. */
+    if (px != 0 && g_control->theme.blur == 0) {
+        const int cx0 = w->x + BORDER, cy0 = w->y + content_offset(slot);
+        if (g_clip.x >= cx0 && g_clip.y >= cy0 &&
+            g_clip.x + g_clip.w <= cx0 + (int)g_width[slot] &&
+            g_clip.y + g_clip.h <= cy0 + (int)g_height[slot])
+            goto contents;
+    }
 
     if (g_control->theme.blur == 0) {
         /* No backdrop to sample, so the panel is one flat colour - and the
@@ -910,26 +1024,43 @@ contents:
     for (int y = y0; y < y1; ++y) {
         const uint32_t* row = &px[(unsigned long)(y - content_y) * g_width[slot]];
         if (translucent && y < curved_from) {
-            /* Most pixels of most windows are opaque even here: the wash is
-             * only the background, and everything drawn on it is solid. So a
-             * run of opaque pixels is copied rather than blended, which is
-             * what stops this costing a blend per pixel of every window that
-             * carries alpha - including in opaque mode, where all of them are.
-             */
+            /* Three cases, and only one of them costs anything.
+             *
+             * Most pixels of most windows are opaque even here - the wash is
+             * only the background, and everything drawn on it is solid - so a
+             * run of those is copied rather than blended. Most of the rest are
+             * not there at all: a window on the glass leaves its backdrop to
+             * the server, so whole bands of it are alpha zero, and blending
+             * something invisible onto the buffer is the buffer it already
+             * had. Only a genuinely translucent pixel is blended.
+             *
+             * Skipping the empty runs is what took this from a blend per pixel
+             * of every glass window to a blend per pixel that is actually
+             * translucent, which is a small minority of them.
+             *
+             * The blend is written out rather than going through back_blend,
+             * which re-tests the clip on every pixel: x and y are already
+             * inside it - that is what x0..x1 and y0..y1 mean - so those were
+             * four comparisons per pixel of every window on the screen. */
+            uint32_t* const back = &g_back[(unsigned)y * g_fb.width];
+            const uint32_t* const src = &row[-content_x];
             int x = x0;
             while (x < x1) {
-                int run = x;
-                while (run < x1 && (row[run - content_x] >> 24) == 0xFFu)
-                    ++run;
-                if (run > x) {
-                    memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x],
-                           &row[x - content_x],
+                const unsigned a = src[x] >> 24;
+                if (a == 0xFFu) {
+                    int run = x;
+                    while (run < x1 && (src[run] >> 24) == 0xFFu)
+                        ++run;
+                    memcpy(&back[x], &src[x],
                            (size_t)(run - x) * sizeof(uint32_t));
                     x = run;
-                    continue;
+                } else if (a == 0) {
+                    while (x < x1 && (src[x] >> 24) == 0)
+                        ++x;
+                } else {
+                    back[x] = draw_over(back[x], src[x]);
+                    ++x;
                 }
-                back_blend(x, y, row[x - content_x]);
-                ++x;
             }
             continue;
         }
@@ -953,12 +1084,60 @@ contents:
     }
 }
 
-/* The wallpaper, when there is one. Held at its own size and sampled rather
- * than scaled properly: a nearest-neighbour stretch is what this can afford,
- * and it is honest about being a stretch. */
-static uint32_t* g_paper;
-static unsigned  g_paper_w, g_paper_h;
+/* The wallpaper, when there is one - stretched to the screen once, at the
+ * moment it is loaded, rather than sampled while composing.
+ *
+ * It used to be kept at its own size, and every desktop pixel of every damage
+ * rectangle cost a multiply and a divide to find its source column, plus a
+ * mask to throw the decoder's alpha away. A window dragged across the desktop
+ * paid that for its whole trail, every frame. Held at the screen's size it is
+ * one memcpy per row, and the arithmetic happens width-times-height times in
+ * total instead of that many times per frame.
+ *
+ * Three megabytes on a 1024x768 screen. Nearest neighbour still - a proper
+ * filter is not what this can afford - but now it is honest about being a
+ * stretch once rather than continuously. */
+static uint32_t* g_paper;       /* screen-sized, or 0 */
 static uint32_t  g_theme_seen = 0xFFFFFFFFu;
+
+/* Read a PNG and stretch it to the screen. Returns 0 if either step fails,
+ * which is the same as having no wallpaper. */
+static uint32_t* scaled_paper(const char* path)
+{
+    unsigned sw = 0, sh = 0;
+    uint32_t* src = img_read_png(path, &sw, &sh);
+    if (src == 0 || sw == 0 || sh == 0) {
+        free(src);
+        return 0;
+    }
+    uint32_t* out = (uint32_t*)malloc((unsigned long)g_fb.width * g_fb.height * 4);
+    if (out == 0) {
+        free(src);
+        return 0;
+    }
+    /* The column map once rather than per row: every row of the output samples
+     * the same set of source columns. */
+    unsigned* col = (unsigned*)malloc((unsigned long)g_fb.width * sizeof(unsigned));
+    if (col == 0) {
+        free(src);
+        free(out);
+        return 0;
+    }
+    for (unsigned x = 0; x < g_fb.width; ++x)
+        col[x] = x * sw / g_fb.width;
+    for (unsigned y = 0; y < g_fb.height; ++y) {
+        const uint32_t* from = &src[(unsigned long)(y * sh / g_fb.height) * sw];
+        uint32_t* to = &out[(unsigned long)y * g_fb.width];
+        for (unsigned x = 0; x < g_fb.width; ++x)
+            /* & 0xFFFFFF: the decoder reports opacity in the high byte, which
+             * is not part of a colour once it is on the screen. Done here so
+             * that composing never has to. */
+            to[x] = from[col[x]] & 0xFFFFFFu;
+    }
+    free(col);
+    free(src);
+    return out;
+}
 
 static void reload_theme(void)
 {
@@ -968,13 +1147,10 @@ static void reload_theme(void)
         return;
     g_theme_seen = gen;
     ++g_paper_generation;       /* every backdrop is now stale */
-    if (g_paper != 0) {
-        free(g_paper);
-        g_paper = 0;
-        g_paper_w = g_paper_h = 0;
-    }
+    free(g_paper);
+    g_paper = 0;
     if (g_control->theme.wallpaper[0] != '\0')
-        g_paper = img_read_png(g_control->theme.wallpaper, &g_paper_w, &g_paper_h);
+        g_paper = scaled_paper(g_control->theme.wallpaper);
     damage_all();
 }
 
@@ -1004,13 +1180,21 @@ static struct rect drag_rect(void);
  * through there, which is why an ordinary window only counts for the rectangle
  * inside its corners. A desktop has no frame and no corners and counts whole.
  */
-static int covered_opaque(const struct rect* r)
+/* Which window, front to back, is the first to cover this rectangle entirely
+ * with something opaque - or -1 if none does.
+ *
+ * It used to answer yes or no, and only the wallpaper underneath was skipped.
+ * Everything *between* that window and the wallpaper was still composed and
+ * then painted over: with five overlapping windows the compositor did five
+ * windows' work to show one. The index says where the visible stack starts, so
+ * the ones behind it are not drawn at all. */
+static int covered_from(const struct rect* r)
 {
     if (g_control->theme.blur != 0)
-        return 0;
+        return -1;
     for (int i = 0; i < g_count; ++i) {
         const int slot = g_order[i];
-        const struct ws_window* w = &g_control->windows[slot];
+        const struct ws_window* w = win(slot);
         if (g_pixels[slot] == 0)
             continue;               /* nothing drawn there yet to cover with */
         int x = w->x, y = w->y;
@@ -1021,26 +1205,24 @@ static int covered_opaque(const struct rect* r)
         }
         if (r->x >= x && r->y >= y &&
             r->x + r->w <= x + cw && r->y + r->h <= y + ch)
-            return 1;
+            return i;
     }
-    return 0;
+    return -1;
 }
+
 
 static void compose_rect(const struct rect* r)
 {
-
     g_clip = *r;
-    const int hidden = covered_opaque(r);
+    /* Where the visible stack starts. Everything behind it - the wallpaper
+     * included - is covered by something opaque and need not be drawn. */
+    const int cover = covered_from(r);
+    const int hidden = cover >= 0;
     for (int y = r->y; !hidden && y < r->y + r->h; ++y) {
         uint32_t* row = &g_back[(unsigned)y * g_fb.width + (unsigned)r->x];
         if (g_paper != 0) {
-            const unsigned sy = (unsigned)y * g_paper_h / g_fb.height;
-            const uint32_t* src = &g_paper[(unsigned long)sy * g_paper_w];
-            for (int x = 0; x < r->w; ++x)
-                /* & 0xFFFFFF: the decoder reports opacity in the high byte,
-                 * which is not part of a colour once it is on the screen. */
-                row[x] = src[(unsigned)(r->x + x) * g_paper_w / g_fb.width]
-                         & 0xFFFFFF;
+            memcpy(row, &g_paper[(unsigned long)y * g_fb.width + (unsigned)r->x],
+                   (unsigned long)r->w * 4);
         } else {
             /* A pattern is drawn from the desktop colour rather than a second
              * one, so it stays consistent with whatever was chosen. */
@@ -1070,7 +1252,7 @@ static void compose_rect(const struct rect* r)
             }
         }
     }
-    for (int i = g_count - 1; i >= 0; --i) {
+    for (int i = hidden ? cover : g_count - 1; i >= 0; --i) {
         struct rect f = frame_rect(g_order[i]);
         /* Grown by the shadow, so a window whose frame is outside this region
          * but whose shadow falls inside it still gets its turn - otherwise the
@@ -1241,7 +1423,7 @@ static uint32_t g_mods;         /* what was held at the last input poll */
 static void push_event(int slot, uint32_t type, int x, int y,
                        uint32_t button, uint32_t key)
 {
-    struct ws_window* w = &g_control->windows[slot];
+    struct ws_window* w = win(slot);
     const uint32_t head = w->head;
     /* A client that has stopped reading must not block the server: drop the
      * event rather than stall the desktop for everyone. */
@@ -1261,7 +1443,7 @@ static void push_event(int slot, uint32_t type, int x, int y,
 static int window_at(int x, int y)
 {
     for (int i = 0; i < g_count; ++i) {
-        struct ws_window* w = &g_control->windows[g_order[i]];
+        struct ws_window* w = win(g_order[i]);
         if (x >= w->x && y >= w->y &&
             x < w->x + (int)frame_width(g_order[i]) &&
             y < w->y + (int)frame_height(g_order[i]))
@@ -1298,8 +1480,13 @@ static void raise_window(int slot)
  * its pixels mapped and joins the order, one that has gone free is dropped. */
 static void reconcile(void)
 {
-    for (int slot = 0; slot < WS_MAX_WINDOWS; ++slot) {
-        struct ws_window* w = &g_control->windows[slot];
+    /* Any bank a client has added since the last pass. Done here because this
+     * is the pass that looks at every slot, and a table that has not caught up
+     * simply means the newest windows are seen one frame later. */
+    track_slots();
+
+    for (int slot = 0; slot < g_slots; ++slot) {
+        struct ws_window* w = win(slot);
         const uint32_t state = __atomic_load_n(&w->state, __ATOMIC_ACQUIRE);
 
         int known = 0;
@@ -1437,8 +1624,15 @@ static void reconcile(void)
                  * started - which is the white strip that has been along the
                  * top of the screen this whole time. */
                 const int cx = is_desktop(slot) ? w->x : w->x + BORDER;
+                /* content_offset, not BORDER + TITLE_HEIGHT: a window that
+                 * draws its own title strip has its pixels start at the top of
+                 * the frame, and adding the title bar's height to that damaged
+                 * a rectangle a title bar too low. The top twenty-eight rows of
+                 * such a window - the strip with its controls in it - were
+                 * never repainted when the client presented, so a search field
+                 * showed the caret it had when the window opened. */
                 const int cy = is_desktop(slot) ? w->y
-                                                : w->y + BORDER + TITLE_HEIGHT;
+                                                : w->y + content_offset(slot);
                 damage_rect(cx, cy, (int)g_width[slot], (int)g_height[slot]);
             }
         }
@@ -1495,7 +1689,7 @@ static void handle_input(void)
     if (right && !g_last_right) {
         const int slot = window_at(x, y);
         if (slot >= 0) {
-            struct ws_window* w = &g_control->windows[slot];
+            struct ws_window* w = win(slot);
             const int ox = is_desktop(slot) ? w->x : w->x + BORDER;
             const int oy = is_desktop(slot) ? w->y
                                             : w->y + content_offset(slot);
@@ -1507,17 +1701,16 @@ static void handle_input(void)
     /* A client that decided a press on its own title strip was not one of its
      * controls. Compared against what was last seen rather than cleared, so
      * the client never has to wait for the server to acknowledge it. */
-    for (int slot = 0; slot < WS_MAX_WINDOWS; ++slot) {
-        if (g_control->windows[slot].state != WS_SLOT_LIVE)
+    for (int slot = 0; slot < g_slots; ++slot) {
+        if (win(slot)->state != WS_SLOT_LIVE)
             continue;
         const uint32_t asked =
-            __atomic_load_n(&g_control->windows[slot].move_request,
-                            __ATOMIC_ACQUIRE);
+            __atomic_load_n(&win(slot)->move_request, __ATOMIC_ACQUIRE);
         if (asked == g_move_seen[slot])
             continue;
         g_move_seen[slot] = asked;
         if (g_dragging < 0 && g_resizing < 0) {
-            struct ws_window* w = &g_control->windows[slot];
+            struct ws_window* w = win(slot);
             g_dragging = slot;
             g_drag_dx = x - w->x;
             g_drag_dy = y - w->y;
@@ -1528,7 +1721,7 @@ static void handle_input(void)
     if (pressed) {
         const int slot = window_at(x, y);
         if (slot >= 0) {
-            struct ws_window* w = &g_control->windows[slot];
+            struct ws_window* w = win(slot);
             raise_window(slot);
 
             int cx, cy;
@@ -1547,7 +1740,7 @@ static void handle_input(void)
             int gx, gy;
             grow_box(slot, &gx, &gy);
             const int on_grip = !sheet && x >= gx && y >= gy &&
-                                x < gx + GRIP_W && y < gy + GRIP_H;
+                                x < gx + GRIP_REACH && y < gy + GRIP_REACH;
 
             if (is_desktop(slot)) {
                 /* Everything on it is content, so a press is the client's. */
@@ -1580,7 +1773,7 @@ static void handle_input(void)
      * so a stroke that leaves the window stops rather than carrying on into
      * whatever is underneath. */
     if (g_mouse_grab >= 0 && (x != before_x || y != before_y)) {
-        struct ws_window* w = &g_control->windows[g_mouse_grab];
+        struct ws_window* w = win(g_mouse_grab);
         push_event(g_mouse_grab, WIN_EVENT_MOUSE_MOVE,
                    x - (w->x + BORDER),
                    y - (w->y + content_offset(g_mouse_grab)), 1, 0);
@@ -1589,7 +1782,7 @@ static void handle_input(void)
     if (released && g_resizing >= 0) {
         /* Ask the client for the size the band ended at. It answers by
          * replacing its segment, which reconcile picks up. */
-        struct ws_window* w = &g_control->windows[g_resizing];
+        struct ws_window* w = win(g_resizing);
         if (g_resize_w != (int)g_width[g_resizing] ||
             g_resize_h != (int)g_height[g_resizing]) {
             w->req_width = (uint32_t)g_resize_w;
@@ -1612,7 +1805,7 @@ static void handle_input(void)
         if (g_control->drag.phase == WS_DRAG_LIVE) {
             const int onto = window_at(x, y);
             if (onto >= 0) {
-                struct ws_window* w = &g_control->windows[onto];
+                struct ws_window* w = win(onto);
                 const int ox = is_desktop(onto) ? w->x : w->x + BORDER;
                 const int oy = is_desktop(onto) ? w->y
                                                 : w->y + BORDER + TITLE_HEIGHT;
@@ -1631,7 +1824,7 @@ static void handle_input(void)
         const int slot = g_mouse_grab >= 0 ? g_mouse_grab : window_at(x, y);
         g_mouse_grab = -1;
         if (slot >= 0) {
-            struct ws_window* w = &g_control->windows[slot];
+            struct ws_window* w = win(slot);
             push_event(slot, WIN_EVENT_MOUSE_UP,
                        x - (w->x + BORDER),
                        y - (w->y + BORDER + TITLE_HEIGHT), 1, 0);
@@ -1639,7 +1832,7 @@ static void handle_input(void)
     }
 
     if (g_dragging >= 0) {
-        struct ws_window* w = &g_control->windows[g_dragging];
+        struct ws_window* w = win(g_dragging);
         int nx = x - g_drag_dx, ny = y - g_drag_dy;
 
         /* Keep the title bar reachable. A window dragged clean off an edge
@@ -1661,7 +1854,7 @@ static void handle_input(void)
     }
 
     if (g_resizing >= 0) {
-        struct ws_window* w = &g_control->windows[g_resizing];
+        struct ws_window* w = win(g_resizing);
         int nw = g_resize_start_w + (x - g_resize_from_x);
         int nh = g_resize_start_h + (y - g_resize_from_y);
         const int min_w = (int)(w->min_width  != 0 ? w->min_width  : 64u);
@@ -1671,7 +1864,7 @@ static void handle_input(void)
         /* Bounded by the screen: a window bigger than the framebuffer is one
          * the server would refuse to map anyway. */
         const int max_w = (int)g_fb.width  - BORDER * 2;
-        const int max_h = (int)g_fb.height - (BORDER * 2 + TITLE_HEIGHT + GRIP_H);
+        const int max_h = (int)g_fb.height - (BORDER * 2 + TITLE_HEIGHT);
         if (nw > max_w) nw = max_w;
         if (nh > max_h) nh = max_h;
         g_resize_w = nw;
@@ -1809,14 +2002,16 @@ int main(void)
     g_control->theme.wallpaper[0] = '\0';
 
     g_control->theme.generation   = 1;
-    for (int i = 0; i < WS_MAX_WINDOWS; ++i)
-        g_order[i] = -1;
+    /* One bank to begin with; more appear as clients need them. */
+    g_control->banks = 1;
+    if (!track_slots()) {
+        printf("wserver: out of memory for the window table\n");
+        return 1;
+    }
 
     g_cursor_x = (int)g_fb.width / 2;
     g_cursor_y = (int)g_fb.height / 2;
     g_last_cursor_x = g_last_cursor_y = -1;
-    for (int i = 0; i < WS_MAX_WINDOWS; ++i)
-        g_pixel_gen[i] = 0xFFFFFFFFu;
     g_clip.x = 0; g_clip.y = 0;
     g_clip.w = (int)g_fb.width; g_clip.h = (int)g_fb.height;
     damage_all();               /* the desktop has to be painted once */
@@ -1917,11 +2112,11 @@ int main(void)
         g_damage_count = 0;
 
         if (g_resizing >= 0) {
-            struct ws_window* w = &g_control->windows[g_resizing];
+            struct ws_window* w = win(g_resizing);
             g_band.x = w->x;
             g_band.y = w->y;
             g_band.w = g_resize_w + BORDER * 2;
-            g_band.h = g_resize_h + BORDER * 2 + TITLE_HEIGHT + GRIP_H;
+            g_band.h = g_resize_h + BORDER * 2 + TITLE_HEIGHT;
             draw_band(&g_band);
             g_band_shown = 1;
         }

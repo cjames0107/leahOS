@@ -116,33 +116,106 @@ static float round_distance(float px, float py, float x, float y,
     return -(nearest + radius);
 }
 
+/* The rounded corner, as a table.
+ *
+ * Coverage used to be a square root and four float multiplies per pixel, and
+ * this is the function every rounded thing in the system goes through - every
+ * window's hairline, every button, every pill, in the compositor and in every
+ * client. Measured in the compositor it was a fifth of all the time spent
+ * drawing windows, for a shape that is the same shape every frame.
+ *
+ * Two observations remove nearly all of it:
+ *
+ *  - Along the straight edges there is no partial coverage at all. A pixel
+ *    centre sits half a pixel from the boundary, and the falloff is one pixel
+ *    wide centred on it, so the answer is always 255 inside and 0 outside.
+ *    Only the corners have anything to interpolate.
+ *
+ *  - A corner is a quarter circle of one radius, so its coverage depends only
+ *    on where the pixel is relative to that corner - not on the size of the
+ *    shape, and not on which of the four corners it is. One table of
+ *    (radius+1)^2 bytes answers for all of them, and the radius is the same
+ *    number nearly every time it is asked.
+ *
+ * One table per radius, built the first time that radius is asked for and
+ * kept. Not one table rebuilt whenever the radius changes: the chrome draws a
+ * window at one radius and the pill of controls on it at another, so a single
+ * table was rebuilt twice per window per frame - hundreds of square roots to
+ * save a handful, and three times slower than the arithmetic it replaced.
+ *
+ * Allocated rather than declared, because forty-one tables in bss is ninety
+ * kilobytes in every binary that links the drawing library, and that is a cost
+ * paid by programs that never draw a rounded corner at all. */
+#define ROUND_MAX_RADIUS 40
+static unsigned char* g_corner[ROUND_MAX_RADIUS + 1];
+
+static unsigned char* build_corner(int radius)
+{
+    const int span = radius + 2;
+    unsigned char* table = (unsigned char*)malloc((unsigned long)span * span);
+    if (table == 0)
+        return 0;
+    for (int j = -1; j <= radius; ++j) {
+        for (int i = -1; i <= radius; ++i) {
+            /* Against a circle of `radius` whose centre is `radius` in from
+             * the corner, measured to the pixel's centre. */
+            const float dx = (float)radius - ((float)i + 0.5f);
+            const float dy = (float)radius - ((float)j + 0.5f);
+            const float d = sqrt(dx * dx + dy * dy) - (float)radius;
+            float coverage = 0.5f - d;
+            if (coverage <= 0.0f)      coverage = 0.0f;
+            else if (coverage >= 1.0f) coverage = 1.0f;
+            table[(j + 1) * span + (i + 1)] =
+                (unsigned char)(coverage * 255.0f + 0.5f);
+        }
+    }
+    g_corner[radius] = table;
+    return table;
+}
+
 int draw_round_coverage(int px, int py, int x, int y, int w, int h, int radius)
 {
     const int limit = (w < h ? w : h) / 2;
     if (radius > limit) radius = limit;
     if (radius < 0) radius = 0;
 
-    /* Only the corners are curved, and only a pixel either side of the edge is
-     * partial. Everything else is a rectangle test, which answers without the
-     * square root the distance needs - and almost every pixel of almost every
-     * shape is everything else. */
+    /* Nowhere near it. */
     if (px < x - 1 || py < y - 1 || px > x + w || py > y + h)
         return 0;
-    if (px >= x + radius && px < x + w - radius &&
-        py >= y + 1 && py < y + h - 1)
-        return 255;
-    if (py >= y + radius && py < y + h - radius &&
-        px >= x + 1 && px < x + w - 1)
-        return 255;
 
-    const float d = round_distance((float)px + 0.5f, (float)py + 0.5f,
-                                   (float)x, (float)y, (float)w, (float)h,
-                                   (float)radius);
-    /* One pixel of falloff, centred on the boundary. */
-    float coverage = 0.5f - d;
-    if (coverage <= 0.0f) return 0;
-    if (coverage >= 1.0f) return 255;
-    return (int)(coverage * 255.0f + 0.5f);
+    /* Which corner, if any. A pixel is in one only when it is within the
+     * radius of an edge on both axes; everything else is a straight run. */
+    const int i = (px < x + radius)         ? px - x
+                : (px >= x + w - radius)    ? (x + w - 1) - px
+                                            : -2;
+    const int j = (py < y + radius)         ? py - y
+                : (py >= y + h - radius)    ? (y + h - 1) - py
+                                            : -2;
+    if (i == -2 || j == -2 || radius == 0) {
+        /* Straight: all or nothing, and no distance to measure. */
+        return (px >= x && px < x + w && py >= y && py < y + h) ? 255 : 0;
+    }
+
+    if (radius > ROUND_MAX_RADIUS) {
+        /* Bigger than anything this interface draws. Measured the long way
+         * rather than growing a table for a case that does not arise. */
+        const float d = round_distance((float)px + 0.5f, (float)py + 0.5f,
+                                       (float)x, (float)y, (float)w, (float)h,
+                                       (float)radius);
+        float coverage = 0.5f - d;
+        if (coverage <= 0.0f) return 0;
+        if (coverage >= 1.0f) return 255;
+        return (int)(coverage * 255.0f + 0.5f);
+    }
+
+    const unsigned char* table = g_corner[radius];
+    if (table == 0) {
+        table = build_corner(radius);
+        if (table == 0)
+            return 255;     /* no room for the table: a hard edge, not a crash */
+    }
+    const int span = radius + 2;
+    return table[(j + 1) * span + (i + 1)];
 }
 
 void draw_round_rect(const struct surface* s, int x, int y, int w, int h,

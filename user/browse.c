@@ -37,13 +37,19 @@
 /* The sidebar is the window's spine: places above, whatever is mounted below.
  * Everything else measures from its right edge. */
 #define SIDEBAR_W 140
-/* One band, and now genuinely one: the window's title strip is this window's
- * to draw, so the navigation, the path, the search box and the menus share the
- * line the title used to have to itself. Before this there were two bars of
- * almost the same height touching each other, saying the same kind of thing.
+/* The control strip, below the title bar the server draws.
  *
- * The height is the chrome's, because that is the strip being taken over. */
-#define TOOLBAR_H WS_TITLE_HEIGHT
+ * They were merged into one band for a while - this window drew its own title
+ * strip and put the navigation, the path, the search box and the menus on the
+ * line the title used to have to itself. One band is fewer pixels, and it cost
+ * more than it saved: the title stopped being a place to grab, so the window
+ * could only be moved by the parts of that line which happened not to be a
+ * control, and every one of those had to be found by hand and handed back to
+ * the server. Two bars, each doing one thing.
+ *
+ * Taller than the title bar rather than the same height, so the two read as a
+ * bar and a strip rather than as one bar drawn twice. */
+#define TOOLBAR_H 34
 #define PATH_H    0
 /* No status bar. It said "14 items", which is a number you can see by looking,
  * and it cost twenty pixels of every window forever to say it. The messages
@@ -1832,10 +1838,6 @@ static int on_event(struct app* a, const struct win_event* e)
     if (a->handled && e->type == WIN_EVENT_MOUSE_DOWN)
         return 0;
     if (e->type == WIN_EVENT_MOUSE_DOWN) {
-        /* This window owns its title strip, so the server no longer
-         * treats a press there as a drag. Anything in that band which
-         * is not one of ours is handed back as one - which is how the
-         * window still moves when you grab the bar. */
         if (on_view(g_v_nav, e->x, e->y)) {
             /* Three arrows sharing one pill: which third was pressed is
              * which one it was. Measured from the frame rather than from
@@ -1850,14 +1852,8 @@ static int on_event(struct app* a, const struct win_event* e)
             else              go_up();
             return 1;
         }
-        if (e->y < TOOLBAR_H && e->x >= SIDEBAR_W &&
-            !on_view(g_v_search, e->x, e->y) &&
-            !on_view(g_v_menu, e->x, e->y)) {
-            win_move_begin(a->id);
-            return 1;
-        }
         if (e->y < TOOLBAR_H && e->x >= SIDEBAR_W)
-            return 0;   /* the components have already had it */
+            return 0;   /* the strip is the components' - they have had it */
         if (e->x < SIDEBAR_W) {
             /* A press in the sidebar might be a click or the start of
              * dragging a pin out; which it was is only known at the
@@ -2157,14 +2153,14 @@ int main(int argc, char** argv)
     /* One band, and now genuinely one: this window draws its own title strip,
      * so navigation, path, search and menus share the line the title used to
      * have to itself. */
-    struct ui_view* bar = ui_box(right, UI_STACK_H, 4, 8);
+    struct ui_view* bar = ui_box(right, UI_STACK_H, 6, 8);
     ui_grow(ui_size(bar, 0, TOOLBAR_H), 0);
-    g_v_nav = ui_grow(ui_size(ui_custom(bar, draw_nav, 0), 84, 22), 0);
+    g_v_nav = ui_grow(ui_size(ui_custom(bar, draw_nav, 0), 90, 24), 0);
     ui_grow(ui_custom(bar, draw_path, 0), 1);
-    g_v_search = ui_grow(ui_size(ui_search(bar, "Search"), 140, 22), 0);
+    g_v_search = ui_grow(ui_size(ui_search(bar, "Search"), 150, 24), 0);
     ui_on(g_v_search, on_search, 0);
     g_v_menu = ui_grow(ui_size(ui_menubar(bar, menu_title, M_COUNT, menu_item,
-                                          g_menu_counts, 0), 146, 22), 0);
+                                          g_menu_counts, 0), 146, 24), 0);
     ui_on(g_v_menu, on_menubar, 0);
 
     g_v_content = ui_grow(ui_custom(right, draw_content, 0), 1);
@@ -2180,11 +2176,9 @@ int main(int argc, char** argv)
      * one band they all live in. Below this it was squeezed to nothing and
      * simply stopped drawing. */
     g_app.min_width = 640; g_app.min_height = 300;
-    /* Its pixels carry alpha, so the glass reaches past the title bar - and
-     * this window draws that bar itself, which is what puts the controls on
-     * the same line as the title rather than in a band beneath it. */
+    /* Its pixels carry alpha, so the glass reaches into it. The title bar is
+     * the server's again; this window's buffer starts below it. */
     g_app.sidebar = SIDEBAR_W;
-    g_app.client_title = 1;
     g_app.root = root;
     g_app.draw = draw_background;
     g_app.event = on_event;

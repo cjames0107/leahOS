@@ -41,7 +41,7 @@ def check(name, exe):
 
         stray = t.faults()
         if stray:
-            keep_binaries(exe)
+            keep_binaries(exe, t.m.log)
             raise Failure("%s: %s" % (exe, stray[0]))
     finally:
         t.stop()

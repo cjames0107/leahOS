@@ -8,14 +8,14 @@ def body(t):
     time.sleep(8)
     t.m.shot("files")
     # The View menu, which is a component now.
-    t.m.click(727, 55)          # "View"
+    t.m.click(727, 85)          # "View"
     time.sleep(2)
     t.m.shot("files-menu")
-    t.m.click(660, 103)         # "as List"
+    t.m.click(660, 133)         # "as List"
     time.sleep(3)
     t.m.shot("files-list")
     # And the search field, which is a component too.
-    t.m.click(572, 55)
+    t.m.click(572, 85)
     time.sleep(1)
     t.m.type("passwd")
     time.sleep(3)

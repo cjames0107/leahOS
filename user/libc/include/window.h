@@ -105,4 +105,24 @@ void win_origin(int id, int* x, int* y);
 /* Whether a server is running, so a client can say so rather than just fail. */
 int win_server_running(void);
 
+/* --- the window table ------------------------------------------------------
+ *
+ * A chain of banks rather than one array - see the note in wproto.h - so a
+ * slot is looked up rather than indexed. Both the server and its clients go
+ * through here, because both of them have to map the same banks and there is
+ * no sense in two copies of that.
+ *
+ * ws_slot returns 0 for a slot in a bank this process cannot reach, which is
+ * the same answer as "no such window" and is what every caller already had to
+ * handle. */
+struct ws_window* ws_slot(int slot);
+
+/* How many slots exist right now: banks * WS_BANK_WINDOWS. It grows while the
+ * machine runs, so re-read it rather than remembering it. */
+int ws_slot_count(void);
+
+/* Make another bank, and return the new slot count - or -1 if the directory is
+ * full or the segment could not be made. */
+int ws_add_bank(void);
+
 #endif /* _WINDOW_H */

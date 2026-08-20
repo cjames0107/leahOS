@@ -25,7 +25,17 @@
 #include <stdint.h>
 
 #define WS_CONTROL_KEY    1u          /* shm key of the control block      */
-#define WS_PIXEL_KEY_BASE 0x1000u     /* base of the per-window pixel keys  */
+/* Base of the per-window pixel keys, and of the window banks.
+ *
+ * The pixel base was 0x1000, which was fine while there could only be sixteen
+ * windows: the keys ran to 0x13FF and nothing else lived there. Slots are no
+ * longer bounded by an array, so the range is no longer bounded either, and
+ * 0x1000 + slot * 64 walks straight into the audio, block, network and
+ * filesystem keys at 0x4155, 0x424C, 0x4E49 and 0x5646 - at about the two
+ * hundredth window, which is now reachable. Moved somewhere with nothing above
+ * it for two billion keys. */
+#define WS_PIXEL_KEY_BASE 0x80000000u
+#define WS_BANK_KEY_BASE  0x400u      /* base of the window-table banks     */
 
 /* The key of a window's pixels. It carries a generation as well as a slot,
  * because a resize replaces the segment rather than growing it - there is no
@@ -53,14 +63,27 @@
  * for the whole interface is what makes it read as one interface. */
 #define WS_CORNER       8
 
-/* How many windows can exist at once.
+/* How many windows can exist at once: as many as the machine has room for.
  *
- * It was 16, which a desktop reaches: the desktop itself, a terminal and a
- * dozen applications is an ordinary afternoon, and the sixteenth window did
- * not open. Worse, it failed silently from the person's point of view - the
- * application started, could not get a slot, and exited. The block is sized
- * with sizeof, so this costs a few hundred bytes of shared memory. */
-#define WS_MAX_WINDOWS 32
+ * It was a fixed array. Sixteen, which an ordinary afternoon reaches - the
+ * desktop, a terminal and a dozen applications - and then thirty-two, which
+ * only moves the wall. Either way the failure was the worst kind: the
+ * application started, could not get a slot, exited, and from where the person
+ * was sitting nothing happened at all.
+ *
+ * So the table is a chain of banks. Bank 0 is inside the control block, which
+ * is the common case and costs no extra mapping; every bank after it is a
+ * public segment of its own, created by whichever client first needs a slot in
+ * it. `banks` says how many exist, and it only ever grows - a bank is never
+ * taken away, because a client holding a pointer into it has no way to be told.
+ *
+ * WS_MAX_BANKS bounds the directory, not the desktop: 64 banks is 2048
+ * windows, and the kernel has 512 shared segments in total, one of which every
+ * window's pixels need. The machine runs out an order of magnitude first. */
+#define WS_BANK_WINDOWS 32
+#define WS_BANK_KEY(b)  (WS_BANK_KEY_BASE + (unsigned)(b))
+#define WS_MAX_BANKS    64
+#define WS_MAX_WINDOWS  (WS_BANK_WINDOWS * WS_MAX_BANKS)
 #define WS_EVENT_SLOTS 32
 #define WS_TITLE_LEN   32
 
@@ -310,14 +333,21 @@ struct ws_theme {
 #define WS_PATTERN_DITHER 4
 #define WS_PATTERN_COUNT  5
 
+/* Every bank after the first. Its own segment, under WS_BANK_KEY(b). */
+struct ws_bank {
+    struct ws_window windows[WS_BANK_WINDOWS];
+};
+
 struct ws_shared {
     volatile uint32_t magic;
     volatile uint32_t server_pid;
     volatile uint32_t quit;         /* set by the server as it exits */
-    volatile uint32_t reserved;
+    /* How many banks exist, including the one below. Never less than 1, and
+     * only ever raised - by a client that ran out of slots and made another. */
+    volatile uint32_t banks;
     struct ws_theme theme;
     struct ws_drag  drag;
-    struct ws_window windows[WS_MAX_WINDOWS];
+    struct ws_window windows[WS_BANK_WINDOWS];
 };
 
 #endif /* _WPROTO_H */

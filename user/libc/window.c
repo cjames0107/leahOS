@@ -17,13 +17,24 @@
  * on every failed poll would map it thousands of times and exhaust the
  * caller's address space long before the server ever appeared. */
 static struct ws_shared* g_mapped = 0;
-static uint32_t*    g_pixels[WS_MAX_WINDOWS];
-static int          g_pixel_id[WS_MAX_WINDOWS];
-static unsigned long g_pixel_bytes[WS_MAX_WINDOWS];
-static uint32_t     g_pixel_gen[WS_MAX_WINDOWS];
-static uint32_t     g_seen_resize[WS_MAX_WINDOWS];
+
+/* What this process knows about its own windows, indexed by slot.
+ *
+ * Grown rather than declared: a slot number is now a position in a table that
+ * spans several segments, and a fixed array here would put back exactly the
+ * limit the banks removed - a client handed slot 900 would write past the end
+ * of a 32-entry array, which is worse than refusing it. */
+static uint32_t**    g_pixels;
+static int*          g_pixel_id;
+static unsigned long* g_pixel_bytes;
+static uint32_t*     g_pixel_gen;
+static uint32_t*     g_seen_resize;
 /* Whether this window has been told the server is gone, so it is told once. */
-static int          g_server_lost[WS_MAX_WINDOWS];
+static int*          g_server_lost;
+static int           g_known;       /* how many slots those tables hold */
+
+/* The banks, mapped as they are reached. Bank 0 is the control block's own. */
+static struct ws_window* g_bank[WS_MAX_BANKS];
 
 /* Map the control block, once. It is created by the server, so failing to find
  * it simply means the desktop is not running. */
@@ -45,6 +56,102 @@ static struct ws_shared* control(void)
 
 int win_server_running(void) { return control() != 0; }
 
+/* --- the window table ------------------------------------------------------ */
+
+/* Make the per-slot tables reach at least `slots`. Zeroed as they grow, so a
+ * slot nobody has used yet reads as unmapped rather than as whatever the
+ * allocator left there. */
+static int know(int slots)
+{
+    if (slots <= g_known)
+        return 1;
+    struct { void** at; unsigned long each; } table[] = {
+        { (void**)&g_pixels,      sizeof(uint32_t*)     },
+        { (void**)&g_pixel_id,    sizeof(int)           },
+        { (void**)&g_pixel_bytes, sizeof(unsigned long) },
+        { (void**)&g_pixel_gen,   sizeof(uint32_t)      },
+        { (void**)&g_seen_resize, sizeof(uint32_t)      },
+        { (void**)&g_server_lost, sizeof(int)           },
+    };
+    for (unsigned t = 0; t < sizeof(table) / sizeof(table[0]); ++t) {
+        void* grown = malloc(table[t].each * (unsigned long)slots);
+        if (grown == 0)
+            return 0;       /* what was already there is still valid */
+        memset(grown, 0, table[t].each * (unsigned long)slots);
+        if (*table[t].at != 0)
+            memcpy(grown, *table[t].at, table[t].each * (unsigned long)g_known);
+        free(*table[t].at);
+        *table[t].at = grown;
+    }
+    g_known = slots;
+    return 1;
+}
+
+int ws_slot_count(void)
+{
+    const struct ws_shared* block = control();
+    if (block == 0)
+        return 0;
+    unsigned banks = __atomic_load_n(&block->banks, __ATOMIC_ACQUIRE);
+    if (banks < 1) banks = 1;
+    if (banks > WS_MAX_BANKS) banks = WS_MAX_BANKS;
+    return (int)banks * WS_BANK_WINDOWS;
+}
+
+struct ws_window* ws_slot(int slot)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || slot < 0 || slot >= ws_slot_count())
+        return 0;
+    const int bank = slot / WS_BANK_WINDOWS;
+    const int at   = slot % WS_BANK_WINDOWS;
+    if (bank == 0)
+        return &block->windows[at];
+    if (g_bank[bank] == 0) {
+        /* Mapped on first use. The segment already exists - `banks` is only
+         * raised once it does - so this opens rather than creates. */
+        const int id = shm_open(WS_BANK_KEY(bank), sizeof(struct ws_bank),
+                                SHM_PUBLIC);
+        if (id < 0)
+            return 0;
+        g_bank[bank] = (struct ws_window*)shm_map(id);
+        if (g_bank[bank] == 0)
+            return 0;
+    }
+    return &g_bank[bank][at];
+}
+
+int ws_add_bank(void)
+{
+    struct ws_shared* block = control();
+    if (block == 0)
+        return -1;
+    unsigned have = __atomic_load_n(&block->banks, __ATOMIC_ACQUIRE);
+    if (have < 1) have = 1;
+    if (have >= WS_MAX_BANKS)
+        return -1;
+
+    /* Made before it is announced, and announced with a compare-and-swap:
+     * two clients can run out of slots at the same moment, and both are
+     * allowed to make the same bank - shm_open on one key returns one
+     * segment. What must not happen is `banks` going backwards. */
+    const int id = shm_open(WS_BANK_KEY((int)have), sizeof(struct ws_bank),
+                            SHM_PUBLIC);
+    if (id < 0)
+        return -1;
+    struct ws_window* fresh = (struct ws_window*)shm_map(id);
+    if (fresh == 0)
+        return -1;
+    g_bank[have] = fresh;
+
+    unsigned seen = have;
+    while (seen < have + 1 &&
+           !__atomic_compare_exchange_n(&block->banks, &seen, have + 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        ;
+    return ws_slot_count();
+}
+
 int win_create(int x, int y, unsigned width, unsigned height, const char* title)
 {
     struct ws_shared* block = control();
@@ -55,19 +162,39 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
      * three of them together - so the claim is a compare-and-swap rather than a
      * lock: exactly one caller can move a slot out of FREE. */
     int slot = -1;
-    for (unsigned i = 0; i < WS_MAX_WINDOWS; ++i) {
-        uint32_t expected = WS_SLOT_FREE;
-        if (__atomic_compare_exchange_n(&block->windows[i].state, &expected,
-                                        WS_SLOT_CLAIMED, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-            slot = (int)i;
-            break;
+    for (int attempt = 0; attempt < 2 && slot < 0; ++attempt) {
+        const int slots = ws_slot_count();
+        for (int i = 0; i < slots; ++i) {
+            struct ws_window* candidate = ws_slot(i);
+            if (candidate == 0)
+                continue;
+            uint32_t expected = WS_SLOT_FREE;
+            if (__atomic_compare_exchange_n(&candidate->state, &expected,
+                                            WS_SLOT_CLAIMED, 0,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_RELAXED)) {
+                slot = i;
+                break;
+            }
         }
+        /* Every slot taken: make another bank and walk it. Once - if the
+         * second pass also finds nothing, another client took the new slots
+         * in between, and looping on that is a way to spin forever. */
+        if (slot < 0 && attempt == 0 && ws_add_bank() < 0)
+            break;
     }
     if (slot < 0)
         return -1;
 
-    struct ws_window* w = &block->windows[slot];
+    struct ws_window* w = ws_slot(slot);
+    /* The slot is claimed from here on, so every way out has to give it back -
+     * a slot left in CLAIMED is one the server never draws and no client can
+     * ever win again. */
+    if (w == 0 || !know(ws_slot_count())) {
+        if (w != 0)
+            __atomic_store_n(&w->state, WS_SLOT_FREE, __ATOMIC_RELEASE);
+        return -1;
+    }
 
     /* The pixels are this client's own segment, keyed by the slot so the server
      * knows where to find them. Owned by this user, so another user cannot map
@@ -127,17 +254,17 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
 
 uint32_t* win_map(int id)
 {
-    if (id < 0 || id >= WS_MAX_WINDOWS)
+    if (id < 0 || id >= g_known)
         return 0;
     return g_pixels[id];        /* mapped by win_create; this is just the handle */
 }
 
 void win_present(int id)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    __atomic_add_fetch(&block->windows[id].present, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&w->present, 1, __ATOMIC_RELEASE);
 }
 
 /* Answer a resize the server asked for.
@@ -203,7 +330,7 @@ static int apply_resize(int id, struct ws_window* w, struct win_event* out)
 
 int win_poll(int id, struct win_event* out)
 {
-    if (id < 0 || id >= WS_MAX_WINDOWS)
+    if (id < 0 || id >= g_known)
         return 0;
 
     struct ws_shared* block = control();
@@ -224,7 +351,9 @@ int win_poll(int id, struct win_event* out)
         }
         return 0;
     }
-    struct ws_window* w = &block->windows[id];
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
+        return 0;
 
     /* Ahead of the queue: a client that is told it grew before it is told
      * anything else cannot draw into the old buffer by mistake. */
@@ -246,13 +375,13 @@ int win_poll(int id, struct win_event* out)
 
 void win_destroy(int id)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0 || id >= g_known)
         return;
 
     /* Release the slot first, so the server stops drawing from these pixels
      * before they are given up. */
-    __atomic_store_n(&block->windows[id].state, WS_SLOT_FREE, __ATOMIC_RELEASE);
+    __atomic_store_n(&w->state, WS_SLOT_FREE, __ATOMIC_RELEASE);
 
     /* Then let the segment go. The server may still have it mapped; its own
      * reference keeps the pages alive until it unmaps them. Dropping the key is
@@ -271,45 +400,45 @@ void win_destroy(int id)
 
 void win_size(int id, unsigned* width, unsigned* height)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    const struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    if (width != 0)  *width = block->windows[id].width;
-    if (height != 0) *height = block->windows[id].height;
+    if (width != 0)  *width = w->width;
+    if (height != 0) *height = w->height;
 }
 
 void win_set_min_size(int id, unsigned width, unsigned height)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    block->windows[id].min_width = width;
-    block->windows[id].min_height = height;
+    w->min_width = width;
+    w->min_height = height;
 }
 
 void win_set_sidebar(int id, unsigned width)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    block->windows[id].sidebar = width;
+    w->sidebar = width;
 }
 
 void win_set_alpha(int id)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    block->windows[id].flags |= WS_FLAG_ALPHA;
+    w->flags |= WS_FLAG_ALPHA;
 }
 
 /* The client draws its own title strip, and its buffer is that much taller. */
 void win_set_client_title(int id)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    block->windows[id].flags |= WS_FLAG_CLIENT_TITLE;
+    w->flags |= WS_FLAG_CLIENT_TITLE;
 }
 
 /* "That press was not one of my controls - move the window instead."
@@ -318,10 +447,10 @@ void win_set_client_title(int id)
  * server is already handling the drag itself. */
 void win_move_begin(int id)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    __atomic_add_fetch(&block->windows[id].move_request, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&w->move_request, 1, __ATOMIC_RELEASE);
 }
 
 /* A panel of the application's own: no chrome, and the server leaves its
@@ -329,18 +458,18 @@ void win_move_begin(int id)
  * window rather than something drawn over one. */
 void win_set_sheet(int id)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    block->windows[id].flags |= WS_FLAG_SHEET;
+    w->flags |= WS_FLAG_SHEET;
 }
 
 void win_set_desktop(int id)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
         return;
-    block->windows[id].flags |= WS_FLAG_DESKTOP;
+    w->flags |= WS_FLAG_DESKTOP;
 }
 
 /* --- dragging things between windows ------------------------------------- */
@@ -432,17 +561,16 @@ void win_drop_reject(void)
 
 void win_origin(int id, int* x, int* y)
 {
-    struct ws_shared* block = control();
-    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS) {
+    const struct ws_window* w = ws_slot(id);
+    if (w == 0) {
         if (x != 0) *x = 0;
         if (y != 0) *y = 0;
         return;
     }
     /* The frame's top-left plus the chrome, so this is where the content
      * begins - which is what a client's own coordinates are relative to. */
-    const int chrome = (block->windows[id].flags & WS_FLAG_DESKTOP) ? 0 : 1;
-    if (x != 0) *x = block->windows[id].x + (chrome ? WS_BORDER : 0);
+    const int chrome = (w->flags & WS_FLAG_DESKTOP) ? 0 : 1;
+    if (x != 0) *x = w->x + (chrome ? WS_BORDER : 0);
     if (y != 0)
-        *y = block->windows[id].y +
-             (chrome ? WS_BORDER + WS_TITLE_HEIGHT : 0);
+        *y = w->y + (chrome ? WS_BORDER + WS_TITLE_HEIGHT : 0);
 }

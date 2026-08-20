@@ -21,6 +21,30 @@ SCRATCH = os.path.dirname(os.path.abspath(__file__))
 SOCK = os.environ.get("LEAH_MONITOR", "/tmp/leah-monitor.sock")
 LOG = os.environ.get("LEAH_SERIAL", "/tmp/leah-serial.log")
 
+# One serial log and one monitor socket per machine, not per harness.
+#
+# They used to be two fixed paths. That is fine while exactly one machine is
+# ever running, and a check that boots a machine per application is not that: a
+# machine that has been told to quit is still alive for a moment, and for that
+# moment two of them are writing the same serial file and answering on the same
+# socket name. The next check then reads a log two machines are appending to
+# and drives whichever one happened to bind - so it waits for a login prompt
+# that already went past, or types into a machine it is not looking at.
+#
+# The symptom was an application "not starting" and a boot that "stalled",
+# neither of which had anything to do with the guest. The environment variables
+# still name the first machine's paths, so `LEAH_SERIAL=... make headless` and
+# anything else pointing at them keeps working.
+_next_id = [0]
+
+
+def _paths():
+    n = _next_id[0]
+    _next_id[0] += 1
+    if n == 0:
+        return SOCK, LOG
+    return ("%s.%d" % (SOCK, n), "%s.%d" % (LOG, n))
+
 KEYMAP = {
     ' ': 'spc', '\n': 'ret', '.': 'dot', '/': 'slash', '-': 'minus',
     ',': 'comma', ';': 'semicolon', "'": 'apostrophe', '=': 'equal',
@@ -37,7 +61,8 @@ KEYMAP = {
 
 class Machine:
     def __init__(self, cpus=1, mem="512M"):
-        for p in (SOCK, LOG):
+        self.sock, self.log = _paths()
+        for p in (self.sock, self.log):
             if os.path.exists(p):
                 os.remove(p)
         # The machine comes from the Makefile, not from a copy kept here.
@@ -64,17 +89,17 @@ class Machine:
             # everything when the machine stops.
             "-snapshot",
             "-display", "none",
-            "-serial", f"file:{LOG}",
-            "-monitor", f"unix:{SOCK},server,nowait",
+            "-serial", f"file:{self.log}",
+            "-monitor", f"unix:{self.sock},server,nowait",
         ], cwd=ROOT)     # the Makefile names its images relatively
         for _ in range(200):
-            if os.path.exists(SOCK):
+            if os.path.exists(self.sock):
                 break
             time.sleep(0.05)
         self.mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         for _ in range(100):
             try:
-                self.mon.connect(SOCK)
+                self.mon.connect(self.sock)
                 break
             except OSError:
                 time.sleep(0.05)
@@ -197,7 +222,7 @@ class Machine:
 
     def serial(self):
         try:
-            with open(LOG, "r", errors="replace") as f:
+            with open(self.log, "r", errors="replace") as f:
                 return f.read()
         except OSError:
             return ""
@@ -228,6 +253,18 @@ class Machine:
             self.proc.wait(timeout=10)
         except Exception:
             self.proc.kill()
+        # And wait for the kill to land. A run that boots a machine per check
+        # otherwise hands the next one a host still running the last, and two
+        # emulators without acceleration on this host do not take twice as long
+        # each - they take much longer, and the run reads as a hang.
+        try:
+            self.proc.wait(timeout=15)
+        except Exception:
+            pass
+        try:
+            os.remove(self.sock)
+        except OSError:
+            pass
 
 
 # --- what a test is made of --------------------------------------------------
@@ -335,7 +372,7 @@ class Test:
         self.m.stop()
 
 
-def keep_binaries(name):
+def keep_binaries(name, log=LOG):
     """Copy the ELFs aside when a run has faulted.
 
     A user fault names an address, and turning an address back into a line
@@ -349,7 +386,7 @@ def keep_binaries(name):
     afterwards.
     """
     try:
-        with open(LOG, "r", errors="replace") as f:
+        with open(log, "r", errors="replace") as f:
             text = f.read()
         if "faulted" not in text and "stack smashed" not in text:
             return
@@ -361,7 +398,7 @@ def keep_binaries(name):
         import glob, shutil
         for elf in glob.glob(os.path.join(ROOT, "build", "*.elf")):
             shutil.copy2(elf, keep)
-        shutil.copy2(LOG, os.path.join(keep, "serial.log"))
+        shutil.copy2(log, os.path.join(keep, "serial.log"))
         print("  faulted: binaries kept in %s" % keep)
     except OSError:
         pass
@@ -376,7 +413,7 @@ def main(name, body):
         body(t)
     except Failure as e:
         print("FAIL  %s: %s" % (name, e))
-        keep_binaries(name)
+        keep_binaries(name, t.m.log if t else LOG)
         if t: t.stop()
         sys.exit(1)
     except Exception as e:                       # a broken harness, not a
@@ -388,7 +425,7 @@ def main(name, body):
     # result, which is how this check came to exist.
     stray = t.faults()
     if stray:
-        keep_binaries(name)
+        keep_binaries(name, t.m.log)
     if stray:
         print("FAIL  %s: %d unexpected fault(s)" % (name, len(stray)))
         for line in stray[:8]:
