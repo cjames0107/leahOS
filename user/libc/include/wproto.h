@@ -94,6 +94,20 @@
  * the only division that leaves neither guessing about the other. */
 #define WS_FLAG_CLIENT_TITLE 4u
 
+/* A sheet: a panel of this application's own, centred over the window it
+ * belongs to, with no title bar, no controls, and no way to move or resize it.
+ *
+ * Dialogues used to be drawn into the window that raised them, which works
+ * until the window's pixels are the document. Paint's canvas *is* its buffer -
+ * there is no model behind it - so a save dialogue drawn over the picture
+ * destroyed the part of the picture it covered, permanently, and then the
+ * picture was saved with the hole in it. No amount of drawing order fixes that:
+ * what is underneath was never stored anywhere.
+ *
+ * So a sheet is a real window. It has its own pixels, and the one it belongs to
+ * is untouched beneath it. */
+#define WS_FLAG_SHEET 8u
+
 /* Slot states. A client walks 0 -> CLAIMED -> LIVE and finally back to FREE. */
 #define WS_SLOT_FREE    0u
 #define WS_SLOT_CLAIMED 1u   /* won by a client, not yet filled in           */

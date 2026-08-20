@@ -10,6 +10,7 @@
  * will open.
  */
 
+#include <app.h>
 #include <dialog.h>
 #include <image.h>
 #include <stdio.h>
@@ -166,10 +167,26 @@ static void save_to(const char* path, int png)
 }
 
 /* Ask where, rather than choosing for the user. */
+static struct app g_app;
+static void draw_chrome(void);
+
+/* Where the picture goes, once the sheet has been answered. */
+static void saved(struct app* a, int result)
+{
+    if (result)
+        save_to(app_sheet_path(a), g_pending_png);
+    /* The canvas is untouched either way: the sheet was its own window and
+     * never drew a pixel into this one. That is the whole reason it is a
+     * window - what a dialogue covers here is the picture, and there is no
+     * copy of the picture to put back. */
+    draw_chrome();
+}
+
 static void save(int png)
 {
     g_pending_png = png;
-    dlg_save("/", png ? "picture.png" : "picture.gif");
+    g_app.sheet_done = saved;
+    app_sheet_save(&g_app, "/", png ? "picture.png" : "picture.gif");
     snprintf(g_note, sizeof(g_note), "choose where to save");
 }
 
@@ -193,107 +210,114 @@ static void draw_chrome(void)
     wg_text_clipped(6, (int)g_h - STATUS_H + 1, g_note, WG_INK, (int)g_w - 12);
 }
 
+static int on_event(struct app* a, const struct win_event* e);
+static void on_draw(struct app* a);
+
 int main(int argc, char** argv)
 {
-    const int wx = argc > 1 ? atoi_simple(argv[1]) : 120;
-    const int wy = argc > 2 ? atoi_simple(argv[2]) : 90;
-    if (wg_font() != 0)
-        return 1;
-    const int id = win_create(wx, wy, g_w, g_h, "Paint");
-    if (id < 0) {
-        printf("paint: no window server\n");
-        return 1;
-    }
-    g_px = win_map(id);
-    if (g_px == 0)
-        return 1;
-    win_set_min_size(id, 450, 260);
-    wg_target(g_px, g_w, g_h);
+    g_app.title = "Paint";
+    g_app.width = g_w; g_app.height = g_h;
+    g_app.min_width = 450; g_app.min_height = 260;
+    g_app.draw = on_draw;
+    g_app.event = on_event;
+    /* Alpha, so the glass reaches into it like every other window. The canvas
+     * is opaque where it has been drawn on, which is what clear_canvas does. */
+    return app_run(&g_app, argc, argv);
+}
 
-    layout();
-    clear_canvas();
+/* Only the chrome. The canvas is the buffer itself - there is no model behind
+ * it - so anything that repainted the whole window would erase the picture.
+ * That is also why the framework is given a `draw` at all: without one it
+ * would clear the window on every pass. */
+/* Paint reaches into the window's pixels directly - the canvas *is* the buffer
+ * - so it has to take the framework's, and take it again after every resize.
+ * The buffer is a different buffer then, and holding the old pointer means
+ * drawing into a mapping nobody is showing. */
+static void adopt(struct app* a)
+{
+    g_px = a->px;
+    g_w = a->w;
+    g_h = a->h;
+}
+
+static void on_draw(struct app* a)
+{
+    static int ready;
+    adopt(a);
+    if (!ready) {
+        /* What main used to do before the loop started. */
+        layout();
+        clear_canvas();
+        ready = 1;
+    }
     draw_chrome();
-    win_present(id);
+}
 
-    for (;;) {
-        struct win_event e;
-        while (win_poll(id, &e)) {
-            if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
-
-            /* While a dialogue is up it takes the input; the drawing tools must
-             * not also act on a click meant for it. */
-            if (dlg_active() && e.type != WIN_EVENT_RESIZE) {
-                if (dlg_event(&e) == DLG_ACCEPT)
-                    save_to(dlg_path(), g_pending_png);
-                draw_chrome();
-                dlg_draw((int)g_w, (int)g_h);
-                win_present(id);
-                continue;
-            }
-
-            if (e.type == WIN_EVENT_RESIZE) {
-                g_w = (unsigned)e.x; g_h = (unsigned)e.y;
-                g_px = win_map(id);
-                if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
-                layout();
-                clear_canvas();     /* the buffer is new and starts blank */
-            } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
-                int handled = 0;
-                for (int i = 0; i < TOOLS; ++i)
-                    if (inside(&g_tool_box[i], e.x, e.y)) { g_tool = i; handled = 1; }
-                g_pick_drag = wg_rgb_hit(PICK_X, PICK_Y, PICK_W, e.x, e.y);
-                if (g_pick_drag >= 0) {
-                    g_colour = wg_rgb_move(g_colour, g_pick_drag, PICK_X,
-                                           PICK_W, e.x);
-                    handled = 1;
-                }
-                for (int i = 0; i < 3; ++i)
-                    if (inside(&g_size_box[i], e.x, e.y)) { g_size = i + 1; handled = 1; }
-                if (inside(&g_clr, e.x, e.y)) { clear_canvas(); handled = 1; }
-                else if (inside(&g_png, e.x, e.y)) { save(1); handled = 1; }
-                else if (inside(&g_gif, e.x, e.y)) { save(0); handled = 1; }
-
-                if (!handled && e.y >= canvas_top()) {
-                    const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
-                    g_ax = g_lx = e.x; g_ay = g_ly = e.y;
-                    if (g_tool == T_FILL) {
-                        flood(e.x, e.y, ink);
-                    } else if (g_tool == T_PENCIL || g_tool == T_ERASE) {
-                        dot(e.x, e.y, ink);
-                        g_drawing = 1;
-                    } else {
-                        g_drawing = 1;      /* line and rect commit on release */
-                    }
-                }
-            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_pick_drag >= 0) {
-                g_colour = wg_rgb_move(g_colour, g_pick_drag, PICK_X, PICK_W,
-                                       e.x);
-            } else if (e.type == WIN_EVENT_MOUSE_MOVE && g_drawing) {
-                if (g_tool == T_PENCIL || g_tool == T_ERASE) {
-                    const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
-                    line(g_lx, g_ly, e.x, e.y, ink);
-                    g_lx = e.x; g_ly = e.y;
-                }
-            } else if (e.type == WIN_EVENT_MOUSE_UP) {
-                g_pick_drag = -1;
-                if (g_drawing && g_tool == T_LINE)
-                    line(g_ax, g_ay, e.x, e.y, g_colour);
-                else if (g_drawing && g_tool == T_RECT)
-                    rect_outline(g_ax, g_ay, e.x, e.y, g_colour);
-                g_drawing = 0;
-            } else if (e.type == WIN_EVENT_KEY) {
-                if (e.key == 'c') clear_canvas();
-                else if (e.key == 'p') save(1);
-                else if (e.key == 'g') save(0);
-                else if (e.key >= '1' && e.key <= '3') g_size = (int)e.key - '0';
-            } else {
-                continue;
-            }
-            draw_chrome();
-            dlg_draw((int)g_w, (int)g_h);
-            win_present(id);
-        }
-        msleep(15);
+static int on_event(struct app* a, const struct win_event* e)
+{
+    adopt(a);
+    if (e->type == WIN_EVENT_RESIZE) {
+        layout();
+        clear_canvas();         /* the buffer is new and starts blank */
+        return 1;
     }
+    if (e->type == WIN_EVENT_MOUSE_DOWN) {
+        int handled = 0;
+        for (int i = 0; i < TOOLS; ++i)
+            if (inside(&g_tool_box[i], e->x, e->y)) { g_tool = i; handled = 1; }
+        g_pick_drag = wg_rgb_hit(PICK_X, PICK_Y, PICK_W, e->x, e->y);
+        if (g_pick_drag >= 0) {
+            g_colour = wg_rgb_move(g_colour, g_pick_drag, PICK_X, PICK_W, e->x);
+            handled = 1;
+        }
+        for (int i = 0; i < 3; ++i)
+            if (inside(&g_size_box[i], e->x, e->y)) { g_size = i + 1; handled = 1; }
+        if (inside(&g_clr, e->x, e->y)) { clear_canvas(); handled = 1; }
+        else if (inside(&g_png, e->x, e->y)) { save(1); handled = 1; }
+        else if (inside(&g_gif, e->x, e->y)) { save(0); handled = 1; }
+
+        if (!handled && e->y >= canvas_top()) {
+            const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
+            g_ax = g_lx = e->x; g_ay = g_ly = e->y;
+            if (g_tool == T_FILL) {
+                flood(e->x, e->y, ink);
+            } else if (g_tool == T_PENCIL || g_tool == T_ERASE) {
+                dot(e->x, e->y, ink);
+                g_drawing = 1;
+            } else {
+                g_drawing = 1;      /* line and rect commit on release */
+            }
+        }
+        return 1;
+    }
+    if (e->type == WIN_EVENT_MOUSE_MOVE && g_pick_drag >= 0) {
+        g_colour = wg_rgb_move(g_colour, g_pick_drag, PICK_X, PICK_W, e->x);
+        return 1;
+    }
+    if (e->type == WIN_EVENT_MOUSE_MOVE && g_drawing) {
+        if (g_tool == T_PENCIL || g_tool == T_ERASE) {
+            const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
+            line(g_lx, g_ly, e->x, e->y, ink);
+            g_lx = e->x; g_ly = e->y;
+        }
+        return 1;
+    }
+    if (e->type == WIN_EVENT_MOUSE_UP) {
+        g_pick_drag = -1;
+        if (g_drawing && g_tool == T_LINE)
+            line(g_ax, g_ay, e->x, e->y, g_colour);
+        else if (g_drawing && g_tool == T_RECT)
+            rect_outline(g_ax, g_ay, e->x, e->y, g_colour);
+        g_drawing = 0;
+        return 1;
+    }
+    if (e->type == WIN_EVENT_KEY) {
+        if (e->key == 'c') clear_canvas();
+        else if (e->key == 'p') save(1);
+        else if (e->key == 'g') save(0);
+        else if (e->key >= '1' && e->key <= '3') g_size = (int)e->key - '0';
+        else return 0;
+        return 1;
+    }
+    return 0;
 }

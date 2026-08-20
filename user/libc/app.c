@@ -20,6 +20,7 @@
 #include <dialog.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 void app_quit(struct app* a, int status)
@@ -67,6 +68,153 @@ static void paint(struct app* a)
         ui_draw(a->root);
     menu_draw();
     win_present(a->id);
+
+    /* Then the sheet, into its own buffer. The toolkit draws wherever it was
+     * last pointed, so the two are painted one after the other rather than
+     * together - and it is pointed back at the window afterwards, because
+     * every other part of this loop assumes that. */
+    if (app_sheet_open(a)) {
+        wg_target(a->sheet_px, a->sheet_w, a->sheet_h);
+        wg_theme();
+        wg_glass_clear();
+        const struct ui_rect all = { 0, 0, (int)a->sheet_w, (int)a->sheet_h };
+        ui_layout(a->sheet, all);
+        ui_draw(a->sheet);
+        win_present(a->sheet_id);
+        wg_target(a->px, a->w, a->h);
+    }
+}
+
+int app_sheet_open(const struct app* a)
+{
+    return a != 0 && a->sheet != 0 && a->sheet_id >= 0;
+}
+
+struct ui_view* app_sheet(struct app* a, unsigned w, unsigned h)
+{
+    if (a == 0)
+        return 0;
+    if (app_sheet_open(a))
+        app_sheet_close(a, 0);      /* one at a time; see app.h */
+
+    int px = 0, py = 0;
+    win_origin(a->id, &px, &py);
+    /* Centred on the window it belongs to, which is what makes it read as
+     * that window's question rather than as another window that happens to
+     * have appeared. */
+    const int x = px + ((int)a->w - (int)w) / 2;
+    const int y = py + ((int)a->h - (int)h) / 2;
+
+    a->sheet_id = win_create(x > 0 ? x : 0, y > 0 ? y : 0, w, h, "");
+    if (a->sheet_id < 0) {
+        a->sheet = 0;
+        return 0;
+    }
+    win_set_sheet(a->sheet_id);
+    win_set_alpha(a->sheet_id);
+    a->sheet_px = win_map(a->sheet_id);
+    if (a->sheet_px == 0) {
+        win_destroy(a->sheet_id);
+        a->sheet_id = -1;
+        a->sheet = 0;
+        return 0;
+    }
+    a->sheet_w = w;
+    a->sheet_h = h;
+
+    /* Its own root, and the frames are laid out when it is first painted. */
+    a->sheet = ui_box(0, UI_STACK_V, 16, 10);
+    return a->sheet;
+}
+
+void app_sheet_close(struct app* a, int result)
+{
+    if (a == 0 || a->sheet_id < 0)
+        return;
+    win_destroy(a->sheet_id);
+    a->sheet_id = -1;
+    a->sheet = 0;
+    a->sheet_px = 0;
+    /* The toolkit is pointed back at the window before anything else draws,
+     * or the next paint goes into a buffer that has been destroyed. */
+    if (a->px != 0)
+        wg_target(a->px, a->w, a->h);
+    if (a->sheet_done != 0)
+        a->sheet_done(a, result);
+}
+
+/* --- the saving sheet -----------------------------------------------------
+ *
+ * Provided rather than left to each application, because "where shall I put
+ * this" is the same question everywhere and was previously answered by a
+ * dialogue drawn over the document it was asking about.
+ */
+static char g_sheet_dir[192];
+static char g_sheet_path[256];
+static struct ui_view* g_sheet_field;
+
+const char* app_sheet_path(const struct app* a)
+{
+    (void)a;
+    return g_sheet_path;
+}
+
+static void sheet_save_clicked(struct ui_view* v, void* user)
+{
+    (void)v;
+    struct app* a = (struct app*)user;
+    const char* name = ui_text(g_sheet_field);
+    if (name == 0 || name[0] == '\0') {
+        app_sheet_close(a, 0);
+        return;
+    }
+    /* A name with a slash in it is a path and is taken as written; anything
+     * else is a name inside the directory being shown. */
+    if (name[0] == '/')
+        snprintf(g_sheet_path, sizeof(g_sheet_path), "%s", name);
+    else if (g_sheet_dir[0] != '\0' && g_sheet_dir[strlen(g_sheet_dir) - 1] == '/')
+        snprintf(g_sheet_path, sizeof(g_sheet_path), "%s%s", g_sheet_dir, name);
+    else
+        snprintf(g_sheet_path, sizeof(g_sheet_path), "%s/%s", g_sheet_dir, name);
+    app_sheet_close(a, 1);
+}
+
+static void sheet_cancel_clicked(struct ui_view* v, void* user)
+{
+    (void)v;
+    app_sheet_close((struct app*)user, 0);
+}
+
+struct ui_view* app_sheet_save(struct app* a, const char* dir,
+                               const char* suggested)
+{
+    snprintf(g_sheet_dir, sizeof(g_sheet_dir), "%s", dir != 0 ? dir : "/");
+    g_sheet_path[0] = '\0';
+
+    struct ui_view* root = app_sheet(a, 420, 150);
+    if (root == 0)
+        return 0;
+
+    ui_grow(ui_label(root, "Save as"), 0);
+    char where[220];
+    snprintf(where, sizeof(where), "in %s", g_sheet_dir);
+    ui_grow(ui_label(root, where), 0);
+
+    g_sheet_field = ui_field(root, suggested != 0 ? suggested : "");
+    ui_grow(g_sheet_field, 0);
+    /* Return in the field is the same as pressing Save, which is what anyone
+     * typing a filename expects to be able to do. */
+    ui_on(g_sheet_field, sheet_save_clicked, a);
+    ui_focus(g_sheet_field);
+
+    ui_spacer(root);
+    struct ui_view* row = ui_box(root, UI_STACK_H, 0, 10);
+    ui_size(row, 0, 26);
+    ui_grow(row, 0);
+    ui_spacer(row);
+    ui_grow(ui_button(row, "Cancel", sheet_cancel_clicked, a), 0);
+    ui_grow(ui_button(row, "Save", sheet_save_clicked, a), 0);
+    return root;
 }
 
 void app_relayout(struct app* a)
@@ -125,6 +273,42 @@ int app_run(struct app* a, int argc, char** argv)
     while (!a->quit) {
         int dirty = 0;
         struct win_event e;
+
+        /* The sheet's events first, and while one is up the window's are read
+         * and dropped. That is what modal means here: the question has to be
+         * answered before the thing that asked it can be used again. */
+        while (app_sheet_open(a) && win_poll(a->sheet_id, &e)) {
+            if (e.type == WIN_EVENT_CLOSE) {
+                app_sheet_close(a, 0);
+                dirty = 1;
+                break;
+            }
+            wg_target(a->sheet_px, a->sheet_w, a->sheet_h);
+            dirty |= ui_event(a->sheet, &e);
+            wg_target(a->px, a->w, a->h);
+        }
+        if (app_sheet_open(a)) {
+            struct win_event ignored;
+            while (win_poll(a->id, &ignored)) {
+                /* Except the ones that cannot wait: a resize has already
+                 * happened by the time it is delivered, and a close is the
+                 * person deciding the whole window should go. */
+                if (ignored.type == WIN_EVENT_RESIZE) {
+                    if (resized(a, ignored.x, ignored.y) != 0)
+                        return 1;
+                    dirty = 1;
+                } else if (ignored.type == WIN_EVENT_CLOSE) {
+                    app_sheet_close(a, 0);
+                    win_destroy(a->id);
+                    return a->status;
+                }
+            }
+            if (dirty)
+                paint(a);
+            msleep(15);
+            continue;
+        }
+
         while (win_poll(a->id, &e)) {
             if (e.type == WIN_EVENT_CLOSE) {
                 win_destroy(a->id);

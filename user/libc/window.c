@@ -324,6 +324,17 @@ void win_move_begin(int id)
     __atomic_add_fetch(&block->windows[id].move_request, 1, __ATOMIC_RELEASE);
 }
 
+/* A panel of the application's own: no chrome, and the server leaves its
+ * position alone. See WS_FLAG_SHEET in wproto.h for why a dialogue has to be a
+ * window rather than something drawn over one. */
+void win_set_sheet(int id)
+{
+    struct ws_shared* block = control();
+    if (block == 0 || id < 0 || id >= WS_MAX_WINDOWS)
+        return;
+    block->windows[id].flags |= WS_FLAG_SHEET;
+}
+
 void win_set_desktop(int id)
 {
     struct ws_shared* block = control();

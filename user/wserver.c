@@ -398,6 +398,14 @@ static int is_desktop(int slot)
     return (g_control->windows[slot].flags & WS_FLAG_DESKTOP) != 0;
 }
 
+/* A sheet has no chrome of any kind: no title bar, no controls, no grip. It is
+ * a panel the application put on the screen, and everything about where it is
+ * and when it goes belongs to the application. */
+static int is_sheet(int slot)
+{
+    return (g_control->windows[slot].flags & WS_FLAG_SHEET) != 0;
+}
+
 static unsigned frame_width(int slot)
 {
     return is_desktop(slot) ? g_width[slot] : g_width[slot] + BORDER * 2;
@@ -411,16 +419,24 @@ static int client_title(int slot)
            (g_control->windows[slot].flags & WS_FLAG_CLIENT_TITLE) != 0;
 }
 
+/* Where the client's pixels begin, relative to the frame's top. A sheet has no
+ * title strip to skip. */
+
 /* Where the client's pixels begin, relative to the frame's top. */
 static int content_offset(int slot)
 {
-    return client_title(slot) ? BORDER : BORDER + TITLE_HEIGHT;
+    return (client_title(slot) || is_sheet(slot)) ? BORDER
+                                                  : BORDER + TITLE_HEIGHT;
 }
 
 static unsigned frame_height(int slot)
 {
     if (is_desktop(slot))
         return g_height[slot];
+    /* A sheet is its content and a border, and nothing else - no title to
+     * leave room for and no grip, because it cannot be resized. */
+    if (is_sheet(slot))
+        return g_height[slot] + BORDER * 2;
     /* The client's own height already includes the strip when it draws it. */
     return g_height[slot] + BORDER * 2 + GRIP_H +
            (client_title(slot) ? 0 : TITLE_HEIGHT);
@@ -741,6 +757,11 @@ static void draw_window(int slot, int focused)
     /* The controls and the title both live in the title bar; when the damage
      * does not reach it, drawing them - and measuring and shaping the text -
      * is pure loss. Terminal output never touches it. */
+    /* A sheet has no chrome to draw. The rounded panel and the shadow above
+     * are the whole of its frame. */
+    if (is_sheet(slot))
+        goto contents;
+
     const int bar_bottom = w->y + BORDER + TITLE_HEIGHT;
     if (g_clip.y >= bar_bottom || g_clip.y + g_clip.h <= w->y)
         goto contents;
@@ -1512,17 +1533,20 @@ static void handle_input(void)
 
             int cx, cy;
             close_box(w, &cx, &cy);
-            const int on_close = x >= cx && y >= cy &&
+            /* None of the chrome exists on a sheet, so none of it can be hit:
+             * every press inside one is the client's. */
+            const int sheet = is_sheet(slot);
+            const int on_close = !sheet && x >= cx && y >= cy &&
                                  x < cx + CLOSE_SIZE && y < cy + CLOSE_SIZE;
             /* Not a title press when the client owns those pixels: it gets
              * the event, and hands the drag back with win_move_begin if it
              * turns out not to have been one of its controls. */
-            const int on_title = !client_title(slot) &&
+            const int on_title = !sheet && !client_title(slot) &&
                                  y < w->y + BORDER + TITLE_HEIGHT;
 
             int gx, gy;
             grow_box(slot, &gx, &gy);
-            const int on_grip = x >= gx && y >= gy &&
+            const int on_grip = !sheet && x >= gx && y >= gy &&
                                 x < gx + GRIP_W && y < gy + GRIP_H;
 
             if (is_desktop(slot)) {

@@ -73,12 +73,32 @@ struct app {
 
     void* user;                         /* the application's own state */
 
+    /* --- sheets ----------------------------------------------------------
+     *
+     * A dialogue, as a window of its own centred on this one. It has its own
+     * component tree, takes the keyboard and the pointer while it is up, and
+     * leaves the window beneath it untouched - which is the whole point. A
+     * dialogue drawn *into* its parent destroys whatever it covers, and for a
+     * window whose pixels are the document that is the document.
+     *
+     * Opened with app_sheet, which returns the root to hang components on;
+     * closed by the application calling app_sheet_close, usually from the
+     * action on its buttons. `sheet_done` is told which answer came back.
+     */
+    struct ui_view* sheet;
+    void (*sheet_done)(struct app* a, int result);
+
     /* --- what app_run fills in ------------------------------------------ */
     int        id;                      /* the window */
     uint32_t*  px;                      /* its pixels */
     unsigned   w, h;                    /* its current size */
     int        quit;                    /* set by app_quit */
     int        status;                  /* what main should return */
+
+    /* The sheet's own window, filled in by app_sheet. */
+    int        sheet_id;
+    uint32_t*  sheet_px;
+    unsigned   sheet_w, sheet_h;
 };
 
 /* Open the window and run until it closes. argv[1] and argv[2], when present,
@@ -89,6 +109,28 @@ int app_run(struct app* a, int argc, char** argv);
 /* Rebuild the component tree after its shape has changed - a list gaining
  * rows, a pane being swapped. Layout is re-run on the next pass. */
 void app_relayout(struct app* a);
+
+/* Open a sheet of `w` by `h`, centred on the window, and return the root to
+ * build it out of. Only one at a time: opening a second closes the first,
+ * because two modal panels over one window is not a thing that can be answered.
+ *
+ * The tree comes from the same pool as everything else, so an application that
+ * opens sheets repeatedly should keep the root and reuse it rather than
+ * building a new one each time. */
+struct ui_view* app_sheet(struct app* a, unsigned w, unsigned h);
+
+/* Take the sheet down and tell sheet_done what the answer was. */
+void app_sheet_close(struct app* a, int result);
+
+int app_sheet_open(const struct app* a);
+
+/* A ready-made saving sheet: a name to type, Cancel and Save. sheet_done is
+ * called with 1 when Save was chosen, and app_sheet_path then holds the full
+ * path. Provided rather than left to each application, because it is the same
+ * question every time. */
+struct ui_view* app_sheet_save(struct app* a, const char* dir,
+                               const char* suggested);
+const char* app_sheet_path(const struct app* a);
 
 /* Ask the loop to stop. The window is destroyed and app_run returns. */
 void app_quit(struct app* a, int status);

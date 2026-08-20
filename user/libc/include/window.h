@@ -34,6 +34,11 @@ void win_set_min_size(int id, unsigned width, unsigned height);
  * draggable. Call before drawing; see WS_FLAG_DESKTOP in <wproto.h>. */
 void win_set_desktop(int id);
 
+/* Make this window a sheet: no title bar, no controls, no dragging, no
+ * resizing. For a dialogue, which belongs to the window that raised it and
+ * must not be drawn into it. */
+void win_set_sheet(int id);
+
 /* Draw the title bar yourself. The window's pixel buffer then covers the whole
  * frame - its height includes WS_TITLE_HEIGHT - and the application's controls
  * share that line with the title instead of sitting in a second band below it.
