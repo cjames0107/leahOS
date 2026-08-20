@@ -131,7 +131,7 @@ USRBIN_PROGRAMS := hello gui tone lspci ping ping6 arp nslookup fetch fetch6 env
                  screenshot tests fsbench ipctest nictest nettest blktest vfstest \
                  mvtest v6test churn wintest
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player \
-                diskutil netutil calendar resmon console web
+                diskutil netutil calendar resmon console web write
 USER_PROGRAMS := $(SBIN_PROGRAMS) $(BIN_PROGRAMS) $(USRBIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
 STAGE1_BIN := $(BUILD)/stage1.bin

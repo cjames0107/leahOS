@@ -180,6 +180,7 @@ stage_app Calendar  calendar ""         ""              "Today"
 stage_app "Resource Monitor" resmon  ""      ""              ""
 stage_app Console   console  ""         ""              "Jump to end"
 stage_app Web       web      ""         ".HTML .HTM"    "New tab" "Bookmark this page"
+stage_app Write     write    edit       ".RTF"          "New document" "Open..."
 
 # The manual. Plain text: troff is a typesetting language, and the reason
 # manual pages are written in it is that in 1971 the same source had to drive a

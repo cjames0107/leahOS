@@ -379,6 +379,104 @@ void wg_text(int x, int y, const char* s, uint32_t colour)
     }
 }
 
+/* --- styled text ------------------------------------------------------------
+ *
+ * One typeface, so weight and slant are effects rather than faces. See the
+ * note in widget.h.
+ */
+
+/* How far a row of a glyph leans. A quarter of its height above the baseline
+ * is about the slant a real italic has, and it costs a shift of the row rather
+ * than a resampling of it. */
+static int slant_of(int above_baseline)
+{
+    return above_baseline / 4;
+}
+
+int wg_styled(int x, int y, const char* s, int len, uint32_t colour,
+              int size_px, unsigned style)
+{
+    struct font* f = face();
+    if (f == 0 || s == 0 || len <= 0 || size_px <= 0)
+        return x;
+
+    const int baseline = y + font_ascent(f, size_px);
+    const unsigned alpha = (colour >> 24) != 0 ? (colour >> 24) & 0xFF : 255;
+    const uint32_t rgb = colour & 0x00FFFFFFu;
+    const int bold = (style & WG_STYLE_BOLD) != 0;
+    const int italic = (style & WG_STYLE_ITALIC) != 0;
+    const int start = x;
+
+    const char* at = s;
+    const char* end = s + len;
+    while (at < end) {
+        const unsigned ch = utf8_next(&at);
+        if (ch == 0)
+            break;
+        struct glyph g;
+        if (font_glyph(f, size_px, ch, &g) != 0)
+            continue;
+        for (int gy = 0; gy < g.h; ++gy) {
+            /* The lean is per row and grows with height above the baseline, so
+             * the bottom of a letter stays put and the top moves right. */
+            const int lean = italic ? slant_of(g.top - gy) : 0;
+            for (int gx = 0; gx < g.w; ++gx) {
+                const unsigned cov = g.coverage[(long)gy * g.w + gx];
+                if (cov == 0)
+                    continue;
+                const uint32_t ink =
+                    (((alpha * cov + 127) / 255) << 24) | rgb;
+                blend_px(x + g.left + gx + lean, baseline - g.top + gy, ink);
+                if (bold)
+                    blend_px(x + g.left + gx + lean + 1,
+                             baseline - g.top + gy, ink);
+            }
+        }
+        /* A bold glyph is a pixel wider than the one it was made from, and
+         * without this the extra pixel is drawn over the next letter. */
+        x += g.advance + (bold ? 1 : 0);
+    }
+
+    if ((style & WG_STYLE_UNDERLINE) != 0 && x > start) {
+        const int under = baseline + (size_px / 8 > 1 ? size_px / 8 : 1);
+        wg_fill(start, under, x - start, size_px >= 24 ? 2 : 1, colour);
+    }
+    return x;
+}
+
+int wg_styled_width(const char* s, int len, int size_px, unsigned style)
+{
+    struct font* f = face();
+    if (f == 0 || s == 0 || len <= 0 || size_px <= 0)
+        return 0;
+    const int bold = (style & WG_STYLE_BOLD) != 0;
+    int w = 0;
+    const char* at = s;
+    const char* end = s + len;
+    while (at < end) {
+        const unsigned ch = utf8_next(&at);
+        if (ch == 0)
+            break;
+        struct glyph g;
+        if (font_glyph(f, size_px, ch, &g) != 0)
+            continue;
+        w += g.advance + (bold ? 1 : 0);
+    }
+    return w;
+}
+
+int wg_styled_height(int size_px)
+{
+    struct font* f = face();
+    return f != 0 ? font_line_height(f, size_px) : size_px + 4;
+}
+
+int wg_styled_ascent(int size_px)
+{
+    struct font* f = face();
+    return f != 0 ? font_ascent(f, size_px) : size_px;
+}
+
 void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w)
 {
     if (max_w <= 0)

@@ -102,6 +102,34 @@ int  wg_text_size(void);
  * is what a file listing needs far more often than it needs the whole name. */
 void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w);
 
+/* --- styled text -------------------------------------------------------------
+ *
+ * The same glyphs at a size you choose, with weight, slant and an underline.
+ * There is one typeface on this system, so bold and italic are made rather
+ * than loaded: bold by drawing the glyph twice a pixel apart, italic by
+ * leaning each row of it. That is what a bitmap system did before it had the
+ * fonts, it is honest about being an effect, and it is the difference between
+ * a rich text editor and a plain one.
+ *
+ * `len` is a byte count rather than a terminator, because styled text is drawn
+ * a run at a time out of the middle of a document and copying each run out to
+ * terminate it would be a copy of the document per frame. */
+#define WG_STYLE_BOLD      1u
+#define WG_STYLE_ITALIC    2u
+#define WG_STYLE_UNDERLINE 4u
+
+/* `y` is the top of the line, as with wg_text. Returns where the pen ended, so
+ * runs can be drawn one after another without measuring twice. */
+int wg_styled(int x, int y, const char* s, int len, uint32_t colour,
+              int size_px, unsigned style);
+
+/* What it will measure, without drawing it. */
+int wg_styled_width(const char* s, int len, int size_px, unsigned style);
+
+/* The line height and ascent at a size, for laying text out. */
+int wg_styled_height(int size_px);
+int wg_styled_ascent(int size_px);
+
 /* A push button, drawn pressed when `down`. */
 void wg_button(int x, int y, int w, int h, const char* label, int down);
 

@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <shm.h>
+#include <rtf.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -2024,6 +2025,93 @@ static int is_directory(const char* path)
     return stat(path, &info) == 0 && info.st_type == S_IFDIR;
 }
 
+/* Rich text, which is a file format before it is an editor: what a document
+ * keeps has to survive being written and read back, or the emphasis is a thing
+ * that exists only while the window is open. */
+static void test_rtf(void)
+{
+    section("rich text");
+
+    struct rtf_doc* d = rtf_new();
+    check("an empty document can be made", d != 0);
+    if (d == 0)
+        return;
+
+    const unsigned char plain =
+        (unsigned char)(RTF_SIZE_DEFAULT << RTF_SIZE_SHIFT);
+    rtf_insert(d, 0, "Hello, brave new world.", 23, plain);
+    check("text goes in", d->len == 23);
+
+    /* "brave" bold, "new" italic and bigger, and a backslash and a brace to
+     * be escaped on the way out. */
+    rtf_restyle(d, 7, 12, RTF_BOLD, 1);
+    rtf_restyle(d, 13, 16, RTF_ITALIC, 1);
+    rtf_resize(d, 13, 16, 4);
+    rtf_insert(d, d->len, "\n{a\\b}", 6, plain);
+    d->align = RTF_CENTRE;
+
+    check("bold is on the range that was asked for",
+          (d->style[7] & RTF_BOLD) != 0 && (d->style[6] & RTF_BOLD) == 0 &&
+          (d->style[12] & RTF_BOLD) == 0);
+    check("a range reports only what all of it has",
+          (rtf_style_at(d, 7, 12) & RTF_BOLD) != 0 &&
+          (rtf_style_at(d, 6, 12) & RTF_BOLD) == 0);
+
+    const char* path = "/tmp/rtf-round-trip.rtf";
+    check("it writes", rtf_write(path, d) == 0);
+
+    struct rtf_doc* back = rtf_read(path);
+    check("it reads back", back != 0);
+    if (back != 0) {
+        check("the characters survive",
+              back->len == d->len &&
+              memcmp(back->text, d->text, (unsigned long)d->len) == 0);
+        int same = 1;
+        for (long i = 0; i < d->len; ++i)
+            if (back->style[i] != d->style[i]) {
+                printf("       style differs at %ld: %02x became %02x\n",
+                       i, d->style[i], back->style[i]);
+                same = 0;
+                break;
+            }
+        check("the styles survive", same);
+        check("the alignment survives", back->align == RTF_CENTRE);
+        rtf_free(back);
+    }
+
+    /* Something that is not RTF at all opens as what it is, because refusing
+     * to show a file somebody plainly meant to open is not an improvement. */
+    const int fd = open("/tmp/rtf-plain.txt", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0) {
+        write(fd, "just words\n", 11);
+        close(fd);
+        struct rtf_doc* p = rtf_read("/tmp/rtf-plain.txt");
+        check("a plain file opens as plain text",
+              p != 0 && p->len == 11 && p->text[0] == 'j');
+        rtf_free(p);
+    }
+
+    /* A destination this reader does not know is skipped whole rather than
+     * spilled into the document. */
+    const int fd2 = open("/tmp/rtf-skip.rtf", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd2 >= 0) {
+        static const char kFile[] =
+            "{\\rtf1\\ansi{\\fonttbl{\\f0 Helvetica;}}"
+            "{\\*\\generator Something 1.0;}Kept.}";
+        write(fd2, kFile, sizeof(kFile) - 1);
+        close(fd2);
+        struct rtf_doc* q = rtf_read("/tmp/rtf-skip.rtf");
+        check("an unknown destination is skipped, not shown",
+              q != 0 && q->len == 5 && memcmp(q->text, "Kept.", 5) == 0);
+        rtf_free(q);
+    }
+
+    rtf_free(d);
+    unlink(path);
+    unlink("/tmp/rtf-plain.txt");
+    unlink("/tmp/rtf-skip.rtf");
+}
+
 static void test_layout(void)
 {
     section("filesystem layout");
@@ -3441,6 +3529,7 @@ int main(void)
     test_jobs();
     test_environment();
     test_shell();
+    test_rtf();
     printf("\n%d failure(s)\n", g_failures);
 
     /* And to the serial console, which is readable from outside the machine.
