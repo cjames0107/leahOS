@@ -127,3 +127,40 @@ cheapest first:
 Fault reports print RSP now, which is what turned "a null dereference in libc"
 into "the stack pointer is gone". That was the whole of this session's
 progress and it is worth having whatever happens next.
+
+---
+
+# A second sighting: Paint's first file write
+
+Same shape, different place, found while making dialogues into windows.
+
+Paint saves by writing its window buffer out as a PNG. With the new sheet, the
+save is often the **first filesystem call the process has ever made** - the old
+dialogue browsed a directory to show it, which quietly did one first.
+
+  - Save as the first filesystem call: no file appears. `ls` finds nothing, so
+    `open` never even created it.
+  - Save after *any* earlier filesystem call - a `fopen("/dev/console")`, a
+    one-byte `cli_write_file` - and it works, reporting rc=0 and a valid
+    buffer. Five runs, both ways, consistent.
+
+The observation is only possible through a channel that perturbs it: the way to
+watch is to write to the console, and writing to the console is itself the
+thing that makes it work. That is worth saying plainly rather than dressing up.
+
+## Ruled out here too
+
+  - **Shared memory exhaustion.** 512 segments; a desktop uses a handful.
+  - **The heap.** `sys_sbrk` has no limit and fails only when physical memory
+    is gone; the machine has 512 MiB and the request is 350K.
+  - **An address collision.** The heap is at 256 MiB and mmap at 1 GiB.
+  - **A partial write.** `flush` opens before it writes, so a failed write
+    would still leave an empty file behind. There is no file at all, which
+    means `open` failed or was never reached.
+
+## What is different about it
+
+This one reproduces on demand, which the startup fault does not. Anyone picking
+it up can watch it fail every time by saving from a freshly started Paint, and
+watch it succeed every time by touching the filesystem first. That makes it the
+better of the two to chase, and they may well be the same fault.

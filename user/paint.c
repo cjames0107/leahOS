@@ -160,10 +160,20 @@ static void save_to(const char* path, int png)
     const uint32_t* start = &g_px[(unsigned long)canvas_top() * g_w];
     const int rc = png ? img_write_png(path, start, g_w, h)
                        : img_write_gif(path, start, g_w, h);
-    if (rc == 0)
+    if (rc == 0) {
         snprintf(g_note, sizeof(g_note), "saved %s (%ux%u)", path, g_w, h);
-    else
+    } else {
+        /* Said out loud as well as in the toolbar. A picture that was not
+         * written is the one thing here that loses work, and a note in a
+         * corner of a window the person has already stopped looking at is not
+         * telling them. */
         snprintf(g_note, sizeof(g_note), "could not write %s", path);
+        FILE* c = fopen("/dev/console", "w");
+        if (c != 0) {
+            fprintf(c, "paint: could not write %s\n", path);
+            fclose(c);
+        }
+    }
 }
 
 /* Ask where, rather than choosing for the user. */
