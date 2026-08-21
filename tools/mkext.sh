@@ -181,6 +181,10 @@ stage_app "Resource Monitor" resmon  ""      ""              ""
 stage_app Console   console  ""         ""              "Jump to end"
 stage_app Web       web      ""         ".HTML .HTM"    "New tab" "Bookmark this page"
 stage_app Write     write    edit       ".RTF"          "New document" "Open..."
+stage_app Archiver  archiver ""         ".TAR .GZ .TGZ" "Open..." "New Archive..."
+stage_app Grab      grab     ""         ""              "Capture"
+stage_app Fonts     fonts    ""         ".TTF"          ""
+stage_app Help      help     ""         ""              "" 
 
 # The manual. Plain text: troff is a typesetting language, and the reason
 # manual pages are written in it is that in 1971 the same source had to drive a
@@ -277,9 +281,39 @@ stage_desktop() {                   # <home>
     printf '/Applications/Edit.app\n'  > "$STAGING/$home/Desktop/Notepad.alias"
     printf '/usr/share/doc/readme.md\n' > "$STAGING/$home/Desktop/Readme.alias"
 }
+
+# Something for the Archiver to open, and something for Write.
+#
+# Both applications are perfectly capable of starting empty; both are much
+# easier to believe when there is a file to point them at, and a system that
+# ships an archive tool with nothing to unpack is asking to be taken on trust.
+stage_samples() {                   # <home>
+    local home="$1"
+    if command -v tar >/dev/null 2>&1; then
+        # COPYFILE_DISABLE and --format ustar because the host may be macOS,
+        # whose tar otherwise writes an AppleDouble "._name" beside every
+        # member and a PaxHeader in front of it. The archive still reads, and
+        # it reads as three times as many files as it has.
+        COPYFILE_DISABLE=1 tar --format ustar \
+            -cf "$STAGING/$home/Documents/manual.tar" -C docs man 2>/dev/null || true
+    fi
+    cat > "$STAGING/$home/Documents/welcome.rtf" <<'RTF'
+{\rtf1\ansi\deff0{\fonttbl{\f0\fswiss Helvetica;}}
+\ql\fs36 Welcome\par
+\fs24 This is a rich text document. The words above are larger than these; \b this part is bold\b0 , \i this part leans\i0 , and \ul this part is underlined\ulnone .\par
+\par
+It was written by hand rather than by the editor, which is the point: the file is the format, and anything that reads RTF can read it.\par
+}
+RTF
+}
 stage_desktop root
 stage_desktop home/leah
 stage_desktop home/guest
+# After the desktops, because that is what makes the Documents folder these go
+# into. Before it, both files were written into a directory that did not exist
+# yet and neither of them arrived.
+stage_samples root
+stage_samples home/leah
 
 dd if=/dev/zero of="$OUT" bs=1048576 count="$SIZE_MIB" status=none
 

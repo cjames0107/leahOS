@@ -422,6 +422,10 @@ static void load(const char* path)
 {
     struct rtf_doc* fresh = rtf_read(path);
     if (fresh == 0) {
+        /* The whole toolbar still has to say what the empty document it is
+         * left with is set to, or it reports the state of one that never
+         * loaded. */
+        show_state();
         ui_set_text(g_status, "could not read that document");
         return;
     }
@@ -636,6 +640,10 @@ int main(int argc, char** argv)
     ui_on(g_under, on_under, 0);
 
     g_size = ui_grow(ui_size(ui_popup(bar, size_name, RTF_SIZES, 0), 84, 24), 0);
+    /* Showing what a new document is actually set to. A popup starts at its
+     * first item, which here is the smallest size there is - so an empty
+     * document claimed to be eight point while typing came out at twelve. */
+    g_size->selected = RTF_SIZE_DEFAULT;
     ui_on(g_size, on_size, 0);
 
     g_align = ui_grow(ui_size(ui_segmented(bar, align_name, 3, 0), 168, 24), 0);

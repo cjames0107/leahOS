@@ -432,6 +432,22 @@ void win_set_alpha(int id)
     w->flags |= WS_FLAG_ALPHA;
 }
 
+void win_hide(int id)
+{
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
+        return;
+    __atomic_or_fetch(&w->flags, WS_FLAG_HIDDEN, __ATOMIC_RELEASE);
+}
+
+void win_show(int id)
+{
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
+        return;
+    __atomic_and_fetch(&w->flags, ~WS_FLAG_HIDDEN, __ATOMIC_RELEASE);
+}
+
 /* The client draws its own title strip, and its buffer is that much taller. */
 void win_set_client_title(int id)
 {

@@ -138,6 +138,18 @@
  * is untouched beneath it. */
 #define WS_FLAG_SHEET 8u
 
+/* Not on screen for the moment, by the client's own choice.
+ *
+ * Not the same as being closed - the slot, the pixels and the event queue all
+ * stay - and not the same as being behind something, because a hidden window
+ * is not there to be clicked either. It is what a screen capture needs: the
+ * one window that must not be in the picture is the window asking for it.
+ *
+ * The client sets and clears it. There is no dock to restore from, so the
+ * server deliberately offers no way to un-hide a window it was not asked to:
+ * a window nothing can bring back is a window that has been lost. */
+#define WS_FLAG_HIDDEN 16u
+
 /* Slot states. A client walks 0 -> CLAIMED -> LIVE and finally back to FREE. */
 #define WS_SLOT_FREE    0u
 #define WS_SLOT_CLAIMED 1u   /* won by a client, not yet filled in           */

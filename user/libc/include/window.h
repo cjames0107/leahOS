@@ -56,6 +56,11 @@ void win_move_begin(int id);
  * must fill its alpha byte everywhere - zero means invisible, not opaque. */
 void win_set_alpha(int id);
 
+/* Take a window off the screen, and put it back. Its slot, its pixels and its
+ * events all stay - this is not closing it. See WS_FLAG_HIDDEN. */
+void win_hide(int id);
+void win_show(int id);
+
 /* How wide this window's sidebar is. The server carries the same tint up
  * across the title bar, so the sidebar is one surface from the very top of the
  * window rather than a panel starting under the chrome. */

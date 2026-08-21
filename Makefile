@@ -131,11 +131,22 @@ USRBIN_PROGRAMS := hello gui tone lspci ping ping6 arp nslookup fetch fetch6 env
                  screenshot tests fsbench ipctest nictest nettest blktest vfstest \
                  mvtest v6test churn wintest
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player \
-                diskutil netutil calendar resmon console web write
+                diskutil netutil calendar resmon console web write \
+                archiver grab fonts help
 USER_PROGRAMS := $(SBIN_PROGRAMS) $(BIN_PROGRAMS) $(USRBIN_PROGRAMS) $(APP_PROGRAMS)
 USER_ELFS  := $(USER_PROGRAMS:%=$(BUILD)/%.elf)
 STAGE1_BIN := $(BUILD)/stage1.bin
 STAGE2_BIN := $(BUILD)/stage2.bin
+
+# A recipe that fails must not leave its output behind.
+#
+# The disk image is built by a script, and a script that fails part way - or
+# fails to parse at all - leaves whatever was there before. Make then sees a
+# file newer than nothing in particular and moves on, and the next thing to
+# boot that image boots the one from before the change. That has cost an
+# afternoon: an application was "not found" in a system it had been added to,
+# because the image it was added to was never written.
+.DELETE_ON_ERROR:
 
 .PHONY: all image run headless debug gdb toolchain clean help
 all: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)

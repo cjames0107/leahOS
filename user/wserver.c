@@ -146,6 +146,10 @@ static int        g_slots;    /* how many slots those tables hold */
  * one function which grows them all can see them. What each is for is
  * explained where it is used. */
 static uint32_t* g_move_seen;
+/* Whether each window was hidden last pass. A window taken off the screen has
+ * to be *removed* from it, and nothing else in this loop would notice: the
+ * client stops presenting, so there is no other reason to look at it again. */
+static int*      g_hidden_seen;
 static uint32_t** g_blur;
 static int*       g_blur_w;
 static int*       g_blur_h;
@@ -193,6 +197,7 @@ static int track_slots(void)
         { (void**)&g_height,      sizeof(unsigned)      },
         { (void**)&g_order,       sizeof(int)           },
         { (void**)&g_move_seen,   sizeof(uint32_t)      },
+        { (void**)&g_hidden_seen, sizeof(int)           },
         { (void**)&g_blur,        sizeof(uint32_t*)     },
         { (void**)&g_blur_w,      sizeof(int)           },
         { (void**)&g_blur_h,      sizeof(int)           },
@@ -495,6 +500,13 @@ static int is_desktop(int slot)
 /* A sheet has no chrome of any kind: no title bar, no controls, no grip. It is
  * a panel the application put on the screen, and everything about where it is
  * and when it goes belongs to the application. */
+/* Taken off the screen by its own client. It keeps its slot and its events; it
+ * is simply not drawn and not hit. */
+static int is_hidden(int slot)
+{
+    return (win(slot)->flags & WS_FLAG_HIDDEN) != 0;
+}
+
 static int is_sheet(int slot)
 {
     return (win(slot)->flags & WS_FLAG_SHEET) != 0;
@@ -1195,8 +1207,8 @@ static int covered_from(const struct rect* r)
     for (int i = 0; i < g_count; ++i) {
         const int slot = g_order[i];
         const struct ws_window* w = win(slot);
-        if (g_pixels[slot] == 0)
-            continue;               /* nothing drawn there yet to cover with */
+        if (g_pixels[slot] == 0 || is_hidden(slot))
+            continue;               /* nothing drawn there to cover with */
         int x = w->x, y = w->y;
         int cw = (int)frame_width(slot), ch = (int)frame_height(slot);
         if (!is_desktop(slot)) {
@@ -1253,6 +1265,8 @@ static void compose_rect(const struct rect* r)
         }
     }
     for (int i = hidden ? cover : g_count - 1; i >= 0; --i) {
+        if (is_hidden(g_order[i]))
+            continue;
         struct rect f = frame_rect(g_order[i]);
         /* Grown by the shadow, so a window whose frame is outside this region
          * but whose shadow falls inside it still gets its turn - otherwise the
@@ -1444,6 +1458,8 @@ static int window_at(int x, int y)
 {
     for (int i = 0; i < g_count; ++i) {
         struct ws_window* w = win(g_order[i]);
+        if (is_hidden(g_order[i]))
+            continue;
         if (x >= w->x && y >= w->y &&
             x < w->x + (int)frame_width(g_order[i]) &&
             y < w->y + (int)frame_height(g_order[i]))
@@ -1609,10 +1625,18 @@ static void reconcile(void)
                 }
             }
 
+            /* Hidden, or back. Damaged while its geometry still says where it
+             * was, which is what lets the desktop underneath be put back. */
+            const int now_hidden = is_hidden(slot);
+            if (now_hidden != g_hidden_seen[slot]) {
+                g_hidden_seen[slot] = now_hidden;
+                damage_window(slot);
+            }
+
             /* Redraw only when the client says it drew something, and only the
              * content - the frame around it has not changed. */
             const uint32_t present = __atomic_load_n(&w->present, __ATOMIC_ACQUIRE);
-            if (present != g_mapped_gen[slot]) {
+            if (present != g_mapped_gen[slot] && !now_hidden) {
                 g_mapped_gen[slot] = present;
                 w->drawn = present;
                 /* A desktop has no frame, so its pixels start at its own
