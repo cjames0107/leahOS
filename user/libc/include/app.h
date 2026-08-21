@@ -33,6 +33,16 @@
  *     }
  */
 
+/* How many documents an application remembers having opened. */
+#define APP_RECENT_MAX 8
+
+/* A key that means something wherever the focus is. See the note below. */
+struct app_key {
+    unsigned key;       /* the character, or WIN_KEY_*                    */
+    unsigned mods;      /* WIN_MOD_CTRL, WIN_MOD_SHIFT, or 0              */
+    int      id;        /* handed back to `shortcut`                      */
+};
+
 struct app {
     /* --- what the author sets ------------------------------------------- */
     const char* title;
@@ -46,6 +56,13 @@ struct app {
      * as the title - and makes it the window's job to call win_move_begin for
      * the parts of that line which are not controls. */
     int         client_title;
+    /* 1 to open where the application was told rather than where it was left.
+     *
+     * Zero remembers: an application put back where it was, at the size it was
+     * given, is what every window in every system does and what none of these
+     * did - each opened at whatever its author typed, every time. Set this
+     * only when the position is the point, as it is for a sheet or a panel. */
+    int         forget_geometry;
 
     /* An interface built from components. Set this and draw/event become
      * optional: app_run lays the tree out over the window, routes events into
@@ -91,6 +108,11 @@ struct app {
     int (*menu_pick)(struct app* a, int pick);
 
     void* user;                         /* the application's own state */
+
+    /* Keys that do something wherever the focus is. See app_key above. */
+    const struct app_key* keys;
+    int                   key_count;
+    int (*shortcut)(struct app* a, int id);
 
     /* --- the document, when there is one ---------------------------------
      *
@@ -141,6 +163,10 @@ struct app {
     int        status;                  /* what main should return */
 
     /* The sheet's own window, filled in by app_sheet. */
+    /* The documents this application has had open, newest first. */
+    char       recent[APP_RECENT_MAX][256];
+    int        recent_n;
+
     int        sheet_id;
     uint32_t*  sheet_px;
     unsigned   sheet_w, sheet_h;
@@ -207,6 +233,37 @@ int app_sheet_always(const struct app* a);
 /* A sheet for choosing a date. app_sheet_path holds it as YYYY-MM-DD, which is
  * the same way every other sheet returns its answer. */
 struct ui_view* app_sheet_date(struct app* a, int year, int month, int day);
+
+/* --- what an application remembers ------------------------------------------
+ *
+ * Its own preferences, under its own name, and the documents it has had open.
+ * app_run chooses the scope before anything else runs, so an application can
+ * call prefs_get_* and prefs_set_* without saying whose settings it means.
+ */
+
+/* The documents most recently opened or saved, newest first. `i` counts from
+ * 0; returns 0 past the end. Filled in by the document lifecycle below. */
+const char* app_recent(const struct app* a, int i);
+int  app_recent_count(const struct app* a);
+void app_recent_add(struct app* a, const char* path);
+
+/* --- keys that mean something wherever the focus is --------------------------
+ *
+ * A table rather than a chain of `else if (key == 19)` in each application's
+ * own handler, which is what it was: the same four chords written out four
+ * times, each with its own idea of which control character Ctrl+S is.
+ *
+ * A field gets its keys first. Ctrl+A in a text field selects the text and
+ * never reaches this; Ctrl+A anywhere else does whatever the table says.
+ */
+
+
+/* The ones the framework provides on its own to anything with a document, so
+ * that Save is Ctrl+S everywhere without four applications agreeing to it. */
+#define APP_KEY_NEW   -1
+#define APP_KEY_OPEN  -2
+#define APP_KEY_SAVE  -3
+#define APP_KEY_CLOSE -4
 
 /* --- asking ----------------------------------------------------------------
  *

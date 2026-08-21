@@ -301,6 +301,11 @@ struct ui_view* ui_custom(struct ui_view* parent,
 {
     struct ui_view* v = alloc_view(parent, UI_CUSTOM);
     if (v == 0) return 0;
+    /* It can hold the keyboard if an application asks. A view that draws its
+     * own content usually is the content - a page, a canvas, a terminal - and
+     * the focus is what says whether a keystroke is meant for it or for the
+     * controls around it. */
+    v->flags |= UI_FOCUSABLE;
     v->draw = draw;
     v->user = user;
     v->grow = 1;
@@ -932,6 +937,69 @@ static int caret_x(const char* text, int caret)
 
 static int list_rows_visible(const struct ui_view* v);
 
+/* --- moving the focus ------------------------------------------------------
+ *
+ * The tree in the order it is drawn, which is the order things sit on screen,
+ * which is the order somebody expects Tab to walk them in. There is no
+ * separate list to keep in step because there is no separate list.
+ */
+static struct ui_view* focus_first(struct ui_view* v, int backwards);
+
+static struct ui_view* focus_next_after(struct ui_view* v, int backwards)
+{
+    /* Up and along: the sibling after this one, or after whichever ancestor
+     * has one. Reaching the root without finding a sibling means the end. */
+    for (struct ui_view* at = v; at != 0; at = at->parent) {
+        struct ui_view* sibling = 0;
+        if (!backwards) {
+            sibling = at->next;
+        } else if (at->parent != 0) {
+            for (struct ui_view* c = at->parent->child; c != at; c = c->next)
+                sibling = c;
+        }
+        if (sibling != 0) {
+            struct ui_view* found = focus_first(sibling, backwards);
+            if (found != 0)
+                return found;
+            return focus_next_after(sibling, backwards);
+        }
+    }
+    return 0;
+}
+
+static struct ui_view* focus_first(struct ui_view* v, int backwards)
+{
+    if (v == 0 || (v->flags & (UI_HIDDEN | UI_DISABLED)) != 0)
+        return 0;
+    if (!backwards && (v->flags & UI_FOCUSABLE) != 0)
+        return v;
+    /* Backwards, the deepest one comes first: walking a subtree in reverse
+     * means its children before itself. */
+    struct ui_view* best = 0;
+    for (struct ui_view* c = v->child; c != 0; c = c->next) {
+        struct ui_view* found = focus_first(c, backwards);
+        if (found != 0) {
+            if (!backwards)
+                return found;
+            best = found;
+        }
+    }
+    if (best != 0)
+        return best;
+    return (v->flags & UI_FOCUSABLE) != 0 ? v : 0;
+}
+
+static struct ui_view* focus_step(struct ui_view* root, struct ui_view* from,
+                                  int backwards)
+{
+    if (from == 0)
+        return focus_first(root, backwards);
+    struct ui_view* next = focus_next_after(from, backwards);
+    /* Round the end, so Tab through the last field returns to the first
+     * rather than leaving the window with nothing focused. */
+    return next != 0 ? next : focus_first(root, backwards);
+}
+
 static void scroll_extent(const struct ui_view* v, int* page, int* span)
 {
     *page = 0;
@@ -1538,6 +1606,28 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             return 1;
         }
         return 0;
+    }
+
+    /* Tab moves the focus.
+     *
+     * It did nothing at all, so a window full of fields could only be filled
+     * in with the mouse - which is the one thing a form is expected not to
+     * need.
+     *
+     * A view that holds text keeps it: in a document a Tab is a character, and
+     * an editor whose Tab key jumped to the toolbar would be an editor that
+     * cannot indent. That covers the text area and a custom view an
+     * application has focused, which is how the two editors here hold theirs.
+     */
+    if (e->type == WIN_EVENT_KEY && e->key == '\t' &&
+        !(g_focus != 0 && (g_focus->kind == UI_TEXT ||
+                           g_focus->kind == UI_CUSTOM))) {
+        struct ui_view* next = focus_step(root, g_focus,
+                                          (e->modifiers & WIN_MOD_SHIFT) != 0);
+        if (next == 0 || next == g_focus)
+            return 0;
+        g_focus = next;
+        return 1;
     }
 
     if (e->type == WIN_EVENT_KEY && g_focus != 0) {

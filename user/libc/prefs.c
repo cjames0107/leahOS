@@ -2,6 +2,7 @@
 #include <prefs.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MAX_KEYS 32
@@ -13,16 +14,46 @@ static char g_val[MAX_KEYS][VAL_LEN];
 static int  g_n;
 static int  g_loaded;
 
-static void path_of(char* out, unsigned max)
+/* Which set of settings is being read and written. Empty until somebody says,
+ * and then it is whatever they said. */
+static char g_scope[32];
+static int  g_dirty;
+
+static void home_of(char* out, unsigned max)
 {
     char name[64] = "";
     username(getuid(), name);
     /* root's home is /root; everyone else lives under /home. Matching what the
      * account database actually lays out matters more than being uniform. */
     if (strcmp(name, "root") == 0)
-        snprintf(out, max, "/root/.leahrc");
+        snprintf(out, max, "/root");
     else
-        snprintf(out, max, "/home/%s/.leahrc", name);
+        snprintf(out, max, "/home/%s", name);
+}
+
+static void path_of(char* out, unsigned max)
+{
+    char home[96];
+    home_of(home, sizeof(home));
+    if (g_scope[0] == '\0')
+        snprintf(g_scope, sizeof(g_scope), "%s", PREFS_DESKTOP);
+    snprintf(out, max, "%s/.config/%s.conf", home, g_scope);
+}
+
+void prefs_scope(const char* name)
+{
+    if (name == 0 || name[0] == '\0')
+        return;
+    if (strcmp(g_scope, name) == 0)
+        return;
+    /* What was set in the old scope belongs to the old scope, so it goes back
+     * before the file underneath these keys changes. */
+    if (g_loaded && g_dirty)
+        prefs_save();
+    snprintf(g_scope, sizeof(g_scope), "%s", name);
+    g_n = 0;
+    g_loaded = 0;
+    prefs_load();
 }
 
 static int find(const char* key)
@@ -35,6 +66,7 @@ static int find(const char* key)
 
 static void set(const char* key, const char* value)
 {
+    g_dirty = 1;
     int i = find(key);
     if (i < 0) {
         if (g_n >= MAX_KEYS)
@@ -87,9 +119,19 @@ int prefs_save(void)
 {
     char path[128];
     path_of(path, sizeof(path));
+
+    /* The directory, because nothing else makes it. A save that fails because
+     * ~/.config is not there is a preference that silently does not stick, and
+     * the only sign is the setting being back where it was next time. */
+    char dir[112];
+    home_of(dir, sizeof(dir));
+    snprintf(&dir[strlen(dir)], sizeof(dir) - strlen(dir), "/.config");
+    mkdir(dir);
+
     const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
     if (fd < 0)
         return -1;
+    g_dirty = 0;
     static char out[4096];
     int n = 0;
     /* Every key that was read is written back, including ones this program does

@@ -133,6 +133,11 @@ static void apply_saved_theme(void)
 {
     if (g_ws == 0)
         return;
+    /* The desktop's, not this application's. What the windows look like is not
+     * a setting belonging to the program that happens to change it, and an
+     * application that reads it - a future one that wants the accent colour -
+     * should not have to know Settings wrote it. */
+    prefs_scope(PREFS_DESKTOP);
     prefs_load();
     g_ws->theme.desktop      = prefs_get_u32("theme.desktop", g_ws->theme.desktop);
     g_ws->theme.face         = prefs_get_u32("theme.face", g_ws->theme.face);

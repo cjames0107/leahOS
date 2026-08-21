@@ -497,10 +497,6 @@ static int on_key(unsigned key)
     app_doc_touched(&g_app);
         }
     }
-    else if (key == 2)  { apply_flag(RTF_BOLD, !g_bold->on); return 1; }      /* ctrl+B */
-    else if (key == 9)  { apply_flag(RTF_ITALIC, !g_italic->on); return 1; }  /* ctrl+I */
-    else if (key == 21) { apply_flag(RTF_UNDERLINE, !g_under->on); return 1; }/* ctrl+U */
-    else if (key == 19) { on_save(0, 0); return 1; }                          /* ctrl+S */
     else if (key == 1)  { g_anchor = 0; g_caret = g_doc->len; }               /* ctrl+A */
     else if (key == '\n' || key == '\r' || key == '\t' ||
              (key >= ' ' && key < 127)) {
@@ -525,7 +521,10 @@ static int on_key(unsigned key)
 
 static int on_event(struct app* a, const struct win_event* e)
 {
-    if (a->handled && e->type == WIN_EVENT_MOUSE_DOWN)
+    /* A press or a keystroke a component has already taken is not also the
+     * document's. Without this, Tab moved the focus to the toolbar *and* put
+     * a tab character in the text. */
+    if (a->handled)
         return 0;
     const struct ui_rect f = g_page->frame;
     const int inside = e->x >= f.x && e->y >= f.y &&
@@ -562,6 +561,26 @@ static int on_menu(struct app* a, int pick)
 }
 
 static const char* const kMenu[] = { "New", "Open...", "Save" };
+
+/* The chords this application has of its own. New, Open, Save and Close come
+ * from the framework because it has a document; these are the ones only a
+ * rich text editor has. */
+enum { KEY_BOLD = 1, KEY_ITALIC, KEY_UNDER };
+static const struct app_key kKeys[] = {
+    { 2,  WIN_MOD_CTRL, KEY_BOLD },     /* ctrl+B */
+    { 9,  WIN_MOD_CTRL, KEY_ITALIC },   /* ctrl+I */
+    { 21, WIN_MOD_CTRL, KEY_UNDER },    /* ctrl+U */
+};
+
+static int on_shortcut(struct app* a, int id)
+{
+    (void)a;
+    if (id == KEY_BOLD)        apply_flag(RTF_BOLD, !g_bold->on);
+    else if (id == KEY_ITALIC) apply_flag(RTF_ITALIC, !g_italic->on);
+    else if (id == KEY_UNDER)  apply_flag(RTF_UNDERLINE, !g_under->on);
+    else return 0;
+    return 1;
+}
 
 int main(int argc, char** argv)
 {
@@ -628,10 +647,16 @@ int main(int argc, char** argv)
     g_app.doc_save = doc_save;
     g_app.doc_load = doc_load;
     g_app.doc_new = doc_new;
+    g_app.keys = kKeys;
+    g_app.key_count = (int)(sizeof(kKeys) / sizeof(kKeys[0]));
+    g_app.shortcut = on_shortcut;
 
     if (open_this != 0 && doc_load(&g_app, open_this) == 0)
         snprintf(g_app.doc_path, sizeof(g_app.doc_path), "%s", open_this);
     show_state();
+    /* The keyboard starts in the document: that is what the window is
+     * for, and it is what keeps Tab meaning a tab character here. */
+    ui_focus(g_page);
     return app_run(&g_app, argc, argv);
 }
 

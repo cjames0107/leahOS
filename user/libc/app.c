@@ -18,6 +18,7 @@
 
 #include <app.h>
 #include <bundle.h>
+#include <prefs.h>
 #include <menu.h>
 #include <paths.h>
 #include <stdio.h>
@@ -130,6 +131,112 @@ struct ui_view* app_sheet(struct app* a, unsigned w, unsigned h)
     /* Its own root, and the frames are laid out when it is first painted. */
     a->sheet = ui_box(0, UI_STACK_V, 16, 10);
     return a->sheet;
+}
+
+/* --- what an application remembers ----------------------------------------- */
+
+const char* app_recent(const struct app* a, int i)
+{
+    if (a == 0 || i < 0 || i >= a->recent_n)
+        return 0;
+    return a->recent[i];
+}
+
+int app_recent_count(const struct app* a) { return a != 0 ? a->recent_n : 0; }
+
+void app_recent_add(struct app* a, const char* path)
+{
+    if (a == 0 || path == 0 || path[0] == '\0')
+        return;
+    /* Already there: it moves to the front rather than appearing twice. A
+     * recent list with the same file in it three times is a list of one file. */
+    int at = a->recent_n;
+    for (int i = 0; i < a->recent_n; ++i)
+        if (strcmp(a->recent[i], path) == 0) { at = i; break; }
+    if (at == a->recent_n && a->recent_n < APP_RECENT_MAX)
+        ++a->recent_n;
+    else if (at == a->recent_n)
+        at = APP_RECENT_MAX - 1;
+    for (int i = at; i > 0; --i)
+        memcpy(a->recent[i], a->recent[i - 1], sizeof(a->recent[0]));
+    snprintf(a->recent[0], sizeof(a->recent[0]), "%s", path);
+
+    for (int i = 0; i < a->recent_n; ++i) {
+        char key[24];
+        snprintf(key, sizeof(key), "recent.%d", i);
+        prefs_set_str(key, a->recent[i]);
+    }
+    prefs_save();
+}
+
+static void load_recent(struct app* a)
+{
+    a->recent_n = 0;
+    for (int i = 0; i < APP_RECENT_MAX; ++i) {
+        char key[24];
+        snprintf(key, sizeof(key), "recent.%d", i);
+        const char* path = prefs_get_str(key, "");
+        if (path == 0 || path[0] == '\0')
+            break;
+        snprintf(a->recent[a->recent_n++], sizeof(a->recent[0]), "%s", path);
+    }
+}
+
+/* Where the window is now, so it opens there next time. Written on the way out
+ * rather than on every move: a preferences file rewritten per pixel of a drag
+ * is a preferences file being rewritten sixty times a second. */
+static void remember_geometry(struct app* a)
+{
+    if (a == 0 || a->forget_geometry || a->id < 0)
+        return;
+    int px = 0, py = 0;
+    win_origin(a->id, &px, &py);
+    prefs_set_u32("window.x", (unsigned)(px > 0 ? px : 0));
+    prefs_set_u32("window.y", (unsigned)(py > 0 ? py : 0));
+    prefs_set_u32("window.w", a->w);
+    prefs_set_u32("window.h", a->h);
+    prefs_save();
+}
+
+/* --- keys that mean something wherever the focus is ------------------------- */
+
+/* The standard four, provided to anything that has a document so that Save is
+ * Ctrl+S everywhere without four applications separately agreeing to it. An
+ * application's own table is consulted first, so it can take one back. */
+static int builtin_shortcut(struct app* a, unsigned key, unsigned mods)
+{
+    if ((mods & WIN_MOD_CTRL) == 0 || a->doc_save == 0)
+        return 0;
+    switch (key) {
+    case 14: app_doc_new(a);  return 1;         /* ctrl+N */
+    case 15: app_doc_open(a); return 1;         /* ctrl+O */
+    case 19: app_doc_save(a); return 1;         /* ctrl+S */
+    default: return 0;
+    }
+}
+
+/* One keystroke against the table. Returns 1 when something ran.
+ *
+ * Only reached when the components did not want the key: a text field's
+ * Ctrl+A selects its text and never arrives here, and the same chord over a
+ * list does whatever the application said it should. That ordering is the
+ * whole of what makes a shortcut safe to declare. */
+static int run_shortcut(struct app* a, const struct win_event* e)
+{
+    if (e->type != WIN_EVENT_KEY)
+        return 0;
+    for (int i = 0; i < a->key_count; ++i) {
+        const struct app_key* k = &a->keys[i];
+        /* The modifiers have to match exactly, or Ctrl+Shift+S would also be
+         * Save and an application could not tell the two apart. */
+        if (k->key == e->key && k->mods == (e->modifiers & (WIN_MOD_CTRL |
+                                                            WIN_MOD_SHIFT))) {
+            if (a->shortcut != 0)
+                return a->shortcut(a, k->id);
+            return 0;
+        }
+    }
+    return builtin_shortcut(a, e->key, e->modifiers);
 }
 
 static int framework_answered(struct app* a, int result);
@@ -486,6 +593,7 @@ static void do_save(struct app* a, const char* path)
     snprintf(a->doc_path, sizeof(a->doc_path), "%s", path);
     a->doc_dirty = 0;
     retitle(a);
+    app_recent_add(a, path);
     if (g_after_save != 0) {
         void (*then)(struct app*) = g_after_save;
         g_after_save = 0;
@@ -600,6 +708,7 @@ static int framework_answered(struct app* a, int result)
                 snprintf(a->doc_path, sizeof(a->doc_path), "%s", path);
                 a->doc_dirty = 0;
                 retitle(a);
+                app_recent_add(a, path);
             } else {
                 char note[320];
                 snprintf(note, sizeof(note), "%s could not be opened.", path);
@@ -751,10 +860,33 @@ int app_run(struct app* a, int argc, char** argv)
     if (wg_font() != 0)
         return 1;
 
-    const int x = argc > 1 ? atoi_simple(argv[1]) : 160;
-    const int y = argc > 2 ? atoi_simple(argv[2]) : 120;
+    int x = argc > 1 ? atoi_simple(argv[1]) : 160;
+    int y = argc > 2 ? atoi_simple(argv[2]) : 120;
     if (a->width == 0)  a->width = 640;
     if (a->height == 0) a->height = 420;
+
+    /* Whose settings these are, chosen before anything reads one. From the
+     * title rather than argv[0], because that is the name the application is
+     * known by and the one a person would look for in ~/.config. */
+    prefs_scope(a->title != 0 ? a->title : "app");
+    prefs_load();
+    load_recent(a);
+
+    /* Where it was left, unless it was told where to be. An argument wins,
+     * because that is somebody saying it explicitly - Files opening a folder
+     * beside itself means that position. */
+    if (!a->forget_geometry) {
+        const unsigned w = prefs_get_u32("window.w", 0);
+        const unsigned h = prefs_get_u32("window.h", 0);
+        if (w >= a->min_width && h >= a->min_height && w > 0 && h > 0) {
+            a->width = w;
+            a->height = h;
+        }
+        if (argc <= 2) {
+            x = (int)prefs_get_u32("window.x", (unsigned)x);
+            y = (int)prefs_get_u32("window.y", (unsigned)y);
+        }
+    }
 
     a->id = win_create(x, y, a->width, a->height,
                        a->title != 0 ? a->title : "Window");
@@ -831,6 +963,7 @@ int app_run(struct app* a, int argc, char** argv)
                     dirty = 1;
                 } else if (ignored.type == WIN_EVENT_CLOSE) {
                     app_sheet_close(a, 0);
+                    remember_geometry(a);
                     win_destroy(a->id);
                     return a->status;
                 }
@@ -850,6 +983,7 @@ int app_run(struct app* a, int argc, char** argv)
                     dirty = 1;
                     continue;
                 }
+                remember_geometry(a);
                 win_destroy(a->id);
                 return a->status;
             }
@@ -880,6 +1014,11 @@ int app_run(struct app* a, int argc, char** argv)
                 a->handled = ui_event(a->root, &e);
                 dirty |= a->handled;
             }
+            /* A shortcut only when nothing was typing. See run_shortcut. */
+            if (!a->handled && run_shortcut(a, &e)) {
+                dirty = 1;
+                continue;
+            }
             if (a->event != 0)
                 dirty |= a->event(a, &e);
             if (e.type == WIN_EVENT_MOUSE_DOWN && e.button == 2 &&
@@ -899,6 +1038,8 @@ int app_run(struct app* a, int argc, char** argv)
             paint(a);
         msleep(15);
     }
+
+    remember_geometry(a);
 
     win_destroy(a->id);
     return a->status;

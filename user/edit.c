@@ -376,7 +376,11 @@ static int on_menu(struct app* a, int pick)
 
 static int on_event(struct app* a, const struct win_event* event)
 {
-    (void)a;
+    /* A press or a keystroke a component has already taken is not also the
+     * text's. Without this a Tab would move the focus to the toolbar and put
+     * a tab character in the document at the same time. */
+    if (a->handled)
+        return 0;
     if (event->type == WIN_EVENT_MOUSE_DOWN) {
         if (event->y < g_area.y || event->y >= g_area.y + g_area.h)
             return 0;                   /* the toolbar's, not the text's */
@@ -498,5 +502,8 @@ int main(int argc, char** argv)
     g_app.menu_count = 4;
     g_app.menu_pick = on_menu;
     g_app.root = root;
+    /* The keyboard starts in the document: that is what the window is
+     * for, and it is what keeps Tab meaning a tab character here. */
+    ui_focus(g_text_view);
     return app_run(&g_app, argc, argv);
 }
