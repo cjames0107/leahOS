@@ -614,8 +614,19 @@ static int flow(int draw_it)
 
     for (int i = 0; i < t->runs_n; ++i) {
         const struct run* r = &t->runs[i];
-        const int scale = r->heading == 1 ? 2 : 1;
-        line_h = (r->heading ? WG_GLYPH_H + 10 : WG_GLYPH_H + 4);
+        /* A heading is drawn larger and bold is drawn bold.
+         *
+         * `scale` used to double the *width* a heading's words were given and
+         * nothing else - they were still drawn at the ordinary size, so a
+         * heading was normal text with a gap after every word. And `bold` only
+         * changed the colour, on a page whose ordinary ink is that colour. The
+         * toolkit can do both now, and one size is used to measure and to
+         * draw, so they cannot disagree. */
+        const int px = r->heading == 1 ? wg_text_size() * 2
+                     : r->heading      ? wg_text_size() * 3 / 2
+                                       : wg_text_size();
+        const unsigned style = (r->bold || r->heading) ? WG_STYLE_BOLD : 0;
+        line_h = wg_styled_height(px) + (r->heading ? 6 : 2);
 
         if (r->br && x > x0) { x = x0; y += line_h; }
         if (r->heading && x > x0) { x = x0; y += line_h; }
@@ -636,24 +647,24 @@ static int flow(int draw_it)
             memcpy(word, t->text + at, n);
             word[n] = '\0';
 
-            const int ww = (int)n * WG_GLYPH_W * scale;
+            const int ww = wg_styled_width(word, (int)n, px, style);
             if (x + ww > x0 + wide && x > x0) { x = x0; y += line_h; }
 
             if (draw_it && y > g_page.y - line_h && y < g_page.y + g_page.h) {
-                uint32_t ink = wg_ink_colour();
-                if (r->link >= 0) ink = WG_ACCENT;
-                else if (r->heading || r->bold) ink = wg_ink_colour();
-                wg_text(x, y, word, ink);
+                /* Underlined, because colour alone is not a link on a theme
+                 * whose accent happens to be close to the ink. */
+                const unsigned how = style |
+                    (r->link >= 0 ? WG_STYLE_UNDERLINE : 0u);
+                wg_styled(x, y, word, (int)n,
+                          r->link >= 0 ? WG_ACCENT : wg_ink_colour(), px, how);
                 if (r->link >= 0) {
-                    /* Underlined, because colour alone is not a link on a
-                     * theme whose accent happens to be close to the ink. */
-                    wg_fill(x, y + WG_GLYPH_H, ww, 1, WG_ACCENT);
                     struct link* l = &t->links[r->link];
-                    if (l->w == 0) { l->x = x; l->y = y; l->h = WG_GLYPH_H; }
+                    if (l->w == 0) { l->x = x; l->y = y;
+                                     l->h = wg_styled_height(px); }
                     l->w = (x + ww) - l->x;
                 }
             }
-            x += ww + WG_GLYPH_W;
+            x += ww + wg_styled_width(" ", 1, px, style);
             at = wend + 1;
         }
     }

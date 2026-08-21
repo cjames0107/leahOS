@@ -376,7 +376,7 @@ static void draw(void)
         snprintf(line, sizeof(line), "%ld", (long)g_shown);
     else
         snprintf(line, sizeof(line), "%.12g", g_shown);
-    const int tw = (int)strlen(line) * WG_GLYPH_W;
+    const int tw = wg_text_width(line);
     wg_text((int)g_w - PAD - 6 - tw, PAD + 9, line, WG_INK);
 
     if (g_op != 0) {
@@ -387,7 +387,8 @@ static void draw(void)
      * question which one is in force. */
     if (g_note[0] != '\0')
         wg_text_clipped(PAD + 2, 44, g_note, WG_DIM, (int)g_w - PAD * 2 - 40);
-    wg_text((int)g_w - PAD - 4 * WG_GLYPH_W, 44, g_degrees ? " deg" : " rad",
+    wg_text((int)g_w - PAD - wg_text_width(" rad") - 4, 44,
+            g_degrees ? " deg" : " rad",
             WG_DIM);
 
     {

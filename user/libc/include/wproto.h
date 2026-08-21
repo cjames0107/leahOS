@@ -302,11 +302,16 @@ struct ws_drag {
     char label[64];                 /* and what to write under the ghost      */
 };
 
+/* What was here as well: `light`, `shadow` and `contrast`.
+ *
+ * They were the two edges of a bevel and how far apart to push them, which is
+ * how a flat machine said "raised" without a second colour. Nothing has drawn
+ * a bevel since the corners were rounded; depth comes from a shadow outside
+ * the frame now. The three were still being written by the theme and by
+ * Settings, and read by nobody. */
 struct ws_theme {
     volatile uint32_t desktop;
     volatile uint32_t face;
-    volatile uint32_t light;
-    volatile uint32_t shadow;
     volatile uint32_t title_active;
     volatile uint32_t title_idle;
     volatile uint32_t title_text;
@@ -320,8 +325,6 @@ struct ws_theme {
     volatile uint32_t body;         /* a window's content background          */
     volatile uint32_t text;         /* ink on that background                 */
     volatile uint32_t text_scale;   /* 1 or 2 - the font is a bitmap          */
-    volatile int32_t  contrast;     /* -100..100, applied to the bevels       */
-    volatile uint32_t pattern;      /* WS_PATTERN_*, drawn when no wallpaper  */
 
     /* Whether a window's backdrop is frosted glass or a flat opaque panel.
      *
@@ -333,17 +336,11 @@ struct ws_theme {
     volatile uint32_t blur;         /* 1 frosted, 0 opaque                    */
 };
 
-/* Backdrop patterns. Drawn from the desktop colour rather than a second one, so
- * a pattern stays consistent with whatever colour was chosen. */
-#define WS_PATTERN_FLAT   0
-#define WS_PATTERN_GRID   1
-#define WS_PATTERN_DOTS   2
-#define WS_PATTERN_WEAVE  3
-/* Alternate pixels, which at this distance reads as a shade between the two
- * and is what the desktop of this era actually was - a one-bit machine making
- * a grey it did not have. */
-#define WS_PATTERN_DITHER 4
-#define WS_PATTERN_COUNT  5
+/* What was here: four backdrop patterns - a grid, dots, a weave and a two-tone
+ * dither - drawn when there was no wallpaper. They are what a machine with a
+ * handful of colours did to make a shade it did not have, and this one has
+ * millions of them and a photograph on the desktop by default. Removed rather
+ * than left as a setting nobody chose, which is what they had become. */
 
 /* Every bank after the first. Its own segment, under WS_BANK_KEY(b). */
 struct ws_bank {

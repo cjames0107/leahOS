@@ -76,41 +76,20 @@ static int g_mode;
  * reachable from the interface. */
 struct preset {
     const char* name;
-    uint32_t desktop, face, light, shadow, title, title_text, cursor;
+    uint32_t desktop, face, title, title_text, cursor;
     uint32_t selection, body, text;
-    int32_t contrast;
-    uint32_t pattern;
 };
 static const struct preset kPresets[] = {
-    { "Light", 0x8894A8, 0xF2F4F7, 0xFFFFFF, 0x9AA3AE, 0xF2F4F7, 0x18202B,
-      0xFFFFFF, 0x2C6BED, 0xFFFFFF, 0x18202B, 0, WS_PATTERN_FLAT },
+    { "Light", 0x8894A8, 0xF2F4F7, 0xF2F4F7, 0x18202B,
+      0xFFFFFF, 0x2C6BED, 0xFFFFFF, 0x18202B },
     /* Dark, and dark all the way through: a window face that is dark with ink
      * that is still black is not a dark mode, it is an unreadable light one. */
-    { "Dark",  0x1B2028, 0x272C34, 0x3A414D, 0x14181E, 0x272C34, 0xE8ECF2,
-      0xE8ECF2, 0x3E7BF0, 0x1E232A, 0xE8ECF2, 10, WS_PATTERN_FLAT },
+    { "Dark",  0x1B2028, 0x272C34, 0x272C34, 0xE8ECF2,
+      0xE8ECF2, 0x3E7BF0, 0x1E232A, 0xE8ECF2 },
 };
 #define PRESETS (int)(sizeof(kPresets) / sizeof(kPresets[0]))
 #define MODE_LIGHT 0
 #define MODE_DARK  1
-
-/* One name per WS_PATTERN_*, and the compiler is told the count so that adding
- * a pattern without naming it is a build error rather than a null pointer
- * handed to strlen - which is exactly what happened when "dither" arrived. */
-/* One row of pattern buttons, sized so that all of them fit to the left of the
- * preview. Kept next to the names because changing one without the other is
- * how the row came to overlap in the first place. */
-#define PATTERN_W    52
-#define PATTERN_STEP 55
-
-static const char* kPatterns[] = {
-    "flat", "grid", "dots", "weave", "dither"
-};
-/* Deliberately unsized above, so this counts what is actually there. Written
- * the other way round - kPatterns[WS_PATTERN_COUNT] - the array is padded with
- * nulls to the declared length and the check cannot fail. */
-_Static_assert(sizeof(kPatterns) / sizeof(kPatterns[0]) == WS_PATTERN_COUNT,
-               "every backdrop pattern needs a name on the Appearance page");
-
 
 /* Written through to the user's file as well as to the running desktop, so a
  * choice survives the session that made it. */
@@ -128,8 +107,6 @@ static void theme_changed(void)
     prefs_set_u32("theme.body", g_ws->theme.body);
     prefs_set_u32("theme.text", g_ws->theme.text);
     prefs_set_u32("theme.scale", g_ws->theme.text_scale);
-    prefs_set_u32("theme.contrast", (unsigned)(g_ws->theme.contrast + 100));
-    prefs_set_u32("theme.pattern", g_ws->theme.pattern);
     prefs_set_u32("theme.blur", g_ws->theme.blur);
     prefs_set_u32("theme.mode", (unsigned)g_mode);
     prefs_set_str("theme.wallpaper", (const char*)g_ws->theme.wallpaper);
@@ -165,8 +142,6 @@ static void apply_saved_theme(void)
     g_ws->theme.body       = prefs_get_u32("theme.body", g_ws->theme.body);
     g_ws->theme.text       = prefs_get_u32("theme.text", g_ws->theme.text);
     g_ws->theme.text_scale = prefs_get_u32("theme.scale", 1);
-    g_ws->theme.contrast   = (int32_t)prefs_get_u32("theme.contrast", 100) - 100;
-    g_ws->theme.pattern    = prefs_get_u32("theme.pattern", WS_PATTERN_DITHER);
     /* Off unless this user has asked for it: see the note in wproto.h. */
     g_ws->theme.blur       = prefs_get_u32("theme.blur", 0);
     g_mode = (int)prefs_get_u32("theme.mode", MODE_LIGHT);
@@ -191,16 +166,12 @@ static void apply_preset(int i)
     const struct preset* p = &kPresets[i];
     g_ws->theme.desktop      = p->desktop;
     g_ws->theme.face         = p->face;
-    g_ws->theme.light        = p->light;
-    g_ws->theme.shadow       = p->shadow;
     g_ws->theme.title_active = p->title;
     g_ws->theme.title_text   = p->title_text;
     g_ws->theme.cursor       = p->cursor;
     g_ws->theme.selection    = p->selection;
     g_ws->theme.body         = p->body;
     g_ws->theme.text         = p->text;
-    g_ws->theme.contrast     = p->contrast;
-    g_ws->theme.pattern      = p->pattern;
     g_ws->theme.wallpaper[0] = '\0';
     theme_changed();
     snprintf(g_note, sizeof(g_note), "%s", p->name);
@@ -440,12 +411,6 @@ static const char* size_name(void* user, int i)
     return i == 0 ? "Normal" : "Large";
 }
 
-static const char* pattern_name(void* user, int i)
-{
-    (void)user;
-    return (i >= 0 && i < WS_PATTERN_COUNT) ? kPatterns[i] : "";
-}
-
 static void on_mode(struct ui_view* v, void* user)
 {
     (void)user;
@@ -469,14 +434,6 @@ static void on_text_size(struct ui_view* v, void* user)
     g_ws->theme.text_scale = v->on == 0 ? 1u : 2u;
     theme_changed();
     ui_set_text(g_note_label, g_note);
-}
-
-static void on_pattern(struct ui_view* v, void* user)
-{
-    (void)user;
-    if (g_ws == 0 || v->selected < 0 || v->selected >= WS_PATTERN_COUNT) return;
-    g_ws->theme.pattern = (uint32_t)v->selected;
-    theme_changed();
 }
 
 static void on_choose_paper(struct ui_view* v, void* user)
@@ -514,7 +471,7 @@ static void build_appearance(struct ui_view* page)
 
     struct ui_view* d = ui_group(page, "Desktop", UI_STACK_V, 12, 4);
     ui_grow(d, 0);
-    ui_size(d, 0, 3 * 30 + 28);
+    ui_size(d, 0, 2 * 30 + 28);
 
     r = row(d, "Text Size");
     seg = ui_segmented(r, size_name, 2, 0);
@@ -522,13 +479,6 @@ static void build_appearance(struct ui_view* page)
     ui_size(seg, 160, 24);
     ui_grow(seg, 0);
     ui_on(seg, on_text_size, 0);
-
-    r = row(d, "Backdrop Pattern");
-    struct ui_view* pop = ui_popup(r, pattern_name, WS_PATTERN_COUNT, 0);
-    pop->selected = g_ws != 0 ? (int)g_ws->theme.pattern : 0;
-    ui_size(pop, 160, 24);
-    ui_grow(pop, 0);
-    ui_on(pop, on_pattern, 0);
 
     r = row(d, "Wallpaper");
     ui_grow(ui_size(ui_button(r, "Choose a Picture...", on_choose_paper, 0),

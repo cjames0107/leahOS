@@ -47,8 +47,6 @@
 #define DESKTOP      (g_control->theme.desktop)
 #define FACE         (g_control->theme.face)
 /* Contrast pushes the bevel shades apart, or together, around the face. */
-#define LIGHT        tint(g_control->theme.light,  g_control->theme.contrast)
-#define SHADOW       tint(g_control->theme.shadow, -g_control->theme.contrast)
 #define TITLE_ACTIVE (g_control->theme.title_active)
 #define TITLE_IDLE   (g_control->theme.title_idle)
 #define TITLE_TEXT   (g_control->theme.title_text)
@@ -264,29 +262,6 @@ static int g_mouse_grab = -1;
 static int g_last_left;
 static int g_last_right;
 
-/* Shift a colour towards white or black by `amount` percent. Used for the
- * bevels, which is where contrast actually lives: the face colour stays put and
- * the light and shadow move apart or together around it. */
-static uint32_t tint(uint32_t c, int amount)
-{
-    int r = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)(c & 0xFF);
-    if (amount >= 0) {
-        r += (255 - r) * amount / 100;
-        g += (255 - g) * amount / 100;
-        b += (255 - b) * amount / 100;
-    } else {
-        r += r * amount / 100;
-        g += g * amount / 100;
-        b += b * amount / 100;
-    }
-    if (r < 0) r = 0;
-    if (r > 255) r = 255;
-    if (g < 0) g = 0;
-    if (g > 255) g = 255;
-    if (b < 0) b = 0;
-    if (b > 255) b = 255;
-    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
-}
 
 static int imax(int a, int b) { return a > b ? a : b; }
 static int imin(int a, int b) { return a < b ? a : b; }
@@ -1236,32 +1211,17 @@ static void compose_rect(const struct rect* r)
             memcpy(row, &g_paper[(unsigned long)y * g_fb.width + (unsigned)r->x],
                    (unsigned long)r->w * 4);
         } else {
-            /* A pattern is drawn from the desktop colour rather than a second
-             * one, so it stays consistent with whatever was chosen. */
-            const uint32_t base = DESKTOP;
-            const uint32_t lit = tint(base, 18);
-            const uint32_t dim = tint(base, -18);
-            for (int x = 0; x < r->w; ++x) {
-                const int gx = r->x + x;
-                uint32_t c = base;
-                switch (g_control->theme.pattern) {
-                case WS_PATTERN_GRID:
-                    if ((gx % 32) == 0 || (y % 32) == 0) c = lit;
-                    break;
-                case WS_PATTERN_DOTS:
-                    if ((gx % 16) == 0 && (y % 16) == 0) c = lit;
-                    break;
-                case WS_PATTERN_WEAVE:
-                    c = (((gx >> 2) + (y >> 2)) & 1) ? lit : dim;
-                    break;
-                case WS_PATTERN_DITHER:
-                    c = ((gx + y) & 1) ? lit : dim;
-                    break;
-                default:
-                    break;
-                }
-                row[x] = c;
-            }
+            /* No wallpaper: the desktop colour, flat.
+             *
+             * There were four patterns here - a grid, dots, a weave and a
+             * two-tone dither - and they were what a machine with a handful of
+             * colours did to make a shade it did not have. This one has
+             * millions and a wallpaper, so alternating pixels between two
+             * greys is an imitation of a limitation. It also cost a switch and
+             * two arithmetic operations on every desktop pixel of every damage
+             * rectangle, to draw something nobody chose. */
+            for (int x = 0; x < r->w; ++x)
+                row[x] = DESKTOP;
         }
     }
     for (int i = hidden ? cover : g_count - 1; i >= 0; --i) {
@@ -2005,8 +1965,6 @@ int main(void)
      * selection were the last of the 1991 machine showing through a design
      * that is otherwise soft light and shadow. */
     g_control->theme.face         = 0xF2F4F7;
-    g_control->theme.light        = 0xFFFFFF;
-    g_control->theme.shadow       = 0x9AA3AE;
     g_control->theme.title_active = 0xF2F4F7;
     g_control->theme.title_idle   = 0xF2F4F7;
     g_control->theme.title_text   = 0x18202B;
@@ -2015,8 +1973,6 @@ int main(void)
     g_control->theme.body         = 0xFFFFFF;
     g_control->theme.text         = 0x18202B;
     g_control->theme.text_scale   = 1;
-    g_control->theme.contrast     = 0;
-    g_control->theme.pattern      = WS_PATTERN_DITHER;
     g_control->theme.blur         = 0;
 
     /* No wallpaper. The desktop is the dither above, which is what this

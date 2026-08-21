@@ -1313,7 +1313,8 @@ static void begin_rename(void)
     join(g_path, g_entries[g_selected].d_name, g_rename_from,
          sizeof(g_rename_from));
     g_asking = ASK_RENAME;
-    app_sheet_save(&g_app, g_path, g_entries[g_selected].d_name);
+    app_sheet_name(&g_app, g_path, g_entries[g_selected].d_name,
+                   "Rename this to", "Rename");
     snprintf(g_status, sizeof(g_status), "rename %s to...",
              g_entries[g_selected].d_name);
 }
@@ -1718,8 +1719,10 @@ static int on_menu_pick(struct app* a, int pick)
              * a convenience. */
             g_new_kind = pick;
             g_asking = ASK_NEW;
-            app_sheet_save(&g_app, g_path,
-                           pick == 0 ? "untitled.txt" : "folder");
+            app_sheet_name(&g_app, g_path,
+                           pick == 0 ? "untitled.txt" : "folder",
+                           pick == 0 ? "Name the new file"
+                                     : "Name the new folder", "Create");
         } else if (pick == 3) {
             static char buf[CLIP_MAX];
             if (clip_get(buf, sizeof(buf)) > 0)

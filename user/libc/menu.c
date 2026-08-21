@@ -33,7 +33,7 @@ void menu_open(int x, int y, const char* const* items, int count)
     g_menu_n = count > MENU_MAX ? MENU_MAX : count;
     g_mw = 0;
     for (int i = 0; i < g_menu_n; ++i) {
-        const int w = (int)strlen(items[i]) * WG_GLYPH_W + 24;
+        const int w = wg_text_width(items[i]) + 24;
         if (w > g_mw) g_mw = w;
     }
     if (g_mw < 100) g_mw = 100;

@@ -26,10 +26,17 @@
  * same radius reads as a hole rather than as a control. */
 #define WG_RADIUS  6
 
-/* The bitmap cell these were, kept because layout code still counts in them.
- * Text is proportional now: ask wg_text_width what a string actually measures
- * rather than multiplying by eight. */
-#define WG_GLYPH_W 8
+/* The height of a line, which is what the proportional face was sized to land
+ * on: wg_text_size picks an em that gives about twelve pixels of ascent and
+ * four of descent, so a caller laying rows out in sixteens still works.
+ *
+ * There was a WG_GLYPH_W beside it - eight, the width of a cell in the console
+ * font - and it was used all over this system to work out where a character
+ * was. None of them are eight wide. The caret in the editor, the selection
+ * behind it, the width of a menu, the size a label asks for and the spacing
+ * of every word on a web page were all computed as though they were, and each
+ * drifted further from the text with every letter. Ask wg_text_width, or
+ * wg_text_width_n for a prefix; they measure with the function that draws. */
 #define WG_GLYPH_H 16
 
 /* Point drawing at a buffer. Every call below clips to it, so a client can draw
@@ -94,6 +101,15 @@ void wg_text(int x, int y, const char* s, uint32_t colour);
  * glyphs are not all one width any more, so strlen times eight is a guess that
  * is wrong in both directions. */
 int  wg_text_width(const char* s);
+
+/* The width of the first `n` bytes of a string.
+ *
+ * The measurement a caret needs, and the one a fixed cell width was standing
+ * in for all over this system: a column number times WG_GLYPH_W is where a
+ * character would be if every character were the same width, and none of them
+ * are. It takes a length rather than a terminator because the thing being
+ * measured is a prefix of a line that continues. */
+int  wg_text_width_n(const char* s, int n);
 int  wg_text_height(void);
 int  wg_text_size(void);
 

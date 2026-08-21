@@ -193,6 +193,19 @@ static void sheet_cancel_clicked(struct ui_view* v, void* user)
 struct ui_view* app_sheet_save(struct app* a, const char* dir,
                                const char* suggested)
 {
+    return app_sheet_name(a, dir, suggested, 0, 0);
+}
+
+/* The same panel, saying what it is actually for.
+ *
+ * It said "Save as" and its button said "Save" whatever it had been opened to
+ * ask. Files uses it to rename, which made a panel that asked one question and
+ * offered to do another - and a person reading "Save" over a file they meant
+ * to rename has every reason to stop and wonder what it is about to do. */
+struct ui_view* app_sheet_name(struct app* a, const char* dir,
+                               const char* suggested, const char* title,
+                               const char* action)
+{
     snprintf(g_sheet_dir, sizeof(g_sheet_dir), "%s", dir != 0 ? dir : "/");
     g_sheet_path[0] = '\0';
 
@@ -200,15 +213,15 @@ struct ui_view* app_sheet_save(struct app* a, const char* dir,
     if (root == 0)
         return 0;
 
-    ui_grow(ui_label(root, "Save as"), 0);
+    ui_grow(ui_label(root, title != 0 && title[0] != '\0' ? title : "Save as"), 0);
     char where[220];
     snprintf(where, sizeof(where), "in %s", g_sheet_dir);
     ui_grow(ui_label(root, where), 0);
 
     g_sheet_field = ui_field(root, suggested != 0 ? suggested : "");
     ui_grow(g_sheet_field, 0);
-    /* Return in the field is the same as pressing Save, which is what anyone
-     * typing a filename expects to be able to do. */
+    /* Return in the field does what the button does, which is what anyone
+     * typing a name expects to be able to do. */
     ui_on(g_sheet_field, sheet_save_clicked, a);
     ui_focus(g_sheet_field);
 
@@ -218,7 +231,9 @@ struct ui_view* app_sheet_save(struct app* a, const char* dir,
     ui_grow(row, 0);
     ui_spacer(row);
     ui_grow(ui_button(row, "Cancel", sheet_cancel_clicked, a), 0);
-    ui_grow(ui_button(row, "Save", sheet_save_clicked, a), 0);
+    ui_grow(ui_button(row,
+                      action != 0 && action[0] != '\0' ? action : "Save",
+                      sheet_save_clicked, a), 0);
     return root;
 }
 

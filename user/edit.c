@@ -175,15 +175,51 @@ static void selection(int* from, int* to)
 
 /* The longest line, so the horizontal bar knows how far it can go. */
 
+/* One line, as it is drawn: tabs become spaces and the horizontal scroll is
+ * already taken off the front. Everything that measures a position on a line
+ * measures this, because this is what is on the screen. */
+static int visible_line(int line, char* out, int max)
+{
+    const int begin = g_line_start[line] + g_hcol;
+    const int end = line_end(line);
+    int n = 0;
+    for (int i = begin; i < end && n < max - 1; ++i)
+        out[n++] = g_text[i] == '\t' ? ' ' : g_text[i];
+    out[n] = '\0';
+    return n;
+}
+
+/* How far along a line a column sits, in pixels.
+ *
+ * Measured rather than multiplied. This file drew its text with wg_text, which
+ * is proportional, and worked out every position with WG_GLYPH_W, which is the
+ * width of a cell in the console font - so the caret and the selection were
+ * placed where the characters would have been on a machine with one width per
+ * letter, and drifted further from them with every character on the line. */
+static int column_x(int line, int col)
+{
+    char buf[256];
+    const int n = visible_line(line, buf, sizeof(buf));
+    if (col < 0) col = 0;
+    if (col > n) col = n;
+    return 8 + wg_text_width_n(buf, col);
+}
+
 /* Where in the text a point in the window lands. */
 static int offset_at(int x, int y)
 {
     int line = g_scroll + (y - TOOLBAR_H - 4) / WG_GLYPH_H;
     if (line < 0) line = 0;
     if (line >= g_lines) line = g_lines - 1;
-    int col = g_hcol + (x - 8) / WG_GLYPH_W;
-    if (col < 0) col = 0;
-    int at = g_line_start[line] + col;
+
+    /* Walk the line until the text is wider than the click, which is the same
+     * walk the drawing does and therefore the only one that agrees with it. */
+    char buf[256];
+    const int n = visible_line(line, buf, sizeof(buf));
+    int col = 0;
+    while (col < n && 8 + wg_text_width_n(buf, col + 1) <= x)
+        ++col;
+    int at = g_line_start[line] + g_hcol + col;
     if (at > line_end(line)) at = line_end(line);
     return at;
 }
@@ -270,17 +306,14 @@ static void draw_text(struct ui_view* view, void* user)
         if (to > begin && from < end) {
             const int a = (from > begin ? from : begin) - begin - g_hcol;
             const int b = (to < end ? to : end) - begin - g_hcol;
-            const int x0 = 8 + (a < 0 ? 0 : a) * WG_GLYPH_W;
-            const int x1 = 8 + (b < 0 ? 0 : b) * WG_GLYPH_W;
+            const int x0 = column_x(line, a < 0 ? 0 : a);
+            const int x1 = column_x(line, b < 0 ? 0 : b);
             if (x1 > x0)
                 wg_fill(x0, y, x1 - x0, WG_GLYPH_H, wg_sel_colour());
         }
 
         char buf[256];
-        int n = 0;
-        for (int i = begin + g_hcol; i < end && n < (int)sizeof(buf) - 1; ++i)
-            buf[n++] = g_text[i] == '\t' ? ' ' : g_text[i];
-        buf[n] = '\0';
+        visible_line(line, buf, sizeof(buf));
         wg_text(8, y, buf, WG_INK);
 
         /* The caret, drawn as a bar between characters rather than over one, so
@@ -288,7 +321,7 @@ static void draw_text(struct ui_view* view, void* user)
         if (line == caret_line) {
             const int col = g_caret - begin - g_hcol;
             if (col >= 0)
-                wg_fill(8 + col * WG_GLYPH_W, y, 1, WG_GLYPH_H, WG_ACCENT);
+                wg_fill(column_x(line, col), y, 1, WG_GLYPH_H, WG_ACCENT);
         }
     }
 

@@ -155,6 +155,16 @@ int app_sheet_open(const struct app* a);
  * question every time. */
 struct ui_view* app_sheet_save(struct app* a, const char* dir,
                                const char* suggested);
+
+/* The same panel with its own words. `title` is the line above the field and
+ * `action` is what the button says; either may be 0 for "Save as" and "Save".
+ *
+ * Asking for a name is not always saving. Files uses this to rename, and a
+ * panel that says "Save" over a file somebody meant to rename is a panel that
+ * has to be stopped and thought about. */
+struct ui_view* app_sheet_name(struct app* a, const char* dir,
+                               const char* suggested, const char* title,
+                               const char* action);
 const char* app_sheet_path(const struct app* a);
 
 /* A sheet for choosing a file: the directory listed, directories entered by

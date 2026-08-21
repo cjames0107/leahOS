@@ -72,7 +72,7 @@ static int dropdown_box(struct ui_view* v, int* x, int* y, int* w, int* n)
         int at = v->frame.x;
         for (int i = 0; i < v->open; ++i) {
             const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
-            at += (int)strlen(t != 0 ? t : "") * WG_GLYPH_W + 20;
+            at += wg_text_width(t != 0 ? t : "") + 20;
         }
         const int* counts = (const int*)(void*)v->depth_of;
         *x = at; *y = v->frame.y + v->frame.h; *w = 170;
@@ -145,7 +145,7 @@ struct ui_view* ui_label(struct ui_view* parent, const char* text)
     if (v == 0) return 0;
     set_text(v, text);
     v->want_h = WG_GLYPH_H + 4;
-    v->want_w = (int)strlen(v->text) * WG_GLYPH_W;
+    v->want_w = wg_text_width(v->text);
     return v;
 }
 
@@ -158,7 +158,7 @@ struct ui_view* ui_button(struct ui_view* parent, const char* label,
     v->action = action;
     v->user = user;
     v->want_h = 26;
-    v->want_w = (int)strlen(v->text) * WG_GLYPH_W + 28;
+    v->want_w = wg_text_width(v->text) + 28;
     v->flags |= UI_FOCUSABLE;
     return v;
 }
@@ -181,7 +181,7 @@ struct ui_view* ui_check(struct ui_view* parent, const char* label, int on)
     set_text(v, label);
     v->on = on;
     v->want_h = 20;
-    v->want_w = (int)strlen(v->text) * WG_GLYPH_W + 26;
+    v->want_w = wg_text_width(v->text) + 26;
     v->flags |= UI_FOCUSABLE;
     return v;
 }
@@ -308,7 +308,7 @@ struct ui_view* ui_toggle(struct ui_view* parent, const char* label, int on)
     set_text(v, label);
     v->on = on;
     v->want_h = 22;
-    v->want_w = (int)strlen(v->text) * WG_GLYPH_W + 52;
+    v->want_w = wg_text_width(v->text) + 52;
     v->flags |= UI_FOCUSABLE;
     return v;
 }
@@ -508,7 +508,7 @@ struct ui_view* ui_combo(struct ui_view* parent, const char* label,
     v->open = 0;
     v->selected = -1;
     v->want_h = 26;
-    v->want_w = (int)strlen(v->text) * WG_GLYPH_W + 56;
+    v->want_w = wg_text_width(v->text) + 56;
     v->flags |= UI_FOCUSABLE;
     return v;
 }
@@ -1063,7 +1063,7 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             int at = v->frame.x, picked = -1;
             for (int i = 0; i < v->rows; ++i) {
                 const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
-                const int w = (int)strlen(t) * WG_GLYPH_W + 20;
+                const int w = wg_text_width(t) + 20;
                 if (e->x >= at && e->x < at + w) { picked = i; break; }
                 at += w;
             }
@@ -1106,14 +1106,19 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             /* The caret goes to the line and column that were clicked. */
             if (v->buffer != 0) {
                 const int line = v->scroll + (e->y - v->frame.y - 4) / v->row_h;
-                const int col = (e->x - v->frame.x - 8) / WG_GLYPH_W;
+                /* Walked rather than divided: the glyphs are not all one
+                 * width, so a column is where the text stops being narrower
+                 * than the click. */
+                const int col_want = e->x - v->frame.x - 8;
                 int at = 0, l = 0;
                 while (v->buffer[at] != '\0' && l < line) {
                     if (v->buffer[at] == '\n') ++l;
                     ++at;
                 }
+                const int start = at;
                 int c = 0;
-                while (v->buffer[at] != '\0' && v->buffer[at] != '\n' && c < col) {
+                while (v->buffer[at] != '\0' && v->buffer[at] != '\n' &&
+                       wg_text_width_n(&v->buffer[start], c + 1) <= col_want) {
                     ++at; ++c;
                 }
                 v->caret = at;
@@ -1751,7 +1756,7 @@ void ui_draw(struct ui_view* v)
         static const char* const kDays[7] = { "S","M","T","W","T","F","S" };
         const int cw = f.w / 7;
         for (int d = 0; d < 7; ++d)
-            wg_text(f.x + d * cw + (cw - WG_GLYPH_W) / 2, f.y + 2, kDays[d],
+            wg_text(f.x + d * cw + (cw - wg_text_width(kDays[d])) / 2, f.y + 2, kDays[d],
                     WG_DIM);
         const int top = f.y + WG_GLYPH_H + 22;
         const int ch = (f.h - WG_GLYPH_H - 22) / 6;
@@ -1767,7 +1772,7 @@ void ui_draw(struct ui_view* v)
                 wg_row_select(x + 1, y, cw - 2, ch - 1);
             char num[4];
             snprintf(num, sizeof(num), "%d", day);
-            const int tw = (int)strlen(num) * WG_GLYPH_W;
+            const int tw = wg_text_width(num);
             wg_text(x + (cw - tw) / 2, y + (ch - WG_GLYPH_H) / 2, num,
                     wg_ink_colour());
         }
@@ -1811,7 +1816,7 @@ void ui_draw(struct ui_view* v)
         const int third = f.w / 3;
         wg_button(f.x, f.y, third, f.h, "-", 0);
         wg_button(f.x + f.w - third, f.y, third, f.h, "+", 0);
-        const int tw = (int)strlen(num) * WG_GLYPH_W;
+        const int tw = wg_text_width(num);
         wg_text(f.x + f.w / 2 - tw / 2, f.y + (f.h - WG_GLYPH_H) / 2, num,
                 wg_ink_colour());
         break;
@@ -1854,7 +1859,7 @@ void ui_draw(struct ui_view* v)
         int at = f.x;
         for (int i = 0; i < v->rows; ++i) {
             const char* t = v->row_text != 0 ? v->row_text(v->user, i) : "";
-            const int w = (int)strlen(t != 0 ? t : "") * WG_GLYPH_W + 20;
+            const int w = wg_text_width(t != 0 ? t : "") + 20;
             if (i == v->open)
                 wg_row_select(at, f.y, w, f.h);
             wg_text(at + 10, f.y + (f.h - WG_GLYPH_H) / 2, t != 0 ? t : "",

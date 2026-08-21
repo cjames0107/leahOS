@@ -126,7 +126,8 @@ static void draw(struct app* a)
     /* Weekday initials, dim, above the grid. */
     for (int d = 0; d < 7; ++d) {
         const int x = grid_x() + d * cell_w();
-        wg_text(x + (cell_w() - WG_GLYPH_W) / 2, HEAD_H - 20, kDays[d], WG_DIM);
+        wg_text(x + (cell_w() - wg_text_width(kDays[d])) / 2, HEAD_H - 20,
+                kDays[d], WG_DIM);
     }
 
     wg_container(grid_x() - 6, grid_y() - 6, 7 * cell_w() + 12,
@@ -151,7 +152,7 @@ static void draw(struct app* a)
             wg_fill(x + 2, y + 2, cell_w() - 4, cell_h() - 4, WG_ACCENT);
         }
         snprintf(line, sizeof(line), "%d", day);
-        const int tw = (int)strlen(line) * WG_GLYPH_W;
+        const int tw = wg_text_width(line);
         wg_text(x + (cell_w() - tw) / 2, y + (cell_h() - WG_GLYPH_H) / 2,
                 line, is_today ? WG_PAPER : wg_ink_colour());
     }

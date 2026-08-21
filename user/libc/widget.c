@@ -372,8 +372,18 @@ int wg_text_width(const char* s)
 {
     struct font* f = face();
     if (f == 0)
-        return (int)strlen(s) * WG_GLYPH_W * (int)g_scale;
+        /* No face loaded, so nothing has been drawn and nothing can be
+         * measured. Eight is the console cell, which is the only width this
+         * can guess with when there is no font to ask. */
+        return (int)strlen(s) * 8 * (int)g_scale;
     return font_width(f, wg_text_size(), s);
+}
+
+int wg_text_width_n(const char* s, int n)
+{
+    if (s == 0 || n <= 0)
+        return 0;
+    return wg_styled_width(s, n, wg_text_size(), 0);
 }
 
 int wg_text_height(void)
