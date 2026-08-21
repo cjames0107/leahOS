@@ -340,7 +340,7 @@ static void draw(void)
     wg_glass_clear();
 
     wg_fill(PAD, PAD, (int)g_w - PAD * 2, 34, WG_PAPER);
-    wg_bevel(PAD, PAD, (int)g_w - PAD * 2, 34, 0);
+    wg_outline(PAD, PAD, (int)g_w - PAD * 2, 34, 0);
 
     /* %g rather than a fixed number of places: it drops trailing zeros and
      * switches to an exponent when the number would otherwise be a screenful

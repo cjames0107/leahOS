@@ -214,6 +214,31 @@ static uint32_t rgb_with(uint32_t colour, int ch, unsigned v)
     return (colour & ~(0xFFu << shift)) | ((v & 0xFFu) << shift);
 }
 
+/* The glass helpers, which live further down with the panels they were written
+ * for. The two oldest controls in this file - the colour picker and the
+ * slider - are drawn with them now and come first, so they are named here. */
+static int      glass_on(void);
+static uint32_t darken(uint32_t colour, unsigned amount);
+static void     soft_shadow(int x, int y, int w, int h, int r);
+
+/* How round a container's corners are, from how much padding it has: a panel
+ * with room inside it can afford a rounder corner than one that is all edge.
+ * Used only in here now, so it is no longer part of the public vocabulary. */
+static int container_radius(int pad)
+{
+    int r = 4 + pad;
+    if (r > 14) r = 14;
+    return r;
+}
+
+/* One colour on the glass and another on a flat panel. The same choice is made
+ * a dozen times in this file with a ternary; naming it says what the two
+ * numbers are for. */
+static uint32_t glass_tint(uint32_t on_glass, uint32_t when_opaque)
+{
+    return glass_on() ? on_glass : when_opaque;
+}
+
 void wg_rgb_draw(int x, int y, int w, uint32_t colour)
 {
     const int tw = rgb_track_w(w);
@@ -227,14 +252,21 @@ void wg_rgb_draw(int x, int y, int w, uint32_t colour)
             const unsigned v = (unsigned)(i * 255 / (tw > 1 ? tw - 1 : 1));
             wg_fill(x + RGB_TRACK_X + i, ty + 2, 1, 12, rgb_with(colour, ch, v));
         }
-        wg_bevel(x + RGB_TRACK_X - 1, ty + 1, tw + 2, 14, 0);
+        wg_glass_outline(x + RGB_TRACK_X - 1, ty + 1, tw + 2, 14, 4, 1,
+                         glass_on() ? 0x59FFFFFFu : 0x33000000u);
+        /* The marker is a knob over the gradient rather than a bevelled tab
+         * beside it, which is the same shape the slider's is. */
         const int at = (int)(rgb_channel(colour, ch)) * (tw - 1) / 255;
-        wg_fill(x + RGB_TRACK_X + at - 2, ty, 5, 16, WG_FACE);
-        wg_bevel(x + RGB_TRACK_X + at - 2, ty, 5, 16, 1);
+        soft_shadow(x + RGB_TRACK_X + at - 3, ty, 7, 16, 3);
+        wg_glass_fill(x + RGB_TRACK_X + at - 3, ty, 7, 16, 3,
+                      glass_tint(0xE6FFFFFFu, WG_PAPER));
+        wg_glass_outline(x + RGB_TRACK_X + at - 3, ty, 7, 16, 3, 1,
+                         glass_on() ? 0x8CFFFFFFu : 0x40000000u);
     }
     const int sx = x + RGB_TRACK_X + tw + 8;
     wg_fill(sx, y, RGB_SWATCH, 3 * RGB_ROW - 4, colour);
-    wg_bevel(sx, y, RGB_SWATCH, 3 * RGB_ROW - 4, 0);
+    wg_glass_outline(sx, y, RGB_SWATCH, 3 * RGB_ROW - 4, 4, 1,
+                     glass_on() ? 0x8CFFFFFFu : 0x40000000u);
     char v[24];
     snprintf(v, sizeof(v), "%u %u %u", rgb_channel(colour, 0),
              rgb_channel(colour, 1), rgb_channel(colour, 2));
@@ -281,31 +313,28 @@ void wg_slider_draw(int x, int y, int w, int value, int max)
     const int span = slider_span(w);
     const int at = value * span / max;
 
-    /* The track is sunken and the part behind the thumb is filled, so the
-     * setting reads at a glance without having to find the thumb first. */
-    wg_fill(x, y + 6, w, 6, WG_PAPER);
-    wg_bevel(x, y + 6, w, 6, 0);
+    /* A rounded track with the part behind the knob filled, so the setting
+     * reads at a glance without having to find the knob first. It was a sunken
+     * rectangle with a hard edge and a square thumb, which is the one control
+     * in the system that still looked like it came from a different one. */
+    const int ty = y + WG_SLIDER_H / 2 - 3;
+    wg_glass_fill(x, ty, w, 6, 3,
+                  glass_tint(0x26FFFFFFu, darken(wg_base_colour(), 16)));
     if (at > 0)
-        wg_fill(x + 1, y + 7, at, 4, wg_sel_colour());
+        wg_glass_fill(x, ty, at + SLIDER_THUMB / 2, 6, 3,
+                      0xFF000000u | wg_sel_colour());
 
-    wg_fill(x + at, y, SLIDER_THUMB, WG_SLIDER_H, WG_FACE);
-    wg_bevel(x + at, y, SLIDER_THUMB, WG_SLIDER_H, 1);
+    /* A round knob, with the shadow every raised thing in this interface has
+     * instead of the bevel it used to be drawn with. */
+    const int knob = WG_SLIDER_H - 2;
+    soft_shadow(x + at, y + 1, knob, knob, knob / 2);
+    wg_glass_fill(x + at, y + 1, knob, knob, knob / 2,
+                  glass_tint(0xE6FFFFFFu, WG_PAPER));
+    wg_glass_outline(x + at, y + 1, knob, knob, knob / 2, 1,
+                     glass_on() ? 0x8CFFFFFFu : 0x33000000u);
 }
 
-int wg_slider_hit(int x, int y, int w, int mx, int my)
-{
-    /* Generous vertically: the track is six pixels and nobody aims at that. */
-    return mx >= x - 4 && mx < x + w + 4 && my >= y - 2 && my < y + WG_SLIDER_H + 2;
-}
 
-int wg_slider_value(int x, int w, int mx, int max)
-{
-    const int span = slider_span(w);
-    int at = mx - x - SLIDER_THUMB / 2;
-    if (at < 0) at = 0;
-    if (at > span) at = span;
-    return span > 0 ? at * max / span : 0;
-}
 
 /* What used to be two one-pixel lines suggesting a light source.
  *
@@ -314,11 +343,20 @@ int wg_slider_value(int x, int w, int mx, int max)
  * rounded hairline, darker when the caller asked for sunken. The name and the
  * signature stay because dozens of call sites use them and all of them mean
  * "outline this box". */
-void wg_bevel(int x, int y, int w, int h, int raised)
+/* A hairline round something, bright or dark.
+ *
+ * It was called wg_outline, and for a long time it drew one: a light edge above
+ * and left, a dark one below and right, which is how a flat machine said
+ * "raised" without a second colour. It has not done that since the corners
+ * were rounded - it draws one translucent rounded outline - and a name that
+ * describes a technique the function no longer uses is worse than no name,
+ * because the callers were still written as though `raised` meant lit from the
+ * top left. It means the brighter of the two edges. */
+void wg_outline(int x, int y, int w, int h, int bright)
 {
     const struct surface c = canvas();
     draw_round_rect_outline(&c, x, y, w, h, WG_RADIUS, 1,
-                            raised ? 0x59FFFFFFu : 0x26000000u);
+                            bright ? 0x59FFFFFFu : 0x26000000u);
 }
 
 int wg_text_size(void)
@@ -471,11 +509,6 @@ int wg_styled_height(int size_px)
     return f != 0 ? font_line_height(f, size_px) : size_px + 4;
 }
 
-int wg_styled_ascent(int size_px)
-{
-    struct font* f = face();
-    return f != 0 ? font_ascent(f, size_px) : size_px;
-}
 
 void wg_text_clipped(int x, int y, const char* s, uint32_t colour, int max_w)
 {
@@ -757,24 +790,11 @@ void wg_glass_clear(void)
         g_px[i] = c;
 }
 
-/* A container: a box holding other things.
- *
- * `pad` is how much room there is between it and the window's edge, and the
- * corner follows from it. A box pressed against the edge wants a small radius
- * or it fights the window's own corner; one floating in the middle of a lot of
- * space can afford a large one. This is the rule the whole layout reads by,
- * so it lives here rather than in each window's idea of a nice number. */
-int wg_container_radius(int pad)
-{
-    int r = 4 + pad;
-    if (r > 14) r = 14;
-    return r;
-}
 
 void wg_container(int x, int y, int w, int h, int pad)
 {
     const struct surface c = canvas();
-    const int r = wg_container_radius(pad);
+    const int r = container_radius(pad);
     if (glass_on())
         wg_glass_fill(x, y, w, h, r, 0x30FFFFFFu);
     else
@@ -939,55 +959,38 @@ static void thumb_of(int track, int first, int page, int span,
     *len = l;
 }
 
-static void arrow(int x, int y, int size, int dir)
-{
-    /* dir: 0 up, 1 down, 2 left, 3 right. A filled triangle by rows. */
-    for (int i = 0; i < size / 2; ++i) {
-        const int run = i * 2 + 1;
-        for (int k = 0; k < run; ++k) {
-            int px, py;
-            if (dir == 0)      { px = x + size / 2 - i + k; py = y + 3 + i; }
-            else if (dir == 1) { px = x + size / 2 - i + k; py = y + size - 4 - i; }
-            else if (dir == 2) { px = x + 3 + i;            py = y + size / 2 - i + k; }
-            else               { px = x + size - 4 - i;     py = y + size / 2 - i + k; }
-            wg_plot(px, py, WG_INK);
-        }
-    }
-}
 
+/* A capsule on a faint track, and no arrows at either end.
+ *
+ * The arrows went with a mouse that had one button and a screen where the
+ * trough was the only other way to move: two buttons that scroll a line at a
+ * time, at opposite ends of the bar, so reaching the second one after the
+ * first means crossing the whole window. Nothing has needed them here - the
+ * two applications that drew their own were removed when their toolbars were,
+ * and the trough already jumps to where it is clicked.
+ *
+ * The track was 0xA0A0A0, written down rather than asked for, so every
+ * scrolling view in the system had a grey in it that no theme could change and
+ * that belonged to neither the light one nor the dark. */
 void wg_scrollbar_v(int x, int y, int h, int first, int page, int span)
 {
-    wg_fill(x, y, WG_SCROLL_W, h, 0xA0A0A0);
-    wg_button(x, y, WG_SCROLL_W, WG_SCROLL_W, "", 0);
-    arrow(x, y, WG_SCROLL_W, 0);
-    wg_button(x, y + h - WG_SCROLL_W, WG_SCROLL_W, WG_SCROLL_W, "", 0);
-    arrow(x, y + h - WG_SCROLL_W, WG_SCROLL_W, 1);
-
-    const int track = h - WG_SCROLL_W * 2;
-    if (track <= 0)
+    /* Nothing at all when there is nothing to scroll. An empty track is a
+     * control that says "there is somewhere else to be" and then does not go
+     * there; the space stays reserved either way, so the only thing drawing it
+     * adds is the question. */
+    if (span <= page)
         return;
+    const int r = WG_SCROLL_W / 2;
+    wg_glass_fill(x, y, WG_SCROLL_W, h, r,
+                  glass_tint(0x1AFFFFFFu, darken(wg_base_colour(), 10)));
     int pos, len;
-    thumb_of(track, first, page, span, &pos, &len);
-    wg_fill(x, y + WG_SCROLL_W + pos, WG_SCROLL_W, len, WG_FACE);
-    wg_bevel(x, y + WG_SCROLL_W + pos, WG_SCROLL_W, len, 1);
+    thumb_of(h, first, page, span, &pos, &len);
+    /* Inset by a pixel so the capsule sits *in* the track rather than filling
+     * it edge to edge, which is what makes the track readable as a track. */
+    wg_glass_fill(x + 1, y + pos + 1, WG_SCROLL_W - 2, len - 2, r - 1,
+                  glass_tint(0x8CFFFFFFu, darken(wg_base_colour(), 78)));
 }
 
-void wg_scrollbar_h(int x, int y, int w, int first, int page, int span)
-{
-    wg_fill(x, y, w, WG_SCROLL_W, 0xA0A0A0);
-    wg_button(x, y, WG_SCROLL_W, WG_SCROLL_W, "", 0);
-    arrow(x, y, WG_SCROLL_W, 2);
-    wg_button(x + w - WG_SCROLL_W, y, WG_SCROLL_W, WG_SCROLL_W, "", 0);
-    arrow(x + w - WG_SCROLL_W, y, WG_SCROLL_W, 3);
-
-    const int track = w - WG_SCROLL_W * 2;
-    if (track <= 0)
-        return;
-    int pos, len;
-    thumb_of(track, first, page, span, &pos, &len);
-    wg_fill(x + WG_SCROLL_W + pos, y, len, WG_SCROLL_W, WG_FACE);
-    wg_bevel(x + WG_SCROLL_W + pos, y, len, WG_SCROLL_W, 1);
-}
 
 static int clamp_first(int first, int page, int span)
 {
@@ -1001,69 +1004,36 @@ int wg_scroll_hit_v(int x, int y, int bx, int by, int bh,
 {
     if (x < bx || x >= bx + WG_SCROLL_W || y < by || y >= by + bh)
         return first;
-    if (y < by + WG_SCROLL_W)
-        return clamp_first(first - 1, page, span);
-    if (y >= by + bh - WG_SCROLL_W)
-        return clamp_first(first + 1, page, span);
-
-    /* On the trough: jump so the thumb centres on the click, which is what a
-     * long list needs far more than paging one screen at a time. */
-    const int track = bh - WG_SCROLL_W * 2;
+    /* Jump so the thumb centres on the click, which is what a long list needs
+     * far more than paging one screen at a time - and, with the arrows gone,
+     * is what the whole length of the bar now does. */
+    const int track = bh;
     if (track <= 0 || span <= page)
         return first;
     int pos, len;
     thumb_of(track, first, page, span, &pos, &len);
-    const int at = y - (by + WG_SCROLL_W);
+    const int at = y - by;
     if (at < pos)  return clamp_first(first - page, page, span);
     if (at >= pos + len) return clamp_first(first + page, page, span);
     return first;
 }
 
-int wg_scroll_hit_h(int x, int y, int bx, int by, int bw,
-                    int first, int page, int span)
-{
-    if (y < by || y >= by + WG_SCROLL_W || x < bx || x >= bx + bw)
-        return first;
-    if (x < bx + WG_SCROLL_W)
-        return clamp_first(first - 1, page, span);
-    if (x >= bx + bw - WG_SCROLL_W)
-        return clamp_first(first + 1, page, span);
-    const int track = bw - WG_SCROLL_W * 2;
-    if (track <= 0 || span <= page)
-        return first;
-    int pos, len;
-    thumb_of(track, first, page, span, &pos, &len);
-    const int at = x - (bx + WG_SCROLL_W);
-    if (at < pos) return clamp_first(first - page, page, span);
-    if (at >= pos + len) return clamp_first(first + page, page, span);
-    return first;
-}
 
 int wg_scroll_on_thumb_v(int y, int by, int bh, int first, int page, int span)
 {
-    const int track = bh - WG_SCROLL_W * 2;
+    const int track = bh;
     if (track <= 0 || span <= page)
         return 0;
     int pos, len;
     thumb_of(track, first, page, span, &pos, &len);
-    const int at = y - (by + WG_SCROLL_W);
+    const int at = y - by;
     return at >= pos && at < pos + len;
 }
 
-int wg_scroll_on_thumb_h(int x, int bx, int bw, int first, int page, int span)
-{
-    const int track = bw - WG_SCROLL_W * 2;
-    if (track <= 0 || span <= page)
-        return 0;
-    int pos, len;
-    thumb_of(track, first, page, span, &pos, &len);
-    const int at = x - (bx + WG_SCROLL_W);
-    return at >= pos && at < pos + len;
-}
 
 int wg_scroll_drag_v(int y, int by, int bh, int page, int span)
 {
-    const int track = bh - WG_SCROLL_W * 2;
+    const int track = bh;
     if (track <= 0 || span <= page)
         return 0;
     int pos, len;
@@ -1073,27 +1043,12 @@ int wg_scroll_drag_v(int y, int by, int bh, int page, int span)
         return 0;
     /* Take the pointer as the middle of the thumb, so the thing under the
      * cursor is the thing that moves. */
-    int at = y - (by + WG_SCROLL_W) - len / 2;
+    int at = y - by - len / 2;
     if (at < 0) at = 0;
     if (at > usable) at = usable;
     return clamp_first(at * (span - page) / usable, page, span);
 }
 
-int wg_scroll_drag_h(int x, int bx, int bw, int page, int span)
-{
-    const int track = bw - WG_SCROLL_W * 2;
-    if (track <= 0 || span <= page)
-        return 0;
-    int pos, len;
-    thumb_of(track, 0, page, span, &pos, &len);
-    const int usable = track - len;
-    if (usable <= 0)
-        return 0;
-    int at = x - (bx + WG_SCROLL_W) - len / 2;
-    if (at < 0) at = 0;
-    if (at > usable) at = usable;
-    return clamp_first(at * (span - page) / usable, page, span);
-}
 
 /* --- the controls that were still 1991 --------------------------------------
  *
@@ -1191,24 +1146,5 @@ void wg_field(int x, int y, int w, int h, const char* text, int focused)
  * The group is a container; the rows are hairlines between, not boxes within,
  * because a box inside a box is the thing this design keeps having to remove.
  */
-#define WG_ROW_H 30
 
-void wg_group_begin(int x, int y, int w, int rows, const char* title)
-{
-    if (title != 0 && title[0] != '\0')
-        wg_text(x + 4, y - wg_text_height() - 4, title, WG_DIM);
-    wg_container(x, y, w, rows * WG_ROW_H, 10);
-}
 
-/* The label side of one row, and where its control should go. */
-int wg_row(int x, int y, int w, int index, const char* label)
-{
-    const int ry = y + index * WG_ROW_H;
-    if (index > 0)
-        draw_rect(&(struct surface){ g_px, (int)g_w, (int)g_h, 0, 0, 0, 0 },
-                  x + 12, ry, w - 24, 1,
-                  glass_on() ? 0x1AFFFFFFu : 0x14000000u);
-    wg_text(x + 14, ry + (WG_ROW_H - wg_text_height()) / 2, label,
-            wg_ink_colour());
-    return ry + (WG_ROW_H - 22) / 2;    /* where a 22-tall control sits */
-}

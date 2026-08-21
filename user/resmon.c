@@ -135,7 +135,7 @@ static void chart(int x, int y, int w, int h, const unsigned char* hist,
                   uint32_t colour, const char* label)
 {
     wg_fill(x, y, w, h, 0x101820);
-    wg_bevel(x, y, w, h, 0);
+    wg_outline(x, y, w, h, 0);
     for (int i = 0; i < w - 2 && i < HIST; ++i) {
         const int s = (g_at - (w - 2) + i + 2 * HIST) % HIST;
         const int bar = hist[s] * (h - 2) / 100;
@@ -149,7 +149,7 @@ static void chart(int x, int y, int w, int h, const unsigned char* hist,
 static void bar(int x, int y, int w, uint64_t part, uint64_t whole)
 {
     wg_fill(x, y, w, 12, WG_PAPER);
-    wg_bevel(x, y, w, 12, 0);
+    wg_outline(x, y, w, 12, 0);
     if (whole > 0) {
         int fill = (int)((part * (uint64_t)(w - 2)) / whole);
         if (fill > w - 2) fill = w - 2;

@@ -395,8 +395,8 @@ void dlg_draw(int window_w, int window_h)
      * part of it. */
     wg_fill(g_px + 4, g_py + 4, PANEL_W, PANEL_H, WG_SHADOW);
     wg_fill(g_px, g_py, PANEL_W, PANEL_H, WG_FACE);
-    wg_bevel(g_px, g_py, PANEL_W, PANEL_H, 1);
-    wg_bevel(g_px + 1, g_py + 1, PANEL_W - 2, PANEL_H - 2, 1);
+    wg_outline(g_px, g_py, PANEL_W, PANEL_H, 1);
+    wg_outline(g_px + 1, g_py + 1, PANEL_W - 2, PANEL_H - 2, 1);
 
     if (g_kind == KIND_SAVE) {
         wg_text(g_px + 12, g_py + 8, "Save as", WG_INK);
@@ -421,7 +421,7 @@ void dlg_draw(int window_w, int window_h)
     const int list_x = g_px + 12, list_y = list_top();
     const int list_w = PANEL_W - 24, list_h = list_height();
     wg_fill(list_x, list_y, list_w, list_h, WG_PAPER);
-    wg_bevel(list_x, list_y, list_w, list_h, 0);
+    wg_outline(list_x, list_y, list_w, list_h, 0);
     if (g_kind == KIND_SAVE && g_icons) {
         const int cols = icon_cols();
         for (int i = 0; i < g_items_n; ++i) {
@@ -466,7 +466,7 @@ void dlg_draw(int window_w, int window_h)
     if (g_kind == KIND_OPEN) {
         const int cy = list_y + list_h + 10;
         wg_fill(g_px + 12, cy, 14, 14, WG_PAPER);
-        wg_bevel(g_px + 12, cy, 14, 14, 0);
+        wg_outline(g_px + 12, cy, 14, 14, 0);
         if (g_always) {
             for (int i = 0; i < 5; ++i) wg_plot(g_px + 15 + i, cy + 6 + i, WG_ACCENT);
             for (int i = 0; i < 5; ++i) wg_plot(g_px + 19 + i, cy + 10 - i, WG_ACCENT);
@@ -478,7 +478,7 @@ void dlg_draw(int window_w, int window_h)
         const int fy = list_y + list_h + 6;
         wg_text(g_px + 12, fy + 3, "name", WG_DIM);
         wg_fill(g_px + 62, fy, PANEL_W - 76, 20, WG_PAPER);
-        wg_bevel(g_px + 62, fy, PANEL_W - 76, 20, 0);
+        wg_outline(g_px + 62, fy, PANEL_W - 76, 20, 0);
         wg_text_clipped(g_px + 66, fy + 2, g_name, WG_INK, PANEL_W - 84);
     }
 
@@ -550,7 +550,7 @@ void menu_draw(void)
     const int h = g_menu_n * MENU_ROW + 4;
     wg_fill(g_mx + 3, g_my + 3, g_mw, h, WG_SHADOW);
     wg_fill(g_mx, g_my, g_mw, h, WG_FACE);
-    wg_bevel(g_mx, g_my, g_mw, h, 1);
+    wg_outline(g_mx, g_my, g_mw, h, 1);
     for (int i = 0; i < g_menu_n; ++i) {
         const int y = g_my + 2 + i * MENU_ROW;
         if (g_menu_items[i][0] == '-') {

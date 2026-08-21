@@ -6,9 +6,9 @@
 /* The small amount of drawing every window client turns out to need.
  *
  * Not a toolkit: a client owns a rectangle of pixels and draws it itself, and
- * these are just the four operations it takes to do that in the desktop's
- * idiom. They live here because paint, uitest, the browser and the editor were
- * otherwise going to carry four copies of the same bevel routine. */
+ * these are just the operations it takes to do that in the desktop's idiom.
+ * They live here because paint, uitest, the browser and the editor were
+ * otherwise going to carry four copies of each of them. */
 
 /* Near-white rather than the old plate grey. The whole interface is a light
  * surface with soft shadows now, and a mid grey face is the one thing that
@@ -62,7 +62,6 @@ uint32_t wg_sel_colour(void);   /* the selection highlight   */
 #define WG_SLIDER_H 18
 void wg_slider_draw(int x, int y, int w, int value, int max);
 int  wg_slider_hit(int x, int y, int w, int mx, int my);      /* 1 or 0 */
-int  wg_slider_value(int x, int w, int mx, int max);
 void     wg_rgb_draw(int x, int y, int w, uint32_t colour);
 int      wg_rgb_hit(int x, int y, int w, int mx, int my);   /* channel or -1 */
 uint32_t wg_rgb_move(uint32_t colour, int channel, int x, int w, int mx);
@@ -85,9 +84,9 @@ void wg_icon(int x, int y, const uint32_t* px, int w, int h);
 void wg_icon_scaled(int x, int y, const uint32_t* px, int sw, int sh,
                     int dw, int dh);
 
-/* Raised, or sunken when `raised` is 0: light on the top and left edges, shadow
- * on the bottom and right, which is the whole visual language of this era. */
-void wg_bevel(int x, int y, int w, int h, int raised);
+/* A hairline round something: `bright` picks the lighter of the two edges.
+ * Called wg_bevel until it stopped drawing one - see widget.c. */
+void wg_outline(int x, int y, int w, int h, int bright);
 
 void wg_text(int x, int y, const char* s, uint32_t colour);
 
@@ -128,7 +127,6 @@ int wg_styled_width(const char* s, int len, int size_px, unsigned style);
 
 /* The line height and ascent at a size, for laying text out. */
 int wg_styled_height(int size_px);
-int wg_styled_ascent(int size_px);
 
 /* A push button, drawn pressed when `down`. */
 void wg_button(int x, int y, int w, int h, const char* label, int down);
@@ -157,7 +155,6 @@ void wg_glass_clear(void);
 /* A box that holds other things. `pad` is its distance from the window edge
  * and the corner radius follows from it: pressed against the edge wants a
  * tight curve, floating in space can afford a generous one. */
-int  wg_container_radius(int pad);
 /* A rounded shape filled with a chosen alpha, left see-through for the server
  * to blend against the blur. What every glassy surface here is made of; public
  * because the component layer builds its own surfaces out of the same stuff. */
@@ -187,18 +184,9 @@ void wg_pill(int x, int y, int w, int h, const char* label, int down);
 /* A checkbox, a radio button and a text field, in the same vocabulary. The
  * sunken white squares with bevels round them were the last controls that gave
  * the interface's age away whatever was redrawn around them. */
-/* A page of settings is small groups of rows, each group with a heading and
- * each row a label with its control on the right. Defined here so that every
- * page does not invent its own spacing. */
-#define WG_ROW_H 30
-void wg_group_begin(int x, int y, int w, int rows, const char* title);
-int  wg_row(int x, int y, int w, int index, const char* label);
-
 void wg_check(int x, int y, int size, int on);
 void wg_radio(int x, int y, int size, int on);
 void wg_field(int x, int y, int w, int h, const char* text, int focused);
-
-#endif /* _WIDGET_H */
 
 /* --- scrollbars -----------------------------------------------------------
  *
@@ -209,22 +197,19 @@ void wg_field(int x, int y, int w, int h, const char* text, int focused);
 #define WG_SCROLL_W 14
 
 void wg_scrollbar_v(int x, int y, int h, int first, int page, int span);
-void wg_scrollbar_h(int x, int y, int w, int first, int page, int span);
 
 /* Where a click on a bar wants to go: returns the new `first`, or the old one
- * when the click was not on the bar. Clicking the trough pages; clicking an
- * arrow steps. */
+ * when the click was not on the bar. Clicking the trough jumps the thumb to
+ * where it was clicked; there are no arrows to step with any more. */
 int wg_scroll_hit_v(int x, int y, int bx, int by, int bh,
-                    int first, int page, int span);
-int wg_scroll_hit_h(int x, int y, int bx, int by, int bw,
                     int first, int page, int span);
 
 /* Whether a point is on a bar's thumb, so a caller can begin a drag. */
 int wg_scroll_on_thumb_v(int y, int by, int bh, int first, int page, int span);
-int wg_scroll_on_thumb_h(int x, int bx, int bw, int first, int page, int span);
 
 /* Where a drag to this coordinate puts `first`. The thumb follows the pointer
  * rather than the pointer following the thumb, which is what makes a long list
  * usable. */
 int wg_scroll_drag_v(int y, int by, int bh, int page, int span);
-int wg_scroll_drag_h(int x, int bx, int bw, int page, int span);
+
+#endif /* _WIDGET_H */

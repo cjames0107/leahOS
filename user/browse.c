@@ -801,7 +801,7 @@ static void draw_tree(void)
         if (r->is_dir) {
             /* A twisty: a box with a minus when open, a plus when shut. */
             wg_fill(x, y + 4, 9, 9, WG_PAPER);
-            wg_bevel(x, y + 4, 9, 9, 0);
+            wg_outline(x, y + 4, 9, 9, 0);
             wg_fill(x + 2, y + 8, 5, 1, WG_INK);
             if (!r->expanded)
                 wg_fill(x + 4, y + 6, 1, 5, WG_INK);

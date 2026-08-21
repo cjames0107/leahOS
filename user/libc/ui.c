@@ -1911,7 +1911,7 @@ void ui_draw(struct ui_view* v)
             if (branch != 0) {
                 /* A twisty: a minus when open, a plus when shut. */
                 wg_fill(tx, y + 4, 9, 9, WG_PAPER);
-                wg_bevel(tx, y + 4, 9, 9, 0);
+                wg_outline(tx, y + 4, 9, 9, 0);
                 wg_fill(tx + 2, y + 8, 5, 1, WG_INK);
                 if (branch == 1)
                     wg_fill(tx + 4, y + 6, 1, 5, WG_INK);
