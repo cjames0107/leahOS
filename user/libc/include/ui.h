@@ -2,6 +2,7 @@
 #define _UI_H
 
 #include <widget.h>
+#include <textedit.h>
 #include <window.h>
 
 /* Components, laid out and routed - rather than pixels and hit-tests.
@@ -145,6 +146,12 @@ struct ui_view {
 
     char text[UI_TEXT_MAX];
     int  caret;                 /* fields: where the next character goes */
+    /* The other end of the selection. Equal to the caret when nothing is
+     * selected, which is what a caret is. */
+    int  sel_anchor;
+    /* What has been done to this view's text, so it can be undone. Owned by
+     * the text engine; see textedit.h. */
+    struct te_history* history;
     int  on;                    /* check, radio, segmented-selected index */
     int  value, max;            /* slider, progress */
 

@@ -10,9 +10,16 @@ namespace keyboard {
 constexpr u32 kModShift = 1u << 0;
 constexpr u32 kModCtrl  = 1u << 1;
 
-// Which modifiers are held right now. A click needs this; a keystroke does not,
-// because its modifiers are already folded into the character.
+// Which modifiers are held right now. What a click needs.
 u32 modifiers();
+
+// Which were held when the key that read() last returned was pressed.
+//
+// Not the same question, and the difference is the whole reason this exists:
+// most modifiers are folded into the character - shift+a is 'A' - but the ones
+// that are not, shift with an arrow above all, cannot be recovered by asking
+// what is held afterwards. By then it is not.
+u32 last_modifiers();
 
 // What a USB keyboard says it is holding, since it never goes through the PS/2
 // decoder that maintains the state above. Whatever is held on either keyboard

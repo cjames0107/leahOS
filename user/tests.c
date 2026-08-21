@@ -13,7 +13,9 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <shm.h>
+#include <clipboard.h>
 #include <rtf.h>
+#include <textedit.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -2025,6 +2027,110 @@ static int is_directory(const char* path)
     return stat(path, &info) == 0 && info.st_type == S_IFDIR;
 }
 
+/* The text engine: a caret, a selection, the clipboard and undo.
+ *
+ * Checked here rather than by typing into a window, because what makes undo
+ * hard is not the first step but the twentieth, and the state after twenty
+ * steps is not something a screenshot can show.
+ */
+static void test_textedit(void)
+{
+    section("editing text");
+
+    char buf[128] = "";
+    struct textedit t;
+    memset(&t, 0, sizeof(t));
+    t.text = buf;
+    t.cap = (int)sizeof(buf);
+
+    for (const char* p = "hello world"; *p != '\0'; ++p)
+        te_key(&t, (unsigned)*p, 0);
+    check("typing puts the characters in", strcmp(buf, "hello world") == 0);
+    check("the caret is after them", t.caret == 11);
+
+    /* A run of typing is one edit, not eleven. */
+    te_key(&t, 26, WIN_MOD_CTRL);                       /* ctrl+Z */
+    check("a run of typing undoes as one", buf[0] == '\0');
+    te_key(&t, 25, WIN_MOD_CTRL);                       /* ctrl+Y */
+    check("and redoes", strcmp(buf, "hello world") == 0);
+
+    /* Word movement and selection. */
+    te_key(&t, WIN_KEY_LEFT, WIN_MOD_CTRL);
+    check("ctrl+left goes to the start of the word", t.caret == 6);
+    te_key(&t, WIN_KEY_RIGHT, WIN_MOD_CTRL | WIN_MOD_SHIFT);
+    int from = 0, to = 0;
+    check("shift extends a selection", te_selection(&t, &from, &to) &&
+          from == 6 && to == 11);
+
+    /* Typing over a selection replaces it. */
+    te_key(&t, 't', 0);
+    check("typing replaces the selection", strcmp(buf, "hello t") == 0);
+    te_key(&t, 26, WIN_MOD_CTRL);
+    check("and that undoes to what was selected",
+          strcmp(buf, "hello world") == 0);
+
+    /* The clipboard. */
+    te_select_all(&t);
+    te_key(&t, 3, WIN_MOD_CTRL);                        /* ctrl+C */
+    t.caret = t.anchor = 11;
+    te_key(&t, 22, WIN_MOD_CTRL);                       /* ctrl+V */
+    check("copy and paste", strcmp(buf, "hello worldhello world") == 0);
+
+    te_select_all(&t);
+    te_key(&t, 24, WIN_MOD_CTRL);                       /* ctrl+X */
+    check("cut empties it", buf[0] == '\0');
+    te_key(&t, 26, WIN_MOD_CTRL);
+    check("and cut undoes", strcmp(buf, "hello worldhello world") == 0);
+
+    /* Backspace by word, and undo past several different kinds of edit. */
+    t.caret = t.anchor = (int)strlen(buf);
+    te_key(&t, '\b', WIN_MOD_CTRL);
+    check("ctrl+backspace takes a word", strcmp(buf, "hello worldhello ") == 0);
+
+    int steps = 0;
+    while (te_key(&t, 26, WIN_MOD_CTRL) && steps < 50)
+        ++steps;
+    check("undo walks all the way back to nothing", buf[0] == '\0');
+
+    /* A password field does not let its contents out. */
+    char secret[64] = "hunter2";
+    struct textedit p;
+    memset(&p, 0, sizeof(p));
+    p.text = secret;
+    p.cap = (int)sizeof(secret);
+    p.flags = TE_SECURE;
+    te_select_all(&p);
+    te_key(&p, 3, WIN_MOD_CTRL);
+    char got[CLIP_MAX];
+    clip_get(got, sizeof(got));
+    check("a secure field refuses to copy itself out",
+          strcmp(got, "hunter2") != 0);
+
+    /* A newline cannot get into a single-line field, by any route. */
+    char one[32] = "";
+    struct textedit o;
+    memset(&o, 0, sizeof(o));
+    o.text = one;
+    o.cap = (int)sizeof(one);
+    te_key(&o, '\n', 0);
+    check("return does not type into a single-line field", one[0] == '\0');
+
+    /* And the buffer's end is respected. */
+    char tiny[6] = "";
+    struct textedit s;
+    memset(&s, 0, sizeof(s));
+    s.text = tiny;
+    s.cap = (int)sizeof(tiny);
+    for (int i = 0; i < 20; ++i)
+        te_key(&s, 'x', 0);
+    check("a full buffer stops taking characters", strlen(tiny) == 5);
+
+    te_forget(&t);
+    te_forget(&p);
+    te_forget(&o);
+    te_forget(&s);
+}
+
 /* Rich text, which is a file format before it is an editor: what a document
  * keeps has to survive being written and read back, or the emphasis is a thing
  * that exists only while the window is open. */
@@ -3530,6 +3636,7 @@ int main(void)
     test_environment();
     test_shell();
     test_rtf();
+    test_textedit();
     printf("\n%d failure(s)\n", g_failures);
 
     /* And to the serial console, which is readable from outside the machine.

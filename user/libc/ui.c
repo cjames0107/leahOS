@@ -39,6 +39,8 @@ static int ui_is_separator(const char* label)
 }
 
 static struct ui_view* g_dropped;
+/* The field a selection is being dragged across, if any. */
+static struct ui_view* g_dragging_text;
 /* Which channel of the colour mixer is being dragged, or -1. */
 static int g_channel = -1;
 static void colour_panel(const struct ui_view* v, int* x, int* y, int* w,
@@ -49,10 +51,25 @@ static struct ui_view* g_popover;
 
 void ui_reset(void)
 {
+    /* Every undo history goes with the views that owned them. They are the one
+     * thing in a view that is allocated rather than being part of the struct,
+     * so they are the one thing a pool reset would otherwise leak - and an
+     * application that rebuilds its tree does so every time somebody changes
+     * page. */
+    for (int i = 0; i < g_used; ++i) {
+        if (g_pool[i].history != 0) {
+            struct textedit t;
+            memset(&t, 0, sizeof(t));
+            t.history = g_pool[i].history;
+            te_forget(&t);
+            g_pool[i].history = 0;
+        }
+    }
     g_used = 0;
     g_focus = 0;
     g_pressed = 0;
     g_dropped = 0;
+    g_dragging_text = 0;
     g_channel = -1;
 }
 
@@ -121,9 +138,16 @@ static struct ui_view* alloc_view(struct ui_view* parent, int kind)
 
 static void set_text(struct ui_view* v, const char* text)
 {
-    if (text == 0) { v->text[0] = '\0'; v->caret = 0; return; }
+    if (text == 0) {
+        v->text[0] = '\0';
+        v->caret = v->sel_anchor = 0;
+        return;
+    }
     snprintf(v->text, sizeof(v->text), "%s", text);
     v->caret = (int)strlen(v->text);
+    /* The selection goes with the text it was a selection of. Left behind, it
+     * would highlight a range of whatever replaced it. */
+    v->sel_anchor = v->caret;
 }
 
 /* --- building ------------------------------------------------------------- */
@@ -887,35 +911,89 @@ static void list_show(struct ui_view* v, int row)
 }
 
 /* A key into a field. Returns 1 when the text changed or the caret moved. */
-static int field_key(struct ui_view* v, unsigned key)
+/* A view, as the text engine sees it.
+ *
+ * The state stays on the view - the caret was already there, and a selection
+ * and a history are two more fields - so nothing has to be kept in step
+ * between the two. This just says which buffer, how big, and what kind of
+ * field it is. */
+static struct textedit editor_for(struct ui_view* v)
 {
-    const int n = (int)strlen(v->text);
-    if (v->caret > n) v->caret = n;
-    if (key == '\b') {
-        if (v->caret <= 0)
-            return 0;
-        memmove(&v->text[v->caret - 1], &v->text[v->caret],
-                (unsigned)(n - v->caret) + 1);
-        --v->caret;
-        return 1;
+    struct textedit t;
+    memset(&t, 0, sizeof(t));
+    if (v->kind == UI_TEXT) {
+        t.text = v->buffer;
+        t.cap = v->cap;
+        t.flags = TE_MULTILINE;
+    } else {
+        t.text = v->text;
+        t.cap = UI_TEXT_MAX;
+        t.flags = (v->kind == UI_SECURE) ? TE_SECURE : 0;
     }
-    if (key == WIN_KEY_LEFT)  { if (v->caret > 0) { --v->caret; return 1; } return 0; }
-    if (key == WIN_KEY_RIGHT) { if (v->caret < n) { ++v->caret; return 1; } return 0; }
-    if (key == '\n' || key == '\r') {
-        if (v->action != 0)
-            v->action(v, v->user);
-        return 1;
-    }
-    if (key >= ' ' && key < 127 && n + 1 < UI_TEXT_MAX) {
-        /* Inserted at the caret rather than appended: a field that can only be
-         * typed at the end is a field you have to retype to correct. */
-        memmove(&v->text[v->caret + 1], &v->text[v->caret],
-                (unsigned)(n - v->caret) + 1);
-        v->text[v->caret++] = (char)key;
-        return 1;
-    }
-    return 0;
+    t.caret = v->caret;
+    t.anchor = v->sel_anchor;
+    t.history = v->history;
+    return t;
 }
+
+static void editor_back(struct ui_view* v, const struct textedit* t)
+{
+    v->caret = t->caret;
+    v->sel_anchor = t->anchor;
+    v->history = t->history;
+}
+
+/* What is selected, behind the text, and the text again on top of it.
+ *
+ * Drawn afterwards rather than before, because the field has already put its
+ * glyphs down by the time this is reached - so the highlight goes over them
+ * and they are drawn again in the colour that reads on it. Shared by every
+ * kind of field, which is the point: a search box and a password field select
+ * the way a text field does because there is one implementation. */
+static void draw_selection(const struct ui_view* v, int text_x, int mask)
+{
+    int from, to;
+    const struct textedit sel = editor_for((struct ui_view*)v);
+    if (!te_selection(&sel, &from, &to))
+        return;
+    const struct ui_rect f = v->frame;
+    char shown[UI_TEXT_MAX];
+    if (mask) {
+        /* A password shows dots, so the selection is over dots. */
+        const int n = (int)strlen(v->text);
+        for (int i = 0; i < n && i < UI_TEXT_MAX - 1; ++i)
+            shown[i] = '*';
+        shown[n < UI_TEXT_MAX - 1 ? n : UI_TEXT_MAX - 1] = '\0';
+    } else {
+        snprintf(shown, sizeof(shown), "%s", v->text);
+    }
+    const int x0 = text_x + caret_x(shown, from);
+    const int x1 = text_x + caret_x(shown, to);
+    if (x1 <= x0)
+        return;
+    wg_fill(x0, f.y + 4, x1 - x0, f.h - 8, WG_ACCENT);
+    /* Only the selected run is redrawn, so the rest keeps the ink it had. */
+    char part[UI_TEXT_MAX];
+    const int n = to - from < UI_TEXT_MAX - 1 ? to - from : UI_TEXT_MAX - 1;
+    memcpy(part, &shown[from], (unsigned long)n);
+    part[n] = '\0';
+    wg_text_clipped(x0, f.y + (f.h - wg_text_height()) / 2, part, WG_PAPER,
+                    f.x + f.w - x0 - 6);
+}
+
+/* Everything a field's keyboard does, which is now everything a text field
+ * anywhere does: selection, word movement, the clipboard and undo. It was
+ * insert, backspace and the two arrows. */
+static int field_key(struct ui_view* v, unsigned key, unsigned mods)
+{
+    struct textedit t = editor_for(v);
+    if (t.text == 0)
+        return 0;
+    const int changed = te_key(&t, key, mods);
+    editor_back(v, &t);
+    return changed;
+}
+
 
 int ui_event(struct ui_view* root, const struct win_event* e)
 {
@@ -1200,6 +1278,11 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             while (at < n && caret_x(v->text, at + 1) <= want)
                 ++at;
             v->caret = at;
+            /* Shift-clicking extends what is already selected; a plain press
+             * drops the selection and starts a new one where it landed. */
+            if ((e->modifiers & WIN_MOD_SHIFT) == 0)
+                v->sel_anchor = at;
+            g_dragging_text = v;
         }
         /* A view with nothing to do did not take the press. The distinction
          * matters to the application's own handler: a custom view is where it
@@ -1229,6 +1312,20 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             v->action(v, v->user);
         g_pressed = 0;
         g_channel = -1;
+        g_dragging_text = 0;
+        return 1;
+    }
+
+    if (e->type == WIN_EVENT_MOUSE_MOVE && g_dragging_text != 0) {
+        struct ui_view* v = g_dragging_text;
+        const int want = e->x - v->frame.x - 8;
+        const int n = (int)strlen(v->text);
+        int at = 0;
+        while (at < n && caret_x(v->text, at + 1) <= want)
+            ++at;
+        if (at == v->caret)
+            return 0;
+        v->caret = at;
         return 1;
     }
 
@@ -1280,7 +1377,7 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         struct ui_view* v = g_focus;
         if (v->kind == UI_FIELD || v->kind == UI_SECURE ||
             v->kind == UI_SEARCH) {
-            const int changed = field_key(v, e->key);
+            const int changed = field_key(v, e->key, e->modifiers);
             /* A search reports every keystroke: filtering as you type is the
              * whole difference between it and a field you press Return in. */
             if (changed && v->kind == UI_SEARCH && v->action != 0 &&
@@ -1289,52 +1386,11 @@ int ui_event(struct ui_view* root, const struct win_event* e)
             return changed;
         }
         if (v->kind == UI_TEXT && v->buffer != 0) {
-            const int n = (int)strlen(v->buffer);
-            if (v->caret > n) v->caret = n;
-            if (e->key == '\b') {
-                if (v->caret <= 0) return 0;
-                memmove(&v->buffer[v->caret - 1], &v->buffer[v->caret],
-                        (unsigned)(n - v->caret) + 1);
-                --v->caret;
-            } else if (e->key == WIN_KEY_LEFT) {
-                if (v->caret > 0) --v->caret; else return 0;
-            } else if (e->key == WIN_KEY_RIGHT) {
-                if (v->caret < n) ++v->caret; else return 0;
-            } else if (e->key == WIN_KEY_UP || e->key == WIN_KEY_DOWN) {
-                /* By line, keeping the column where it can. Walking the buffer
-                 * rather than keeping a line table: a table is a second
-                 * structure to invalidate on every keystroke. */
-                int line_start = v->caret;
-                while (line_start > 0 && v->buffer[line_start - 1] != '\n')
-                    --line_start;
-                const int col = v->caret - line_start;
-                if (e->key == WIN_KEY_UP) {
-                    if (line_start == 0) return 0;
-                    int prev = line_start - 1;
-                    while (prev > 0 && v->buffer[prev - 1] != '\n') --prev;
-                    int at = prev;
-                    while (at < line_start - 1 && at - prev < col) ++at;
-                    v->caret = at;
-                } else {
-                    int next = v->caret;
-                    while (v->buffer[next] != '\0' && v->buffer[next] != '\n')
-                        ++next;
-                    if (v->buffer[next] == '\0') return 0;
-                    ++next;
-                    int at = next;
-                    while (v->buffer[at] != '\0' && v->buffer[at] != '\n' &&
-                           at - next < col) ++at;
-                    v->caret = at;
-                }
-            } else if ((e->key >= ' ' && e->key < 127) || e->key == '\n' ||
-                       e->key == '\r') {
-                if (n + 1 >= v->cap) return 0;
-                const char c = (e->key == '\r') ? '\n' : (char)e->key;
-                memmove(&v->buffer[v->caret + 1], &v->buffer[v->caret],
-                        (unsigned)(n - v->caret) + 1);
-                v->buffer[v->caret++] = c;
-            } else return 0;
-            return 1;
+            /* The same engine the fields use. This was ninety lines of its own
+             * arithmetic - backspace, two arrows, and a walk to keep the column
+             * when moving between lines - which is why a document could not be
+             * selected, copied or undone while a field could not either. */
+            return field_key(v, e->key, e->modifiers);
         }
         if (v->kind == UI_LIST || v->kind == UI_SIDEBAR ||
             v->kind == UI_TABLE || v->kind == UI_TREE ||
@@ -1537,6 +1593,8 @@ void ui_draw(struct ui_view* v)
         break;
     case UI_FIELD: {
         wg_field(f.x, f.y, f.w, f.h, v->text, focused);
+        if (focused)
+            draw_selection(v, f.x + 8, 0);
         if (focused) {
             /* The caret, where the next character will go. Drawn rather than
              * blinked: a blink needs a timer, and a timer to show where you
@@ -1616,6 +1674,8 @@ void ui_draw(struct ui_view* v)
             dots[i] = '*';
         dots[n] = '\0';
         wg_field(f.x, f.y, f.w, f.h, dots, focused);
+        if (focused)
+            draw_selection(v, f.x + 8, 1);
         if (focused) {
             const int cx = f.x + 8 + caret_x(dots, v->caret);
             if (cx < f.x + f.w - 4)
@@ -1626,28 +1686,40 @@ void ui_draw(struct ui_view* v)
 
     case UI_SEARCH: {
         const int empty = v->text[0] == '\0';
-        wg_field(f.x, f.y, f.w, f.h, empty ? v->col_title[0] : v->text,
-                 focused);
-        /* A magnifier: a ring and a handle, small enough to read as a hint
-         * rather than as a control. */
+        /* The well first and the text afterwards, at its own inset.
+         *
+         * wg_field draws its text eight pixels in, which is where the
+         * magnifier is - so a search field with anything in it drew the words
+         * on top of the glyph. The caret was already being placed at
+         * twenty-two, which is where the text should have been all along and
+         * is where it is now. */
+        wg_field(f.x, f.y, f.w, f.h, 0, focused);
         const int gx = f.x + 8, gy = f.y + f.h / 2;
         wg_fill(gx + 1, gy - 4, 5, 1, WG_DIM);
         wg_fill(gx + 1, gy + 2, 5, 1, WG_DIM);
         wg_fill(gx, gy - 3, 1, 5, WG_DIM);
         wg_fill(gx + 6, gy - 3, 1, 5, WG_DIM);
         wg_fill(gx + 7, gy + 3, 3, 1, WG_DIM);
+
+        const int text_x = f.x + 22;
+        const int right = empty ? f.x + f.w - 8 : f.x + f.w - 22;
+        wg_text_clipped(text_x, f.y + (f.h - wg_text_height()) / 2,
+                        empty ? v->col_title[0] : v->text,
+                        empty ? WG_DIM : wg_ink_colour(), right - text_x);
         if (!empty) {
-            /* And a cross to empty it, only when there is something to empty:
-             * a control that does nothing is one to wonder about. */
+            /* A cross to empty it, only when there is something to empty: a
+             * control that does nothing is one to wonder about. */
             const int cx2 = f.x + f.w - 16, cy2 = f.y + f.h / 2;
             for (int i = -3; i <= 3; ++i) {
                 wg_fill(cx2 + i, cy2 + i, 1, 1, WG_DIM);
                 wg_fill(cx2 + i, cy2 - i, 1, 1, WG_DIM);
             }
         }
-        if (focused && !empty) {
-            const int cx3 = f.x + 22 + caret_x(v->text, v->caret);
-            if (cx3 < f.x + f.w - 20)
+        if (focused)
+            draw_selection(v, text_x, 0);
+        if (focused) {
+            const int cx3 = text_x + caret_x(v->text, v->caret);
+            if (cx3 < right)
                 wg_fill(cx3, f.y + 5, 1, f.h - 10, wg_ink_colour());
         }
         break;

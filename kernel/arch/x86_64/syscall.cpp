@@ -1031,9 +1031,17 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         out[2] = (state.left ? 1 : 0) | (state.right ? 2 : 0) |
                  (state.middle ? 4 : 0);
         out[3] = static_cast<i32>(static_cast<u8>(keyboard::read()));
-        /* What is held *now*, which is what a click needs: a keystroke already
-         * carries its modifiers in the character it produced. */
-        out[4] = static_cast<i32>(keyboard::modifiers());
+        /* The modifiers that belong with that key when there was one, and what
+         * is held now when there was not.
+         *
+         * A click needs what is held now. A keystroke needs what was held when
+         * it was pressed, which is not the same thing by the time anyone asks:
+         * shift and an arrow arrive together and are read a moment later, and
+         * by then the shift is over. Most modifiers are folded into the
+         * character - shift+a is 'A' - but the arrows have no shifted form, so
+         * without this no field could be selected with the keyboard. */
+        out[4] = static_cast<i32>(out[3] != 0 ? keyboard::last_modifiers()
+                                              : keyboard::modifiers());
         frame->rax = 0;
         break;
     }

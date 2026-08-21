@@ -140,8 +140,38 @@ static int blitbench(int rounds)
     return 0;
 }
 
+/* What the keyboard actually delivers: every key and the modifiers that came
+ * with it, on the serial line where a check can read them. */
+static int keys(int ms)
+{
+    const int id = win_create(60, 60, 320, 120, "keys");
+    if (id < 0)
+        return 1;
+    uint32_t* px = win_map(id);
+    if (px != 0) {
+        for (int i = 0; i < 320 * 120; ++i)
+            px[i] = 0xFF202830u;
+        win_present(id);
+    }
+    FILE* out = fopen("/dev/console", "w");
+    const unsigned long start = uptime_ms();
+    while (uptime_ms() - start < (unsigned long)ms) {
+        struct win_event e;
+        while (win_poll(id, &e)) {
+            if (e.type == WIN_EVENT_KEY && out != 0)
+                fprintf(out, "key %u mods %u\n", e.key, e.modifiers);
+        }
+        msleep(10);
+    }
+    if (out != 0) { fprintf(out, "keys done\n"); fclose(out); }
+    win_destroy(id);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
+    if (argc > 1 && strcmp(argv[1], "keys") == 0)
+        return keys(argc > 2 ? atoi_simple(argv[2]) : 6000);
     if (argc > 1 && strcmp(argv[1], "blit") == 0)
         return blitbench(argc > 2 ? atoi_simple(argv[2]) : 20);
     if (argc > 1 && strcmp(argv[1], "bench") == 0)

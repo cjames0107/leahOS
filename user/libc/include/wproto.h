@@ -206,8 +206,14 @@ struct win_event {
                            context menu; the server does not raise or focus the
                            window for one */
     uint32_t key;       /* the character, for key events */
-    /* What was held when this happened. Only meaningful for a press: a key
-     * event's modifiers are already folded into `key`. WIN_MOD_* below. */
+    /* What was held when this happened - for a press and for a keystroke
+     * alike. WIN_MOD_* below.
+     *
+     * It used to say a key event did not need them, on the grounds that shift
+     * is already folded into the character. That is true of the letters and
+     * false of everything else: an arrow has no shifted form, so shift+left
+     * and left were the same event, and no text anywhere could be selected
+     * with the keyboard. */
     uint32_t modifiers;
 };
 
