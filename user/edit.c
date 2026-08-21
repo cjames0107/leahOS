@@ -11,7 +11,6 @@
 
 #include <clipboard.h>
 #include <app.h>
-#include <dialog.h>
 #include <ui.h>
 #include <fcntl.h>
 #include <stdio.h>

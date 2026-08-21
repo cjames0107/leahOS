@@ -161,6 +161,19 @@ const char* app_sheet_path(const struct app* a);
  * choosing them, a file answered with. app_sheet_path holds it. */
 struct ui_view* app_sheet_file(struct app* a, const char* dir);
 
+/* A sheet for choosing which application opens a document.
+ *
+ * The installed applications are walked rather than listed here: "which
+ * programs can open a file" is not something the filesystem records, and a
+ * panel that named three of them would be wrong the moment an eleventh was
+ * installed and would be the last place anyone thought to look.
+ *
+ * app_sheet_path holds the chosen program's command. app_sheet_always says
+ * whether the person asked for the choice to stick, which the caller
+ * remembers - the framework has no business knowing what a document is. */
+struct ui_view* app_sheet_open_with(struct app* a, const char* document);
+int app_sheet_always(const struct app* a);
+
 /* A sheet for choosing a date. app_sheet_path holds it as YYYY-MM-DD, which is
  * the same way every other sheet returns its answer. */
 struct ui_view* app_sheet_date(struct app* a, int year, int month, int day);

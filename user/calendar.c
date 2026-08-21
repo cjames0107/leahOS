@@ -12,7 +12,6 @@
  */
 
 #include <app.h>
-#include <dialog.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

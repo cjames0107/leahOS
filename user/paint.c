@@ -12,7 +12,6 @@
 
 #include <app.h>
 #include <ui.h>
-#include <dialog.h>
 #include <image.h>
 #include <stdio.h>
 #include <stdlib.h>

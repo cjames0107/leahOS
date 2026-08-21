@@ -16,7 +16,8 @@
 #include <icon.h>
 #include <clipboard.h>
 #include <display.h>
-#include <dialog.h>
+#include <menu.h>
+#include <ui.h>
 #include <fcntl.h>
 #include <image.h>
 #include <shm.h>
@@ -426,14 +427,143 @@ static const char* const kMenu[] = {
 static int  g_renaming;
 static char g_rename_from[256];
 
+/* --- renaming, in a window of its own ---------------------------------------
+ *
+ * The desktop is not on the application framework - it draws its own icons and
+ * runs its own loop - so app_sheet is not available to it. What it wants from
+ * one is small: a field and two buttons.
+ *
+ * It is still a real window rather than a panel drawn over the icons. That was
+ * the old arrangement and it carried the old bug: the desktop's pixels *are*
+ * the icons, so a panel painted over them destroys what it covers and there is
+ * no copy to put back. See WS_FLAG_SHEET in wproto.h.
+ */
+static int             g_sheet = -1;
+static uint32_t*       g_sheet_px;
+static unsigned        g_sheet_w = 320, g_sheet_h = 128;
+static struct ui_view* g_sheet_root;
+static struct ui_view* g_sheet_field;
+static int             g_sheet_answer;      /* 1 accept, -1 cancel, 0 pending */
+
+static void sheet_accept(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    g_sheet_answer = 1;
+}
+
+static void sheet_cancel(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    g_sheet_answer = -1;
+}
+
+static void sheet_paint(void)
+{
+    if (g_sheet < 0 || g_sheet_px == 0)
+        return;
+    /* The toolkit draws wherever it was last pointed, so the sheet is painted
+     * and then the pointer is put back: everything else in this file assumes
+     * the desktop's own buffer. */
+    wg_target(g_sheet_px, g_sheet_w, g_sheet_h);
+    wg_theme();
+    wg_glass_clear();
+    const struct ui_rect all = { 0, 0, (int)g_sheet_w, (int)g_sheet_h };
+    ui_layout(g_sheet_root, all);
+    ui_draw(g_sheet_root);
+    win_present(g_sheet);
+    wg_target(g_px, g_w, g_h);
+}
+
+static void sheet_close(void)
+{
+    if (g_sheet >= 0)
+        win_destroy(g_sheet);
+    g_sheet = -1;
+    g_sheet_px = 0;
+    g_sheet_root = 0;
+    g_sheet_field = 0;
+    g_renaming = 0;
+    ui_reset();
+}
+
 static void begin_rename(void)
 {
-    if (g_sel < 0 || g_sel >= g_n)
+    if (g_sel < 0 || g_sel >= g_n || g_sheet >= 0)
         return;
     snprintf(g_rename_from, sizeof(g_rename_from), "%s/%s", g_dir,
              g_items[g_sel].d_name);
+
+    /* Centred over the screen, since the desktop is the screen. */
+    const int x = ((int)g_w - (int)g_sheet_w) / 2;
+    const int y = ((int)g_h - (int)g_sheet_h) / 2;
+    g_sheet = win_create(x, y, g_sheet_w, g_sheet_h, "Rename");
+    if (g_sheet < 0)
+        return;
+    win_set_sheet(g_sheet);
+    win_set_alpha(g_sheet);
+    g_sheet_px = win_map(g_sheet);
+    if (g_sheet_px == 0) {
+        sheet_close();
+        return;
+    }
+
+    ui_reset();
+    g_sheet_root = ui_box(0, UI_STACK_V, 14, 10);
+    ui_grow(ui_size(ui_label(g_sheet_root, "Rename this to"), 0, 20), 0);
+    g_sheet_field = ui_field(g_sheet_root, g_items[g_sel].d_name);
+    ui_grow(ui_size(g_sheet_field, 0, 26), 0);
+    ui_focus(g_sheet_field);
+    ui_spacer(g_sheet_root);
+    struct ui_view* row = ui_box(g_sheet_root, UI_STACK_H, 0, 10);
+    ui_grow(ui_size(row, 0, 26), 0);
+    ui_spacer(row);
+    ui_grow(ui_size(ui_button(row, "Cancel", sheet_cancel, 0), 84, 24), 0);
+    ui_grow(ui_size(ui_button(row, "Rename", sheet_accept, 0), 84, 24), 0);
+
+    g_sheet_answer = 0;
     g_renaming = 1;
-    dlg_save(g_dir, g_items[g_sel].d_name);
+    sheet_paint();
+}
+
+/* Whatever the sheet has to say. Returns 1 when it consumed something, so the
+ * caller knows not to look at the event again. */
+static int sheet_poll(void)
+{
+    if (g_sheet < 0)
+        return 0;
+    struct win_event e;
+    int touched = 0;
+    while (win_poll(g_sheet, &e)) {
+        touched = 1;
+        if (e.type == WIN_EVENT_CLOSE) {
+            sheet_close();
+            return 1;
+        }
+        if (e.type == WIN_EVENT_KEY && (e.key == '\n' || e.key == '\r'))
+            g_sheet_answer = 1;
+        else if (e.type == WIN_EVENT_KEY && e.key == 27)
+            g_sheet_answer = -1;
+        else
+            ui_event(g_sheet_root, &e);
+    }
+    if (g_sheet_answer != 0) {
+        if (g_sheet_answer == 1) {
+            const char* name = ui_text(g_sheet_field);
+            if (name != 0 && name[0] != '\0') {
+                char to[512];
+                snprintf(to, sizeof(to), "%s/%s", g_dir, name);
+                rename(g_rename_from, to);
+            }
+            sheet_close();
+            rescan();
+            return 1;
+        }
+        sheet_close();
+        return 1;
+    }
+    if (touched)
+        sheet_paint();
+    return touched;
 }
 
 int main(void)
@@ -482,26 +612,13 @@ int main(void)
         }
         was_dragging = dragging_now;
 
+        /* The rename sheet is a window of its own, so its events arrive on
+         * its own queue rather than having to be taken out of this one. */
+        sheet_poll();
+
         struct win_event e;
         while (win_poll(id, &e)) {
             if (e.type == WIN_EVENT_CLOSE) { win_destroy(id); return 0; }
-
-            /* While a dialogue is up it takes the input: a click meant for it
-             * must not also land on whatever icon is underneath. */
-            if (dlg_active()) {
-                const int answer = dlg_event(&e);
-                if (answer == DLG_ACCEPT && g_renaming) {
-                    g_renaming = 0;
-                    rename(g_rename_from, dlg_path());
-                    rescan();
-                } else if (answer == DLG_CANCEL) {
-                    g_renaming = 0;
-                }
-                draw();
-                dlg_draw((int)g_w, (int)g_h);
-                win_present(id);
-                continue;
-            }
 
             if (menu_active()) {
                 char full[256];
@@ -519,7 +636,6 @@ int main(void)
                 }
                 draw();
                 menu_draw();
-                dlg_draw((int)g_w, (int)g_h);
                 win_present(id);
                 continue;
             }
@@ -665,7 +781,6 @@ int main(void)
             }
             draw();
             menu_draw();
-            dlg_draw((int)g_w, (int)g_h);
             win_present(id);
         }
 
@@ -678,14 +793,13 @@ int main(void)
          * outside and is not: it is this timer. Holding the refresh is the
          * better fix than repainting the menu over it, because rescanning would
          * also move the selection the menu was opened about. */
-        if (++tick >= 66 && !menu_active() && !dlg_active() &&
+        if (++tick >= 66 && !menu_active() && g_sheet < 0 &&
             !win_dragging()) {
             tick = 0;
             reload_paper();
             rescan();
             draw();
             menu_draw();
-            dlg_draw((int)g_w, (int)g_h);
             win_present(id);
         }
         msleep(15);

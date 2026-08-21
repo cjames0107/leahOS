@@ -17,7 +17,9 @@
  */
 
 #include <app.h>
-#include <dialog.h>
+#include <bundle.h>
+#include <menu.h>
+#include <paths.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -320,6 +322,93 @@ struct ui_view* app_sheet_file(struct app* a, const char* dir)
     return root;
 }
 
+/* --- the open-with panel --------------------------------------------------- */
+
+#define OPENERS 16
+static char g_opener_name[OPENERS][64];
+static char g_opener_exec[OPENERS][192];
+static int  g_openers;
+static struct ui_view* g_always_toggle;
+
+static const char* opener_row(void* user, int row)
+{
+    (void)user;
+    return (row >= 0 && row < g_openers) ? g_opener_name[row] : "";
+}
+
+static void opener_chosen(struct ui_view* v, void* user)
+{
+    struct app* a = (struct app*)user;
+    if (v->selected < 0 || v->selected >= g_openers)
+        return;
+    snprintf(g_sheet_path, sizeof(g_sheet_path), "%s",
+             g_opener_exec[v->selected]);
+    app_sheet_close(a, 1);
+}
+
+int app_sheet_always(const struct app* a)
+{
+    (void)a;
+    return g_always_toggle != 0 && g_always_toggle->on;
+}
+
+struct ui_view* app_sheet_open_with(struct app* a, const char* document)
+{
+    struct dirent kids[64];
+    g_openers = 0;
+    g_sheet_path[0] = '\0';
+
+    const int n = getdents(PATH_APPS, kids, 64);
+    for (int i = 0; i < n && g_openers < OPENERS - 1; ++i) {
+        if (!bundle_is_app(kids[i].d_name))
+            continue;
+        char dir[256];
+        snprintf(dir, sizeof(dir), "%s/%s", PATH_APPS, kids[i].d_name);
+        struct bundle b;
+        if (bundle_load(dir, &b) != 0)
+            continue;
+        snprintf(g_opener_name[g_openers], sizeof(g_opener_name[0]), "%s", b.name);
+        bundle_exec(&b, g_opener_exec[g_openers], sizeof(g_opener_exec[0]));
+        ++g_openers;
+    }
+    /* A program can also just be run. Offered last so that it is a deliberate
+     * choice rather than the default. */
+    const int len = document != 0 ? (int)strlen(document) : 0;
+    if (len > 4 && document[len - 4] == '.' &&
+        (document[len - 3] == 'E' || document[len - 3] == 'e') &&
+        g_openers < OPENERS) {
+        snprintf(g_opener_name[g_openers], sizeof(g_opener_name[0]), "Run it");
+        snprintf(g_opener_exec[g_openers], sizeof(g_opener_exec[0]), "%s", document);
+        ++g_openers;
+    }
+
+    struct ui_view* root = app_sheet(a, 400, 330);
+    if (root == 0)
+        return 0;
+
+    char title[288];
+    const char* leaf = document != 0 ? document : "";
+    for (const char* p = leaf; *p != '\0'; ++p)
+        if (*p == '/' && p[1] != '\0')
+            leaf = p + 1;
+    snprintf(title, sizeof(title), "Open %s with", leaf);
+    ui_grow(ui_label(root, title), 0);
+
+    struct ui_view* list = ui_list(root, opener_row, g_openers, 0);
+    list->selected = 0;
+    ui_on(list, opener_chosen, a);
+
+    g_always_toggle = ui_toggle(root, "Always open this kind this way", 0);
+    ui_grow(ui_size(g_always_toggle, 0, 26), 0);
+
+    struct ui_view* row = ui_box(root, UI_STACK_H, 0, 10);
+    ui_size(row, 0, 26);
+    ui_grow(row, 0);
+    ui_spacer(row);
+    ui_grow(ui_button(row, "Cancel", sheet_cancel_clicked, a), 0);
+    return root;
+}
+
 /* --- the date panel ------------------------------------------------------- */
 
 static struct ui_view* g_date_cal;
@@ -423,6 +512,15 @@ int app_run(struct app* a, int argc, char** argv)
          * answered before the thing that asked it can be used again. */
         while (app_sheet_open(a) && win_poll(a->sheet_id, &e)) {
             if (e.type == WIN_EVENT_CLOSE) {
+                app_sheet_close(a, 0);
+                dirty = 1;
+                break;
+            }
+            /* Escape answers "no" to any of them. A sheet has a Cancel button
+             * and had nothing else: it is modal, so a person who does not want
+             * to answer it has to find that button with the pointer before the
+             * window responds to anything again. */
+            if (e.type == WIN_EVENT_KEY && e.key == 27) {
                 app_sheet_close(a, 0);
                 dirty = 1;
                 break;

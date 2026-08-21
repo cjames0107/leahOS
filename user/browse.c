@@ -20,7 +20,7 @@
 #include <app.h>
 #include <ui.h>
 #include <fcntl.h>
-#include <dialog.h>
+#include <menu.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,7 +85,12 @@ static int  g_anchor = -1;
 static int  g_blank_menu;   /* which menu is showing */
 static int  g_app_menu_on;
 static int  g_new_kind = -1; /* 0 file, 1 folder, once the name is chosen */
-static int  g_renaming;      /* the save dialogue is being used to rename */
+
+/* What the sheet that is open is being asked. One sheet at a time, so one
+ * question at a time - and the answer arrives in a callback that has no other
+ * way of knowing which of the three was asked. */
+enum { ASK_NOTHING, ASK_RENAME, ASK_NEW, ASK_OPEN_WITH };
+static int g_asking;
 static int  g_enter_armed;   /* the first Enter of a double press */
 static char g_rename_from[256];
 static int  g_band_x, g_band_y, g_band_x2, g_band_y2;
@@ -1035,7 +1040,8 @@ static void open_path(const char* path, int is_dir)
 
     /* Otherwise ask. The name is the only hint this system has about what a
      * file is, and a hint is not good enough to decide for someone. */
-    dlg_open_with(g_opening);
+    g_asking = ASK_OPEN_WITH;
+    app_sheet_open_with(&g_app, g_opening);
     snprintf(g_status, sizeof(g_status), "choose an application");
 }
 
@@ -1306,8 +1312,8 @@ static void begin_rename(void)
     }
     join(g_path, g_entries[g_selected].d_name, g_rename_from,
          sizeof(g_rename_from));
-    g_renaming = 1;
-    dlg_save(g_path, g_entries[g_selected].d_name);
+    g_asking = ASK_RENAME;
+    app_sheet_save(&g_app, g_path, g_entries[g_selected].d_name);
     snprintf(g_status, sizeof(g_status), "rename %s to...",
              g_entries[g_selected].d_name);
 }
@@ -1710,8 +1716,10 @@ static int on_menu_pick(struct app* a, int pick)
             /* Ask for the name rather than inventing one: an
              * "untitled" that has to be renamed immediately is not
              * a convenience. */
-            dlg_save(g_path, pick == 0 ? "untitled.txt" : "folder");
             g_new_kind = pick;
+            g_asking = ASK_NEW;
+            app_sheet_save(&g_app, g_path,
+                           pick == 0 ? "untitled.txt" : "folder");
         } else if (pick == 3) {
             static char buf[CLIP_MAX];
             if (clip_get(buf, sizeof(buf)) > 0)
@@ -1748,7 +1756,8 @@ static int on_menu_pick(struct app* a, int pick)
         int k = 0;
         while (full[k] && k < 255) { g_opening[k] = full[k]; ++k; }
         g_opening[k] = '\0';
-        dlg_open_with(g_opening);
+        g_asking = ASK_OPEN_WITH;
+    app_sheet_open_with(&g_app, g_opening);
     } else if (pick == 2) {
         begin_rename();
     } else if (pick == 3) {
@@ -1764,67 +1773,46 @@ static int on_menu_pick(struct app* a, int pick)
 
 /* A file dialogue is modal: it is drawn over the window and nothing behind it
  * may be pressed while it is up. */
-static int on_filter(struct app* a, const struct win_event* e)
+static void on_sheet_done(struct app* a, int result)
 {
-    (void)a;
-    if (!dlg_active())
-        return 0;
-    /* Once, and once only: the dialogue closes itself on accept, so asking it
-     * twice would leave the second caller looking at one that is not there. */
-    /* Once, and once only: the dialogue closes itself on accept,
-     * so asking it twice would leave the second caller looking at
-     * a dialogue that is no longer there. */
-    const int answer = dlg_event(e);
-    if (answer == DLG_ACCEPT && g_renaming) {
-        g_renaming = 0;
-        if (rename(g_rename_from, dlg_path()) < 0)
-            snprintf(g_status, sizeof(g_status),
-                     "could not rename to %s", dlg_path());
+    const int asking = g_asking;
+    g_asking = ASK_NOTHING;
+    if (!result)
+        return;
+    const char* chosen = app_sheet_path(a);
+
+    if (asking == ASK_RENAME) {
+        if (rename(g_rename_from, chosen) < 0)
+            snprintf(g_status, sizeof(g_status), "could not rename to %s",
+                     chosen);
         else
-            snprintf(g_status, sizeof(g_status), "renamed to %s",
-                     dlg_path());
+            snprintf(g_status, sizeof(g_status), "renamed to %s", chosen);
         read_dir();
-    } else if (answer == DLG_CANCEL && g_renaming) {
-        g_renaming = 0;
-    } else if (answer == DLG_ACCEPT && g_new_kind >= 0) {
-        const char* where = dlg_path();
+    } else if (asking == ASK_NEW) {
+        int made;
         if (g_new_kind == 1) {
-            if (mkdir(where) < 0)
-                snprintf(g_status, sizeof(g_status),
-                         "could not create %s", where);
-            else
-                snprintf(g_status, sizeof(g_status), "created %s", where);
+            made = mkdir(chosen) == 0;
         } else {
-            const int fd = open(where, O_WRONLY | O_CREAT | O_TRUNC);
-            if (fd < 0)
-                snprintf(g_status, sizeof(g_status),
-                         "could not create %s", where);
-            else {
+            const int fd = open(chosen, O_WRONLY | O_CREAT | O_TRUNC);
+            made = fd >= 0;
+            if (fd >= 0)
                 close(fd);
-                snprintf(g_status, sizeof(g_status), "created %s", where);
-            }
         }
+        snprintf(g_status, sizeof(g_status),
+                 made ? "created %s" : "could not create %s", chosen);
         g_new_kind = -1;
         read_dir();
+    } else if (asking == ASK_OPEN_WITH) {
+        /* "Run it" hands back the file itself: then it is the program, not an
+         * argument to one. */
+        const int itself = (strcmp(chosen, g_opening) == 0);
+        launch(chosen, itself ? 0 : g_opening);
+        /* Remembered by extension, so ticking the box on one .txt settles
+         * every .txt - see remember(). */
+        if (app_sheet_always(a) && !itself)
+            remember(g_opening, chosen);
+        snprintf(g_status, sizeof(g_status), "opened with %s", chosen);
     }
-    else if (answer == DLG_ACCEPT) {
-        const char* app = dlg_path();
-        /* "Run it" hands back the file itself: then it is the
-         * program, not an argument to one. */
-        const int itself = (strcmp(app, g_opening) == 0);
-        launch(app, itself ? 0 : g_opening);
-        /* Remembered by extension, so ticking the box on one .txt
-         * settles every .txt - see remember(). */
-        if (dlg_always() && !itself)
-            remember(g_opening, app);
-        snprintf(g_status, sizeof(g_status), "opened with %s", app);
-    }
-    return 1;
-}
-
-static void on_overlay(struct app* a)
-{
-    dlg_draw((int)a->w, (int)a->h);
 }
 
 /* Everything the components did not deal with: the listing, the sidebar's
@@ -2182,8 +2170,7 @@ int main(int argc, char** argv)
     g_app.root = root;
     g_app.draw = draw_background;
     g_app.event = on_event;
-    g_app.filter = on_filter;
-    g_app.overlay = on_overlay;
+    g_app.sheet_done = on_sheet_done;
     g_app.menu_pick = on_menu_pick;
     g_app.tick_ms = 60;
     g_app.tick = on_tick;
