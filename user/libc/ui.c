@@ -41,6 +41,8 @@ static int ui_is_separator(const char* label)
 static struct ui_view* g_dropped;
 /* The field a selection is being dragged across, if any. */
 static struct ui_view* g_dragging_text;
+/* The scroll view whose thumb is being dragged, if any. */
+static struct ui_view* g_scrolling;
 /* Which channel of the colour mixer is being dragged, or -1. */
 static int g_channel = -1;
 static void colour_panel(const struct ui_view* v, int* x, int* y, int* w,
@@ -70,6 +72,7 @@ void ui_reset(void)
     g_pressed = 0;
     g_dropped = 0;
     g_dragging_text = 0;
+    g_scrolling = 0;
     g_channel = -1;
 }
 
@@ -706,15 +709,22 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
 
     if (v->kind == UI_SCROLL) {
         /* The child is laid out at its own height rather than the frame's, and
-         * shifted by the scroll. Anything past the bottom is simply not drawn -
-         * which is why the child's own layout has to be done at full size. */
+         * shifted by the scroll, so a view inside a scroll draws in document
+         * coordinates and does not need to know it is being scrolled. */
         struct ui_view* c = v->child;
         if (c != 0) {
             const int tall = c->want_h > into.h ? c->want_h : into.h;
+            /* How far it can go, clamped here because this is the one place
+             * that knows both numbers. A scroll left past the end of shorter
+             * content is what leaves a view showing nothing at all. */
+            v->max = tall > into.h ? tall - into.h : 0;
+            if (v->scroll > v->max) v->scroll = v->max;
+            if (v->scroll < 0) v->scroll = 0;
+            v->rows = tall;             /* the content's height, for the bar */
             /* Room for the bar taken out of the width before the child is laid
              * out, so its contents stop short of it instead of being drawn
              * underneath it. */
-            int w = into.w - WG_SCROLL_W - 4;
+            int w = into.w - (v->max > 0 ? WG_SCROLL_W + 4 : 0);
             if (w < 0) w = 0;
             struct ui_rect r = { into.x, into.y - v->scroll, w, tall };
             ui_layout(c, r);
@@ -1201,6 +1211,21 @@ int ui_event(struct ui_view* root, const struct win_event* e)
                 }
                 v->caret = at;
             }
+        } else if (v->kind == UI_SCROLL) {
+            /* The bar is the only part of a scroll view that is its own: a
+             * press anywhere else belongs to whatever is inside it, and got
+             * there before this because children are hit first. */
+            const int bx = v->frame.x + v->frame.w - WG_SCROLL_W;
+            if (v->max > 0 && e->x >= bx) {
+                if (wg_scroll_on_thumb_v(e->y, v->frame.y, v->frame.h,
+                                         v->scroll, v->frame.h, v->rows))
+                    g_scrolling = v;
+                else
+                    v->scroll = wg_scroll_hit_v(e->x, e->y, bx, v->frame.y,
+                                                v->frame.h, v->scroll,
+                                                v->frame.h, v->rows);
+                ui_layout(v, v->frame);
+            }
         } else if (v->kind == UI_SPLIT) {
             /* Only the divider itself: the panes are children and were hit
              * first, so reaching here means the gap between them. */
@@ -1313,6 +1338,21 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         g_pressed = 0;
         g_channel = -1;
         g_dragging_text = 0;
+        g_scrolling = 0;
+        return 1;
+    }
+
+    if (e->type == WIN_EVENT_MOUSE_MOVE && g_scrolling != 0) {
+        struct ui_view* v = g_scrolling;
+        const int to = wg_scroll_drag_v(e->y, v->frame.y, v->frame.h,
+                                        v->frame.h, v->rows);
+        if (to == v->scroll)
+            return 0;
+        v->scroll = to;
+        /* Laid out again at once: the children's frames are what the next
+         * event is hit-tested against, and leaving them stale for a frame is
+         * how a drag comes out a step behind the pointer. */
+        ui_layout(v, v->frame);
         return 1;
     }
 
@@ -1391,6 +1431,22 @@ int ui_event(struct ui_view* root, const struct win_event* e)
              * when moving between lines - which is why a document could not be
              * selected, copied or undone while a field could not either. */
             return field_key(v, e->key, e->modifiers);
+        }
+        if (v->kind == UI_SCROLL) {
+            const int page = v->frame.h > 40 ? v->frame.h - 20 : v->frame.h;
+            int to = v->scroll;
+            if (e->key == WIN_KEY_DOWN)       to += 24;
+            else if (e->key == WIN_KEY_UP)    to -= 24;
+            else if (e->key == WIN_KEY_RIGHT) to += page;
+            else if (e->key == WIN_KEY_LEFT)  to -= page;
+            else return 0;
+            if (to > v->max) to = v->max;
+            if (to < 0) to = 0;
+            if (to == v->scroll)
+                return 0;
+            v->scroll = to;
+            ui_layout(v, v->frame);
+            return 1;
         }
         if (v->kind == UI_LIST || v->kind == UI_SIDEBAR ||
             v->kind == UI_TABLE || v->kind == UI_TREE ||
@@ -2060,10 +2116,12 @@ void ui_draw(struct ui_view* v)
     }
 
     case UI_SCROLL:
-        /* The child is drawn by the walk below; this draws the bar beside it. */
-        if (v->child != 0 && v->child->frame.h > f.h)
+        /* The child is drawn by the walk below; this draws the bar beside it.
+         * Drawn before the children rather than after, so the clip that holds
+         * them in does not also hold this out. */
+        if (v->max > 0)
             wg_scrollbar_v(f.x + f.w - WG_SCROLL_W, f.y, f.h, v->scroll,
-                           f.h, v->child->frame.h);
+                           f.h, v->rows);
         break;
 
     case UI_SPLIT: {
@@ -2103,9 +2161,21 @@ void ui_draw(struct ui_view* v)
         break;
     }
 
+    /* A scroll's children are clipped to it.
+     *
+     * They are laid out at the content's full height and shifted, so the part
+     * scrolled past the top has negative coordinates and the part past the
+     * bottom runs off the end - and without a clip both of them are drawn over
+     * whatever the scroll view happens to sit next to. This is the whole
+     * difference between a scroll view and a view that has been moved. */
+    const int clipping = (v->kind == UI_SCROLL);
+    if (clipping)
+        wg_clip(f.x, f.y, f.w, f.h);
     for (struct ui_view* c = v->child; c != 0; c = c->next)
         if (c->kind != UI_POPOVER)
             ui_draw(c);
+    if (clipping)
+        wg_clip_none();
 
     /* The open drop-down is not drawn here.
      *

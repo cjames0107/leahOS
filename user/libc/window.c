@@ -432,6 +432,22 @@ void win_set_alpha(int id)
     w->flags |= WS_FLAG_ALPHA;
 }
 
+void win_set_title(int id, const char* title)
+{
+    struct ws_window* w = ws_slot(id);
+    if (w == 0 || title == 0)
+        return;
+    int n = 0;
+    while (title[n] != '\0' && n < WS_TITLE_LEN - 1) {
+        w->title[n] = title[n];
+        ++n;
+    }
+    w->title[n] = '\0';
+    /* The server redraws the chrome when the window is next damaged; a title
+     * that changed and nothing else still has to be seen, so say so. */
+    __atomic_add_fetch(&w->present, 1, __ATOMIC_RELEASE);
+}
+
 void win_hide(int id)
 {
     struct ws_window* w = ws_slot(id);

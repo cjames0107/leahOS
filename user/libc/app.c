@@ -132,6 +132,8 @@ struct ui_view* app_sheet(struct app* a, unsigned w, unsigned h)
     return a->sheet;
 }
 
+static int framework_answered(struct app* a, int result);
+
 void app_sheet_close(struct app* a, int result)
 {
     if (a == 0 || a->sheet_id < 0)
@@ -144,6 +146,11 @@ void app_sheet_close(struct app* a, int result)
      * or the next paint goes into a buffer that has been destroyed. */
     if (a->px != 0)
         wg_target(a->px, a->w, a->h);
+    /* The framework's own questions are answered here rather than by the
+     * application: it did not ask them and has no way to tell "the file panel
+     * I opened" from "the question you put up when I tried to close". */
+    if (framework_answered(a, result))
+        return;
     if (a->sheet_done != 0)
         a->sheet_done(a, result);
 }
@@ -335,6 +342,274 @@ struct ui_view* app_sheet_file(struct app* a, const char* dir)
     ui_spacer(row);
     ui_grow(ui_button(row, "Cancel", sheet_cancel_clicked, a), 0);
     return root;
+}
+
+/* --- asking ---------------------------------------------------------------- */
+
+/* Which question a sheet is asking, so the answer can be acted on.
+ *
+ * The application's own sheet_done is called for its own sheets; these are the
+ * framework's, and it keeps them apart rather than making every application
+ * distinguish "the file panel I opened" from "the question you asked me". */
+enum { ASK_NONE, ASK_ALERT, ASK_DISCARD_QUIT, ASK_DISCARD_OPEN,
+       ASK_DISCARD_NEW, ASK_SAVE_PATH, ASK_OPEN_PATH };
+static int g_asking;
+/* What to do once the document has been dealt with. */
+static void (*g_after_save)(struct app* a);
+
+static void answer_yes(struct ui_view* v, void* user)
+{
+    (void)v;
+    app_sheet_close((struct app*)user, 1);
+}
+
+static void answer_no(struct ui_view* v, void* user)
+{
+    (void)v;
+    app_sheet_close((struct app*)user, 0);
+}
+
+/* The words, wrapped by hand at the panel's width. A label does not wrap and a
+ * text area is editable, so a paragraph in a sheet is drawn a line at a time. */
+static void say_paragraph(struct ui_view* root, const char* body, int width)
+{
+    if (body == 0)
+        return;
+    char line[160];
+    int n = 0, last_space = -1;
+    for (const char* p = body; ; ++p) {
+        if (*p != '\0' && n < (int)sizeof(line) - 1) {
+            if (*p == ' ')
+                last_space = n;
+            line[n++] = *p;
+        }
+        line[n] = '\0';
+        const int too_wide = wg_text_width(line) > width;
+        if (*p == '\0' || too_wide) {
+            if (too_wide && last_space > 0) {
+                /* Back to the last space, and the rest goes on the next
+                 * line - which is what makes this wrapping and not cutting. */
+                char keep[160];
+                snprintf(keep, sizeof(keep), "%.*s", last_space, line);
+                ui_grow(ui_size(ui_label(root, keep), 0, 18), 0);
+                const int carry = n - last_space - 1;
+                memmove(line, &line[last_space + 1], (unsigned long)carry);
+                n = carry;
+                line[n] = '\0';
+                last_space = -1;
+            } else {
+                ui_grow(ui_size(ui_label(root, line), 0, 18), 0);
+                n = 0;
+                last_space = -1;
+            }
+        }
+        if (*p == '\0')
+            break;
+    }
+}
+
+static struct ui_view* question(struct app* a, const char* title,
+                                const char* body, const char* yes,
+                                const char* no)
+{
+    struct ui_view* root = app_sheet(a, 400, no != 0 ? 190 : 170);
+    if (root == 0)
+        return 0;
+    ui_grow(ui_size(ui_label(root, title != 0 ? title : ""), 0, 22), 0);
+    say_paragraph(root, body, 400 - 40);
+    ui_spacer(root);
+
+    struct ui_view* row = ui_box(root, UI_STACK_H, 0, 10);
+    ui_size(row, 0, 26);
+    ui_grow(row, 0);
+    ui_spacer(row);
+    if (no != 0)
+        ui_grow(ui_size(ui_button(row, no, answer_no, a), 96, 24), 0);
+    ui_grow(ui_size(ui_button(row, yes != 0 ? yes : "OK", answer_yes, a),
+                    96, 24), 0);
+    return root;
+}
+
+struct ui_view* app_alert(struct app* a, const char* title, const char* body)
+{
+    g_asking = ASK_ALERT;
+    return question(a, title, body, "OK", 0);
+}
+
+struct ui_view* app_confirm(struct app* a, const char* title, const char* body,
+                            const char* yes, const char* no)
+{
+    g_asking = ASK_ALERT;
+    return question(a, title, body, yes, no != 0 ? no : "Cancel");
+}
+
+/* --- documents -------------------------------------------------------------- */
+
+/* The window's title, with the document's name on it and a mark when it has
+ * unsaved work. A person should not have to remember which of four windows is
+ * the one they have not saved. */
+static void retitle(struct app* a)
+{
+    const char* leaf = a->doc_path;
+    for (const char* p = a->doc_path; *p != '\0'; ++p)
+        if (*p == '/' && p[1] != '\0')
+            leaf = p + 1;
+    char title[WS_TITLE_LEN];
+    if (a->doc_path[0] == '\0')
+        snprintf(title, sizeof(title), "%s%s",
+                 a->title != 0 ? a->title : "Untitled",
+                 a->doc_dirty ? " - edited" : "");
+    else
+        snprintf(title, sizeof(title), "%s%s", leaf,
+                 a->doc_dirty ? " - edited" : "");
+    win_set_title(a->id, title);
+}
+
+void app_doc_touched(struct app* a)
+{
+    if (a == 0 || a->doc_dirty)
+        return;
+    a->doc_dirty = 1;
+    retitle(a);
+}
+
+static void do_save(struct app* a, const char* path)
+{
+    if (a->doc_save == 0)
+        return;
+    if (a->doc_save(a, path) != 0) {
+        char note[320];
+        snprintf(note, sizeof(note), "%s could not be written.", path);
+        app_alert(a, "Not saved", note);
+        return;
+    }
+    snprintf(a->doc_path, sizeof(a->doc_path), "%s", path);
+    a->doc_dirty = 0;
+    retitle(a);
+    if (g_after_save != 0) {
+        void (*then)(struct app*) = g_after_save;
+        g_after_save = 0;
+        then(a);
+    }
+}
+
+void app_doc_save_as(struct app* a)
+{
+    if (a == 0)
+        return;
+    g_asking = ASK_SAVE_PATH;
+    app_sheet_name(a, a->doc_dir != 0 ? a->doc_dir : "/",
+                   a->doc_path[0] != '\0' ? a->doc_path
+                   : (a->doc_suggested != 0 ? a->doc_suggested : "untitled"),
+                   "Save as", "Save");
+}
+
+void app_doc_save(struct app* a)
+{
+    if (a == 0)
+        return;
+    if (a->doc_path[0] == '\0') {
+        app_doc_save_as(a);
+        return;
+    }
+    do_save(a, a->doc_path);
+}
+
+void app_doc_open(struct app* a)
+{
+    if (a == 0)
+        return;
+    if (a->doc_dirty && a->doc_save != 0) {
+        g_asking = ASK_DISCARD_OPEN;
+        question(a, "Save first?", "This has changes that have not been saved.",
+                 "Save", "Discard");
+        return;
+    }
+    g_asking = ASK_OPEN_PATH;
+    app_sheet_file(a, a->doc_dir != 0 ? a->doc_dir : "/");
+}
+
+void app_doc_new(struct app* a)
+{
+    if (a == 0)
+        return;
+    if (a->doc_dirty && a->doc_save != 0) {
+        g_asking = ASK_DISCARD_NEW;
+        question(a, "Save first?", "This has changes that have not been saved.",
+                 "Save", "Discard");
+        return;
+    }
+    if (a->doc_new != 0)
+        a->doc_new(a);
+    a->doc_path[0] = '\0';
+    a->doc_dirty = 0;
+    retitle(a);
+}
+
+int app_doc_may_discard(struct app* a)
+{
+    if (a == 0 || !a->doc_dirty || a->doc_save == 0)
+        return 1;
+    g_asking = ASK_DISCARD_QUIT;
+    question(a, "Save before closing?",
+             "This has changes that have not been saved. They will be lost.",
+             "Save", "Discard");
+    return 0;
+}
+
+/* Quitting, once whatever was pending has finished. Named because it is
+ * handed to g_after_save, which takes a function rather than a flag so that
+ * "save, then do the thing that was waiting" has one shape whatever the thing
+ * is. */
+static void app_quit_after_save(struct app* a)
+{
+    app_quit(a, 0);
+}
+
+/* What the framework's own sheets answer. Returns 1 when it dealt with it, so
+ * the application's sheet_done is not also called with it. */
+static int framework_answered(struct app* a, int result)
+{
+    const int asking = g_asking;
+    g_asking = ASK_NONE;
+    switch (asking) {
+    case ASK_ALERT:
+        return 1;
+    case ASK_DISCARD_QUIT:
+        if (result) { g_after_save = app_quit_after_save; app_doc_save(a); }
+        else        app_quit(a, 0);
+        return 1;
+    case ASK_DISCARD_OPEN:
+        if (result) { g_after_save = app_doc_open; app_doc_save(a); }
+        else        { a->doc_dirty = 0; app_doc_open(a); }
+        return 1;
+    case ASK_DISCARD_NEW:
+        if (result) { g_after_save = app_doc_new; app_doc_save(a); }
+        else        { a->doc_dirty = 0; app_doc_new(a); }
+        return 1;
+    case ASK_SAVE_PATH:
+        if (result)
+            do_save(a, app_sheet_path(a));
+        else
+            g_after_save = 0;   /* the pending action is abandoned with it */
+        return 1;
+    case ASK_OPEN_PATH:
+        if (result && a->doc_load != 0) {
+            const char* path = app_sheet_path(a);
+            if (a->doc_load(a, path) == 0) {
+                snprintf(a->doc_path, sizeof(a->doc_path), "%s", path);
+                a->doc_dirty = 0;
+                retitle(a);
+            } else {
+                char note[320];
+                snprintf(note, sizeof(note), "%s could not be opened.", path);
+                app_alert(a, "Not opened", note);
+            }
+        }
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 /* --- the open-with panel --------------------------------------------------- */
@@ -568,6 +843,13 @@ int app_run(struct app* a, int argc, char** argv)
 
         while (win_poll(a->id, &e)) {
             if (e.type == WIN_EVENT_CLOSE) {
+                /* Not straight out when there is unsaved work: the question
+                 * goes up and the answer decides. An application with no
+                 * document never notices this. */
+                if (!app_doc_may_discard(a)) {
+                    dirty = 1;
+                    continue;
+                }
                 win_destroy(a->id);
                 return a->status;
             }

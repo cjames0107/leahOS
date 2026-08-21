@@ -56,6 +56,13 @@ void win_move_begin(int id);
  * must fill its alpha byte everywhere - zero means invisible, not opaque. */
 void win_set_alpha(int id);
 
+/* Rename a window after it has been made.
+ *
+ * A title was whatever was passed to win_create and could never change, so a
+ * window could not say which document it was showing or that the document had
+ * unsaved work in it - the two things a title bar is for. */
+void win_set_title(int id, const char* title);
+
 /* Take a window off the screen, and put it back. Its slot, its pixels and its
  * events all stay - this is not closing it. See WS_FLAG_HIDDEN. */
 void win_hide(int id);

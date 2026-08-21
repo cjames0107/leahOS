@@ -175,6 +175,25 @@ static void save(int png)
 static void on_png(struct ui_view* v, void* user);
 static void on_gif(struct ui_view* v, void* user);
 
+/* The picture, as a document the framework knows about.
+ *
+ * Paint had no dirty flag at all: closing it threw the picture away without a
+ * word, and tracking a flag is only worth doing when something acts on it.
+ * Something does now. */
+static int save_document(struct app* a, const char* path)
+{
+    (void)a;
+    const unsigned h = (unsigned)canvas_h();
+    const uint32_t* start = &g_px[(unsigned long)canvas_top() * g_w];
+    /* By what it is called, so "picture.gif" is a GIF. The two buttons still
+     * choose directly; this is for Save, which has only a path to go on. */
+    const int n = (int)strlen(path);
+    const int gif = n > 4 && (path[n - 3] == 'g' || path[n - 3] == 'G') &&
+                             (path[n - 2] == 'i' || path[n - 2] == 'I');
+    return gif ? img_write_gif(path, start, g_w, h)
+               : img_write_png(path, start, g_w, h);
+}
+
 /* --- the toolbar, as components -------------------------------------------
  *
  * Five tools as one segmented control, a colour well that opens a mixer, the
@@ -223,6 +242,7 @@ static void on_clear(struct ui_view* v, void* user)
 {
     (void)v; (void)user;
     clear_canvas();
+    app_doc_touched(&g_app);
     say("cleared");
 }
 
@@ -266,6 +286,12 @@ int main(int argc, char** argv)
      * left to right and the last of them is Save, which is not a control to
      * let fall off the end. */
     g_app.min_width = 600; g_app.min_height = 300;
+    /* What it is editing, so the framework can ask before it is lost and put
+     * the name in the title bar. */
+    g_app.doc_kind = "picture";
+    g_app.doc_dir = "/root";
+    g_app.doc_suggested = "picture.png";
+    g_app.doc_save = save_document;
     g_app.draw = on_draw;
     g_app.event = on_event;
     /* Alpha, so the glass reaches into it like every other window. The canvas
@@ -313,6 +339,7 @@ static int on_event(struct app* a, const struct win_event* e)
         if (e->y >= canvas_top() && e->y < canvas_top() + canvas_h()) {
             const uint32_t ink = (g_tool == T_ERASE) ? WG_PAPER : g_colour;
             g_ax = g_lx = e->x; g_ay = g_ly = e->y;
+            app_doc_touched(a);
             if (g_tool == T_FILL) {
                 flood(e->x, e->y, ink);
             } else if (g_tool == T_PENCIL || g_tool == T_ERASE) {

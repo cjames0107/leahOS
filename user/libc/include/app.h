@@ -92,6 +92,26 @@ struct app {
 
     void* user;                         /* the application's own state */
 
+    /* --- the document, when there is one ---------------------------------
+     *
+     * An application that edits something living in a file fills these in and
+     * gets the whole of what that implies: Save that knows whether it has been
+     * asked where yet, Save As, Open, New, and - the one nothing here had -
+     * being asked before work is thrown away.
+     *
+     * Paint could be closed with an unsaved picture and the picture was simply
+     * gone. It had no dirty flag at all, because tracking one is only worth
+     * doing if something acts on it, and nothing could. */
+    char        doc_path[256];          /* where it is, or "" for untitled  */
+    int         doc_dirty;              /* changed since it was last saved  */
+    const char* doc_kind;               /* "document", "picture", "tune"    */
+    const char* doc_dir;                /* where Save As starts looking     */
+    const char* doc_suggested;          /* what an untitled one is called   */
+    /* Both return 0 on success. Neither is called with a null path. */
+    int (*doc_save)(struct app* a, const char* path);
+    int (*doc_load)(struct app* a, const char* path);
+    void (*doc_new)(struct app* a);
+
     /* --- sheets ----------------------------------------------------------
      *
      * A dialogue, as a window of its own centred on this one. It has its own
@@ -187,6 +207,42 @@ int app_sheet_always(const struct app* a);
 /* A sheet for choosing a date. app_sheet_path holds it as YYYY-MM-DD, which is
  * the same way every other sheet returns its answer. */
 struct ui_view* app_sheet_date(struct app* a, int year, int month, int day);
+
+/* --- asking ----------------------------------------------------------------
+ *
+ * A sheet with a question on it. Both return immediately; the answer arrives
+ * at `sheet_done` with 1 for the affirmative and 0 for the other, as every
+ * other sheet's does.
+ *
+ * There was no way to say anything to a person at all. An application that
+ * could not write a file put the reason in a status line at the bottom of its
+ * own window and hoped, and one about to lose an hour of work had no way to
+ * mention it. */
+struct ui_view* app_alert(struct app* a, const char* title, const char* body);
+struct ui_view* app_confirm(struct app* a, const char* title, const char* body,
+                            const char* yes, const char* no);
+
+/* --- documents --------------------------------------------------------------
+ *
+ * The lifecycle every editor was writing for itself: is it changed, where does
+ * it live, has it been saved, and what happens when it is closed with work in
+ * it. Fill in the doc_ fields above and call these.
+ */
+
+/* Something changed. Marks it dirty and puts an edited mark in the title. */
+void app_doc_touched(struct app* a);
+
+/* Save, asking where when it has never been asked. */
+void app_doc_save(struct app* a);
+void app_doc_save_as(struct app* a);
+
+/* Open and New, each of which asks first when there is unsaved work. */
+void app_doc_open(struct app* a);
+void app_doc_new(struct app* a);
+
+/* Whether it is safe to throw the document away. When it is not, this raises
+ * the question and returns 0; the answer runs whatever was pending. */
+int app_doc_may_discard(struct app* a);
 
 /* Ask the loop to stop. The window is destroyed and app_run returns. */
 void app_quit(struct app* a, int status);

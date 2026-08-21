@@ -30,8 +30,6 @@
 
 static struct app g_app;
 static struct rtf_doc* g_doc;
-static char g_path[256];
-static int  g_dirty;
 
 /* Where the caret is, and where a selection started. They are equal when there
  * is no selection, which is the same thing a caret is. */
@@ -350,8 +348,8 @@ static void show_state(void)
 
     char note[160];
     snprintf(note, sizeof(note), "%s%s - %ld characters",
-             g_path[0] != '\0' ? g_path : "untitled",
-             g_dirty ? " (edited)" : "", g_doc->len);
+             g_app.doc_path[0] != '\0' ? g_app.doc_path : "untitled",
+             g_app.doc_dirty ? " (edited)" : "", g_doc->len);
     ui_set_text(g_status, note);
 }
 
@@ -365,7 +363,7 @@ static void apply_flag(unsigned flag, int on)
                       : (unsigned char)(g_typing & ~flag);
     } else {
         rtf_restyle(g_doc, from, to, flag, on);
-        g_dirty = 1;
+    app_doc_touched(&g_app);
         g_laid_for_width = -1;      /* widths changed, so the wrap did */
     }
     show_state();
@@ -396,7 +394,7 @@ static void on_size(struct ui_view* v, void* u)
         g_typing = rtf_style_with_size(g_typing, (unsigned)v->selected);
     } else {
         rtf_resize(g_doc, from, to, (unsigned)v->selected);
-        g_dirty = 1;
+    app_doc_touched(&g_app);
     }
     g_laid_for_width = -1;
     show_state();
@@ -412,60 +410,23 @@ static void on_align(struct ui_view* v, void* u)
 {
     (void)u;
     g_doc->align = v->on;
-    g_dirty = 1;
+    app_doc_touched(&g_app);
     show_state();
 }
 
 /* --- files -------------------------------------------------------------------- */
 
-static void load(const char* path)
-{
-    struct rtf_doc* fresh = rtf_read(path);
-    if (fresh == 0) {
-        /* The whole toolbar still has to say what the empty document it is
-         * left with is set to, or it reports the state of one that never
-         * loaded. */
-        show_state();
-        ui_set_text(g_status, "could not read that document");
-        return;
-    }
-    rtf_free(g_doc);
-    g_doc = fresh;
-    snprintf(g_path, sizeof(g_path), "%s", path);
-    g_caret = g_anchor = 0;
-    g_scroll = 0;
-    g_dirty = 0;
-    g_laid_for_width = -1;
-    g_typing = rtf_style_at(g_doc, 0, 0);
-    show_state();
-}
+static int doc_load(struct app* a, const char* path);
+static int doc_save(struct app* a, const char* path);
+static void doc_new(struct app* a);
 
-static void save_to(const char* path)
-{
-    if (rtf_write(path, g_doc) != 0) {
-        ui_set_text(g_status, "could not write that document");
-        return;
-    }
-    snprintf(g_path, sizeof(g_path), "%s", path);
-    g_dirty = 0;
-    show_state();
-}
-
-static void on_saved(struct app* a, int result)
-{
-    if (result)
-        save_to(app_sheet_path(a));
-}
-
+/* Opening, saving and starting again all go through the framework: see the
+ * doc_ fields in main. What is left here is the two ways a person asks for
+ * them. */
 static void on_save(struct ui_view* v, void* u)
 {
     (void)v; (void)u;
-    if (g_path[0] != '\0') {
-        save_to(g_path);
-        return;
-    }
-    g_app.sheet_done = on_saved;
-    app_sheet_save(&g_app, "/root", "document.rtf");
+    app_doc_save(&g_app);
 }
 
 /* --- keys and clicks ----------------------------------------------------------- */
@@ -491,7 +452,7 @@ static void delete_selection(void)
     if (to > from) {
         rtf_delete(g_doc, from, to - from);
         g_caret = g_anchor = from;
-        g_dirty = 1;
+    app_doc_touched(&g_app);
     }
 }
 
@@ -525,7 +486,7 @@ static int on_key(unsigned key)
             rtf_delete(g_doc, g_caret - 1, 1);
             --g_caret;
             g_anchor = g_caret;
-            g_dirty = 1;
+    app_doc_touched(&g_app);
         }
     }
     else if (key == 2)  { apply_flag(RTF_BOLD, !g_bold->on); return 1; }      /* ctrl+B */
@@ -540,7 +501,7 @@ static int on_key(unsigned key)
         if (rtf_insert(g_doc, g_caret, &c, 1, g_typing) == 0) {
             ++g_caret;
             g_anchor = g_caret;
-            g_dirty = 1;
+    app_doc_touched(&g_app);
         }
     }
     else return 0;
@@ -590,28 +551,11 @@ static int on_event(struct app* a, const struct win_event* e)
 
 static int on_menu(struct app* a, int pick)
 {
-    (void)a;
-    if (pick == 0) {                    /* New */
-        rtf_free(g_doc);
-        g_doc = rtf_new();
-        g_path[0] = '\0';
-        g_caret = g_anchor = 0;
-        g_dirty = 0;
-        g_laid_for_width = -1;
-    } else if (pick == 1) {             /* Open */
-        g_app.sheet_done = 0;
-        app_sheet_file(&g_app, "/root");
-    } else if (pick == 2) {
-        on_save(0, 0);
-    }
+    if (pick == 0)      app_doc_new(a);
+    else if (pick == 1) app_doc_open(a);
+    else if (pick == 2) app_doc_save(a);
     show_state();
     return 1;
-}
-
-static void on_sheet(struct app* a, int result)
-{
-    if (result)
-        load(app_sheet_path(a));
 }
 
 static const char* const kMenu[] = { "New", "Open...", "Save" };
@@ -674,11 +618,51 @@ int main(int argc, char** argv)
     g_app.menu = kMenu;
     g_app.menu_count = (int)(sizeof(kMenu) / sizeof(kMenu[0]));
     g_app.menu_pick = on_menu;
-    g_app.sheet_done = on_sheet;
+    g_app.doc_kind = "document";
+    g_app.doc_dir = "/root/Documents";
+    g_app.doc_suggested = "document.rtf";
+    g_app.doc_save = doc_save;
+    g_app.doc_load = doc_load;
+    g_app.doc_new = doc_new;
 
-    if (open_this != 0)
-        load(open_this);
-    else
-        show_state();
+    if (open_this != 0 && doc_load(&g_app, open_this) == 0)
+        snprintf(g_app.doc_path, sizeof(g_app.doc_path), "%s", open_this);
+    show_state();
     return app_run(&g_app, argc, argv);
+}
+
+/* The document, as the framework sees it. Write kept its own path and its own
+ * edited flag and its own save; all three are the framework's now, which is
+ * what gets it the question before work is thrown away. */
+static int doc_load(struct app* a, const char* path)
+{
+    (void)a;
+    struct rtf_doc* fresh = rtf_read(path);
+    if (fresh == 0)
+        return -1;
+    rtf_free(g_doc);
+    g_doc = fresh;
+    g_caret = g_anchor = 0;
+    g_scroll = 0;
+    g_laid_for_width = -1;
+    g_typing = rtf_style_at(g_doc, 0, 0);
+    show_state();
+    return 0;
+}
+
+static int doc_save(struct app* a, const char* path)
+{
+    (void)a;
+    return rtf_write(path, g_doc);
+}
+
+static void doc_new(struct app* a)
+{
+    (void)a;
+    rtf_free(g_doc);
+    g_doc = rtf_new();
+    g_caret = g_anchor = 0;
+    g_scroll = 0;
+    g_laid_for_width = -1;
+    show_state();
 }

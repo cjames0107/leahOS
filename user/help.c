@@ -30,6 +30,9 @@
 static struct app g_app;
 static struct ui_view* g_list;
 static struct ui_view* g_pane;
+static struct ui_view* g_scroller;
+
+static void size_page(void);
 static struct ui_view* g_search;
 static struct ui_view* g_title;
 
@@ -41,7 +44,6 @@ static char g_find[64];
 
 static char g_line[MAX_LINES][LINE_MAX];
 static int  g_lines;
-static int  g_scroll;                   /* in lines */
 
 static void load_pages(void)
 {
@@ -108,7 +110,6 @@ static const char* page_row(void* user, int row)
 static void open_page(const char* name)
 {
     g_lines = 0;
-    g_scroll = 0;
 
     /* Whichever section it is in. The pages are all section 1 today, and
      * looking for the file rather than assuming the number is what stops that
@@ -122,6 +123,7 @@ static void open_page(const char* name)
     if (fd < 0) {
         snprintf(g_line[g_lines++], LINE_MAX, "no manual entry for %s", name);
         ui_set_text(g_title, name);
+        size_page();
         return;
     }
 
@@ -145,23 +147,26 @@ static void open_page(const char* name)
 full:
     close(fd);
     ui_set_text(g_title, name);
+    size_page();
 }
 
 /* --- the page ---------------------------------------------------------------- */
 
+/* The page, drawn at its full height inside a scroll view.
+ *
+ * It kept its own scroll offset, drew only the lines that fitted, and wired
+ * its own bar and its own arrow keys - which is what six other applications
+ * were also doing, each slightly differently. Inside a ui_scroll the frame is
+ * the whole document and it is shifted for us, so this draws every line at
+ * where that line is and the scroll view clips what does not fit. */
 static void draw_page(struct ui_view* v, void* user)
 {
     (void)user;
     const struct ui_rect f = v->frame;
-    wg_container(f.x, f.y, f.w, f.h, WG_RADIUS);
 
     const int line_h = wg_text_height() + 2;
-    const int visible = (f.h - 16) / line_h;
-    for (int i = 0; i < visible; ++i) {
-        const int at = g_scroll + i;
-        if (at >= g_lines)
-            break;
-        const char* text = g_line[at];
+    for (int i = 0; i < g_lines; ++i) {
+        const char* text = g_line[i];
         /* A heading is a line that starts at the left margin and is not
          * indented, which is the whole of the convention these pages follow. */
         const int heading = text[0] != '\0' && text[0] != ' ' &&
@@ -170,8 +175,16 @@ static void draw_page(struct ui_view* v, void* user)
                   heading ? wg_ink_colour() : WG_INK,
                   wg_text_size(), heading ? WG_STYLE_BOLD : 0);
     }
-    wg_scrollbar_v(f.x + f.w - WG_SCROLL_W - 3, f.y + 3, f.h - 6,
-                   g_scroll * line_h, f.h, g_lines * line_h);
+}
+
+/* How tall the page is, which is what the scroll view lays it out at. */
+static void size_page(void)
+{
+    if (g_pane == 0)
+        return;
+    g_pane->want_h = g_lines * (wg_text_height() + 2) + 20;
+    if (g_scroller != 0)
+        g_scroller->scroll = 0;
 }
 
 static void on_pick(struct ui_view* v, void* u)
@@ -186,23 +199,6 @@ static void on_find(struct ui_view* v, void* u)
     (void)u;
     snprintf(g_find, sizeof(g_find), "%s", ui_text(v));
     refilter();
-}
-
-static int on_event(struct app* a, const struct win_event* e)
-{
-    if (e->type != WIN_EVENT_KEY || ui_focused() == g_search)
-        return 0;
-    const int line_h = wg_text_height() + 2;
-    const int page = g_pane->frame.h / line_h;
-    if (e->key == WIN_KEY_DOWN)       ++g_scroll;
-    else if (e->key == WIN_KEY_UP)    --g_scroll;
-    else if (e->key == WIN_KEY_RIGHT) g_scroll += page;
-    else if (e->key == WIN_KEY_LEFT)  g_scroll -= page;
-    else return 0;
-    (void)a;
-    if (g_scroll > g_lines - page) g_scroll = g_lines - page;
-    if (g_scroll < 0) g_scroll = 0;
-    return 1;
 }
 
 int main(int argc, char** argv)
@@ -222,7 +218,8 @@ int main(int argc, char** argv)
     struct ui_view* right = ui_box(root, UI_STACK_V, 10, 6);
     ui_grow(right, 1);
     g_title = ui_grow(ui_size(ui_label(right, ""), 0, 20), 0);
-    g_pane = ui_grow(ui_custom(right, draw_page, 0), 1);
+    g_scroller = ui_scroll(right);
+    g_pane = ui_custom(g_scroller, draw_page, 0);
 
     refilter();
     /* Something on screen at once: a help window that opens empty is a window
@@ -245,6 +242,5 @@ int main(int argc, char** argv)
     g_app.min_width = 520; g_app.min_height = 320;
     g_app.sidebar = 190;
     g_app.root = root;
-    g_app.event = on_event;
     return app_run(&g_app, argc, argv);
 }
