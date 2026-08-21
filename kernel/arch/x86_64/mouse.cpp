@@ -36,7 +36,7 @@ void init() {}
 
 State state() { return g_state; }
 
-void set_state(i32 x, i32 y, u32 buttons)
+void set_state(i32 x, i32 y, u32 buttons, i32 wheel_delta)
 {
     clamp(x, y);
     g_state.x = x;
@@ -44,6 +44,17 @@ void set_state(i32 x, i32 y, u32 buttons)
     g_state.left   = (buttons & 1) != 0;
     g_state.right  = (buttons & 2) != 0;
     g_state.middle = (buttons & 4) != 0;
+    /* Added to whatever has not been read yet: the mouse reports a packet per
+     * notch and a reader that polls at thirty a second would otherwise see one
+     * of every four turns. */
+    g_state.wheel += wheel_delta;
+}
+
+i32 take_wheel()
+{
+    const i32 had = g_state.wheel;
+    g_state.wheel = 0;
+    return had;
 }
 
 } // namespace mouse

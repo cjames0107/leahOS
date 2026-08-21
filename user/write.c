@@ -35,7 +35,6 @@ static struct rtf_doc* g_doc;
  * is no selection, which is the same thing a caret is. */
 static long g_caret;
 static long g_anchor;
-static int  g_scroll;           /* in pixels down the document */
 static int  g_selecting;
 
 /* The style the next character typed will take. Held rather than read from the
@@ -44,6 +43,7 @@ static int  g_selecting;
 static unsigned char g_typing;
 
 static struct ui_view* g_page;
+static struct ui_view* g_scroller;
 static struct ui_view* g_bold;
 static struct ui_view* g_italic;
 static struct ui_view* g_under;
@@ -234,7 +234,7 @@ static void draw_page(struct ui_view* v, void* user)
     selection_range(&from, &to);
 
     for (int l = 0; l < g_lines; ++l) {
-        const int y = f.y + g_line[l].y - g_scroll;
+        const int y = f.y + g_line[l].y;
         if (y + g_line[l].height < f.y || y > f.y + f.h)
             continue;
 
@@ -306,18 +306,16 @@ static void draw_page(struct ui_view* v, void* user)
             else
                 cx += f.w - MARGIN - width - MARGIN;
         }
-        wg_fill(f.x + cx, f.y + cy - g_scroll + 2, 1, ch - 4, wg_ink_colour());
+        wg_fill(f.x + cx, f.y + cy + 2, 1, ch - 4, wg_ink_colour());
     }
 
-    wg_scrollbar_v(f.x + f.w - WG_SCROLL_W - 2, f.y, f.h, g_scroll, f.h,
-                   g_doc_height);
 }
 
 /* Which character a point is nearest. */
 static long index_at(int px, int py)
 {
     const struct ui_rect f = g_page->frame;
-    const int y = py - f.y + g_scroll;
+    const int y = py - f.y;
     if (g_lines == 0)
         return 0;
     int l = 0;
@@ -431,18 +429,28 @@ static void on_save(struct ui_view* v, void* u)
 
 /* --- keys and clicks ----------------------------------------------------------- */
 
+/* Keep the caret in view, and tell the scroll view how tall the document is.
+ *
+ * The page is laid out at its full height inside a ui_scroll, so this is the
+ * only thing left of what was an offset, a bar, a hit-test on the bar and four
+ * arrow keys of its own. */
 static void reveal_caret(void)
 {
-    if (g_page == 0 || g_lines == 0)
+    if (g_page == 0 || g_scroller == 0 || g_lines == 0)
         return;
+    g_page->want_h = g_doc_height + 20;
+    app_relayout(&g_app);
+
     const int l = line_of(g_caret);
     const int top = g_line[l].y, bottom = top + g_line[l].height;
-    if (top < g_scroll)
-        g_scroll = top;
-    else if (bottom > g_scroll + g_page->frame.h)
-        g_scroll = bottom - g_page->frame.h;
-    if (g_scroll < 0)
-        g_scroll = 0;
+    const int view = g_scroller->frame.h;
+    if (top < g_scroller->scroll)
+        g_scroller->scroll = top;
+    else if (bottom > g_scroller->scroll + view)
+        g_scroller->scroll = bottom - view;
+    if (g_scroller->scroll < 0)
+        g_scroller->scroll = 0;
+    app_relayout(&g_app);
 }
 
 static void delete_selection(void)
@@ -524,11 +532,6 @@ static int on_event(struct app* a, const struct win_event* e)
                        e->x < f.x + f.w && e->y < f.y + f.h;
 
     if (e->type == WIN_EVENT_MOUSE_DOWN && inside) {
-        if (e->x >= f.x + f.w - WG_SCROLL_W - 2) {
-            g_scroll = wg_scroll_hit_v(e->x, e->y, f.x + f.w - WG_SCROLL_W - 2,
-                                       f.y, f.h, g_scroll, f.h, g_doc_height);
-            return 1;
-        }
         g_caret = g_anchor = index_at(e->x, e->y);
         g_selecting = 1;
         g_typing = rtf_style_at(g_doc, g_caret, g_caret);
@@ -596,7 +599,8 @@ int main(int argc, char** argv)
     ui_spacer(bar);
     ui_grow(ui_size(ui_button(bar, "Save", on_save, 0), 64, 24), 0);
 
-    g_page = ui_grow(ui_custom(root, draw_page, 0), 1);
+    g_scroller = ui_scroll(root);
+    g_page = ui_custom(g_scroller, draw_page, 0);
 
     struct ui_view* foot = ui_box(root, UI_STACK_H, 6, 0);
     ui_grow(ui_size(foot, 0, 26), 0);
@@ -643,7 +647,6 @@ static int doc_load(struct app* a, const char* path)
     rtf_free(g_doc);
     g_doc = fresh;
     g_caret = g_anchor = 0;
-    g_scroll = 0;
     g_laid_for_width = -1;
     g_typing = rtf_style_at(g_doc, 0, 0);
     show_state();
@@ -662,7 +665,6 @@ static void doc_new(struct app* a)
     rtf_free(g_doc);
     g_doc = rtf_new();
     g_caret = g_anchor = 0;
-    g_scroll = 0;
     g_laid_for_width = -1;
     show_state();
 }

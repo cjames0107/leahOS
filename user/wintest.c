@@ -160,6 +160,8 @@ static int keys(int ms)
         while (win_poll(id, &e)) {
             if (e.type == WIN_EVENT_KEY && out != 0)
                 fprintf(out, "key %u mods %u\n", e.key, e.modifiers);
+            if (e.type == WIN_EVENT_SCROLL && out != 0)
+                fprintf(out, "wheel %d at %d,%d\n", (int)e.button, e.x, e.y);
         }
         msleep(10);
     }

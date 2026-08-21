@@ -192,6 +192,18 @@
  * an icon quietly vanishing. */
 #define WIN_EVENT_DROP       7
 
+/* The wheel was turned over this window.
+ *
+ * `x` and `y` are the pointer, in the window's own coordinates, as they are in
+ * every other pointer event - so a window with several scrolling views in it
+ * can tell which one was under the wheel. `button` carries how far it turned,
+ * in notches, positive downwards.
+ *
+ * Delivered to the window under the pointer rather than to the focused one,
+ * because scrolling is about what you are looking at and not about what you
+ * were last typing into. */
+#define WIN_EVENT_SCROLL     8
+
 /* The window has been resized. x and y carry the new content width and height;
  * the pixel buffer has already been replaced, so re-fetch it with win_map and
  * redraw everything - the new one starts blank. */

@@ -49,6 +49,8 @@
 #define KBD_ENABLE_SCANNING 0xF4
 #define MOUSE_SET_DEFAULTS  0xF6
 #define MOUSE_ENABLE        0xF4
+#define MOUSE_SET_SAMPLE_RATE 0xF3
+#define MOUSE_GET_DEVICE_ID 0xF2
 #define ACK                 0xFA
 
 #define POLL_LIMIT 100000
@@ -240,8 +242,17 @@ static void handle_scancode(unsigned char scancode)
 
 static int g_mx, g_my;
 static int g_max_x = 1023, g_max_y = 767;   /* until the framebuffer says */
-static unsigned char g_packet[3];
+/* Four bytes when the mouse has a wheel, three when it has not.
+ *
+ * A plain PS/2 mouse sends three and knows nothing about a fourth. The
+ * IntelliMouse extension adds one carrying the wheel, and it is asked for by
+ * the knock below: set the sample rate to 200, then 100, then 80, and read the
+ * device id. A mouse that understands answers 3; one that does not answers 0
+ * and keeps sending three-byte packets, which is why the length is remembered
+ * rather than assumed. */
+static unsigned char g_packet[4];
 static int g_index;
+static int g_packet_len = 3;
 
 static void handle_mouse_byte(unsigned char byte)
 {
@@ -254,7 +265,7 @@ static void handle_mouse_byte(unsigned char byte)
         return;
 
     g_packet[g_index++] = byte;
-    if (g_index < 3)
+    if (g_index < g_packet_len)
         return;
     g_index = 0;
 
@@ -281,8 +292,18 @@ static void handle_mouse_byte(unsigned char byte)
     if (g_mx > g_max_x) g_mx = g_max_x;
     if (g_my > g_max_y) g_my = g_max_y;
 
+    /* The wheel, when there is one. The low four bits are a signed count of
+     * detents since the last packet - almost always one - and the high bits
+     * are the fourth and fifth buttons, which nothing here uses. */
+    int wheel = 0;
+    if (g_packet_len == 4) {
+        wheel = (int)(signed char)(g_packet[3] & 0x0F);
+        if (wheel > 7)
+            wheel -= 16;            /* four bits, two's complement */
+    }
+
     __syscall(SYS_inputpost, 2, (long)g_mx, (long)g_my,
-              (long)(flags & 0x07), 0);
+              (long)(flags & 0x07), (long)wheel);
 }
 
 /* --- the shared drain -------------------------------------------------------- */
@@ -357,6 +378,22 @@ static int bring_up(void)
         drain_output();             /* not fatal; some emulated 8042s stay quiet */
 
     send_to_mouse(MOUSE_SET_DEFAULTS);
+
+    /* Ask for the wheel. The knock is a sequence of sample rates that means
+     * nothing to a mouse without one and switches on the fourth packet byte
+     * for a mouse with one; the device id afterwards says which happened. */
+    send_to_mouse(MOUSE_SET_SAMPLE_RATE); send_to_mouse(200);
+    send_to_mouse(MOUSE_SET_SAMPLE_RATE); send_to_mouse(100);
+    send_to_mouse(MOUSE_SET_SAMPLE_RATE); send_to_mouse(80);
+    /* The command is acknowledged and the id follows it, so the answer is the
+     * byte after the one send_to_mouse hands back. */
+    send_to_mouse(MOUSE_GET_DEVICE_ID);
+    const unsigned char id = read_data();
+    if (id == 3)
+        g_packet_len = 4;
+    printf("ps2d: mouse id %u, %d-byte packets%s\n", id, g_packet_len,
+           g_packet_len == 4 ? ", wheel" : ", no wheel");
+
     send_to_mouse(MOUSE_ENABLE);
     drain_output();
     return 0;

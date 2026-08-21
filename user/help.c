@@ -185,6 +185,10 @@ static void size_page(void)
     g_pane->want_h = g_lines * (wg_text_height() + 2) + 20;
     if (g_scroller != 0)
         g_scroller->scroll = 0;
+    /* Laid out again, because how tall the page is *is* the layout: without
+     * this the scroll view keeps the height of the page before it and a long
+     * manual entry opened after a short one has no bar at all. */
+    app_relayout(&g_app);
 }
 
 static void on_pick(struct ui_view* v, void* u)

@@ -759,7 +759,8 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
              * it this week. */
             mouse::set_state(static_cast<i32>(frame->rsi),
                              static_cast<i32>(frame->rdx),
-                             static_cast<u32>(frame->r10));
+                             static_cast<u32>(frame->r10),
+                             static_cast<i32>(frame->r8));
             break;
         default:
             frame->rax = static_cast<u64>(-1);
@@ -1017,10 +1018,11 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
 
     case InputPoll: {
         // Raw input, before the console cooks it: {mouse x, mouse y, buttons,
-        // key}. The key is 0 when nothing is waiting, so a server can poll this
-        // in its own loop without blocking on either device.
+        // key, modifiers, wheel}. The key is 0 when nothing is waiting, so a
+        // server can poll this in its own loop without blocking on either
+        // device.
         if (scheduler::current_uid() != 0 ||
-            !user_range_ok(frame->rdi, sizeof(i32) * 5)) {
+            !user_range_ok(frame->rdi, sizeof(i32) * 6)) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
@@ -1042,6 +1044,9 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
          * without this no field could be selected with the keyboard. */
         out[4] = static_cast<i32>(out[3] != 0 ? keyboard::last_modifiers()
                                               : keyboard::modifiers());
+        /* Taken rather than read: a wheel has no position, only turns since
+         * somebody last looked, and two readers must not both act on one. */
+        out[5] = mouse::take_wheel();
         frame->rax = 0;
         break;
     }

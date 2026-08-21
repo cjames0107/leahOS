@@ -43,6 +43,11 @@ static struct ui_view* g_dropped;
 static struct ui_view* g_dragging_text;
 /* The scroll view whose thumb is being dragged, if any. */
 static struct ui_view* g_scrolling;
+
+/* Declared here because layout needs them and they live with the scrollbars,
+ * which are further down with the drawing they belong to. */
+static int  content_w_of(const struct ui_view* v);
+static void draw_bar(const struct ui_view* v);
 /* Which channel of the colour mixer is being dragged, or -1. */
 static int g_channel = -1;
 static void colour_panel(const struct ui_view* v, int* x, int* y, int* w,
@@ -720,11 +725,14 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
             v->max = tall > into.h ? tall - into.h : 0;
             if (v->scroll > v->max) v->scroll = v->max;
             if (v->scroll < 0) v->scroll = 0;
-            v->rows = tall;             /* the content's height, for the bar */
             /* Room for the bar taken out of the width before the child is laid
              * out, so its contents stop short of it instead of being drawn
              * underneath it. */
-            int w = into.w - (v->max > 0 ? WG_SCROLL_W + 4 : 0);
+            /* The width the child gets, once the bar has taken its share.
+             * content_w_of asks the same question every other scrolling view
+             * asks, so a scroll view and a list reserve the same amount. */
+            v->rows = tall;
+            int w = content_w_of(v);
             if (w < 0) w = 0;
             struct ui_rect r = { into.x, into.y - v->scroll, w, tall };
             ui_layout(c, r);
@@ -904,6 +912,105 @@ static int caret_x(const char* text, int caret)
     memcpy(before, text, (unsigned)n);
     before[n] = '\0';
     return wg_text_width(before);
+}
+
+/* --- scrollbars, once ------------------------------------------------------
+ *
+ * Every kind of view that scrolls needs the same three things: a bar drawn
+ * when there is more than fits, its own width kept clear so that nothing is
+ * drawn underneath it, and a press on it understood. They were done in one
+ * place out of five - a list had a bar, and a table, a tree and an icon grid
+ * scrolled with no way to see how far or to say where to go - and the one that
+ * had it drew its rows the full width of the view, so a selected row ran under
+ * the bar and showed through it.
+ *
+ * `page` and `span` are in whatever unit that view scrolls in: rows for a
+ * list, rows of cells for an icon grid, pixels for a scroll view. The bar does
+ * not care which, as long as they are the same.
+ */
+#define UI_BAR_GAP 2
+
+static int list_rows_visible(const struct ui_view* v);
+
+static void scroll_extent(const struct ui_view* v, int* page, int* span)
+{
+    *page = 0;
+    *span = 0;
+    switch (v->kind) {
+    case UI_LIST:
+    case UI_SIDEBAR:
+        *page = list_rows_visible(v);
+        *span = v->rows;
+        break;
+    case UI_TABLE:
+        /* A heading takes the first row's worth, so a table shows one fewer. */
+        *page = v->row_h > 0 ? (v->frame.h - v->row_h) / v->row_h : 0;
+        *span = v->rows;
+        break;
+    case UI_TREE:
+        *page = v->row_h > 0 ? v->frame.h / v->row_h : 0;
+        *span = v->rows;
+        break;
+    case UI_ICONGRID: {
+        const int cols = v->cell_w > 0 ? v->frame.w / v->cell_w : 1;
+        *page = v->cell_h > 0 ? v->frame.h / v->cell_h : 0;
+        *span = cols > 0 ? (v->rows + cols - 1) / cols : 0;
+        break;
+    }
+    case UI_SCROLL:
+        *page = v->frame.h;
+        *span = v->rows;
+        break;
+    default:
+        break;
+    }
+}
+
+static int needs_bar(const struct ui_view* v)
+{
+    int page, span;
+    scroll_extent(v, &page, &span);
+    return page > 0 && span > page;
+}
+
+static int bar_x_of(const struct ui_view* v)
+{
+    return v->frame.x + v->frame.w - WG_SCROLL_W - UI_BAR_GAP;
+}
+
+/* How wide the content may be. The bar's width is taken out of it rather than
+ * drawn over it, which is the difference between a bar you can see and one
+ * with a row showing through it. */
+static int content_w_of(const struct ui_view* v)
+{
+    return needs_bar(v) ? v->frame.w - WG_SCROLL_W - UI_BAR_GAP * 2
+                        : v->frame.w;
+}
+
+static void draw_bar(const struct ui_view* v)
+{
+    if (!needs_bar(v))
+        return;
+    int page, span;
+    scroll_extent(v, &page, &span);
+    wg_scrollbar_v(bar_x_of(v), v->frame.y + UI_BAR_GAP,
+                   v->frame.h - UI_BAR_GAP * 2, v->scroll, page, span);
+}
+
+/* A press on the bar, if that is where it was. 1 when it was taken. */
+static int bar_press(struct ui_view* v, const struct win_event* e)
+{
+    if (!needs_bar(v) || e->x < bar_x_of(v))
+        return 0;
+    int page, span;
+    scroll_extent(v, &page, &span);
+    const int y = v->frame.y + UI_BAR_GAP, h = v->frame.h - UI_BAR_GAP * 2;
+    if (wg_scroll_on_thumb_v(e->y, y, h, v->scroll, page, span))
+        g_scrolling = v;
+    else
+        v->scroll = wg_scroll_hit_v(e->x, e->y, bar_x_of(v), y, h,
+                                    v->scroll, page, span);
+    return 1;
 }
 
 static int list_rows_visible(const struct ui_view* v)
@@ -1112,6 +1219,9 @@ int ui_event(struct ui_view* root, const struct win_event* e)
                 v->on = seg;
                 if (v->action) v->action(v, v->user);
             }
+        } else if (bar_press(v, e)) {
+            /* The bar first: a press on it is about where to look, not about
+             * whatever row happens to be beside it. */
         } else if (v->kind == UI_LIST || v->kind == UI_SIDEBAR) {
             const int row = v->scroll + (e->y - v->frame.y) / v->row_h;
             if (row >= 0 && row < v->rows) {
@@ -1210,21 +1320,6 @@ int ui_event(struct ui_view* root, const struct win_event* e)
                     ++at; ++c;
                 }
                 v->caret = at;
-            }
-        } else if (v->kind == UI_SCROLL) {
-            /* The bar is the only part of a scroll view that is its own: a
-             * press anywhere else belongs to whatever is inside it, and got
-             * there before this because children are hit first. */
-            const int bx = v->frame.x + v->frame.w - WG_SCROLL_W;
-            if (v->max > 0 && e->x >= bx) {
-                if (wg_scroll_on_thumb_v(e->y, v->frame.y, v->frame.h,
-                                         v->scroll, v->frame.h, v->rows))
-                    g_scrolling = v;
-                else
-                    v->scroll = wg_scroll_hit_v(e->x, e->y, bx, v->frame.y,
-                                                v->frame.h, v->scroll,
-                                                v->frame.h, v->rows);
-                ui_layout(v, v->frame);
             }
         } else if (v->kind == UI_SPLIT) {
             /* Only the divider itself: the panes are children and were hit
@@ -1342,17 +1437,49 @@ int ui_event(struct ui_view* root, const struct win_event* e)
         return 1;
     }
 
-    if (e->type == WIN_EVENT_MOUSE_MOVE && g_scrolling != 0) {
-        struct ui_view* v = g_scrolling;
-        const int to = wg_scroll_drag_v(e->y, v->frame.y, v->frame.h,
-                                        v->frame.h, v->rows);
+    if (e->type == WIN_EVENT_SCROLL) {
+        /* Whatever is under the pointer and can scroll. The innermost one is
+         * found first and the search walks outwards from it, so a list inside
+         * a scroll view scrolls the list and a page inside one scrolls the
+         * page - which is what being under the pointer means. */
+        struct ui_view* v = hit(root, e->x, e->y);
+        while (v != 0 && !needs_bar(v))
+            v = v->parent;
+        if (v == 0)
+            return 0;
+        int page, span;
+        scroll_extent(v, &page, &span);
+        /* Three rows a notch for a list, and a comfortable fraction of the
+         * view for anything measured in pixels. */
+        const int step = (v->kind == UI_SCROLL) ? 48 : 3;
+        int to = v->scroll + (int)e->button * step;
+        const int most = span > page ? span - page : 0;
+        if (to > most) to = most;
+        if (to < 0) to = 0;
         if (to == v->scroll)
             return 0;
         v->scroll = to;
-        /* Laid out again at once: the children's frames are what the next
-         * event is hit-tested against, and leaving them stale for a frame is
-         * how a drag comes out a step behind the pointer. */
-        ui_layout(v, v->frame);
+        if (v->kind == UI_SCROLL)
+            ui_layout(v, v->frame);
+        return 1;
+    }
+
+    if (e->type == WIN_EVENT_MOUSE_MOVE && g_scrolling != 0) {
+        struct ui_view* v = g_scrolling;
+        int page, span;
+        scroll_extent(v, &page, &span);
+        const int to = wg_scroll_drag_v(e->y, v->frame.y + UI_BAR_GAP,
+                                        v->frame.h - UI_BAR_GAP * 2,
+                                        page, span);
+        if (to == v->scroll)
+            return 0;
+        v->scroll = to;
+        /* A scroll view's children are positioned from the offset, so they are
+         * laid out again at once: their frames are what the next event is
+         * hit-tested against, and leaving them stale for a frame is how a drag
+         * comes out a step behind the pointer. */
+        if (v->kind == UI_SCROLL)
+            ui_layout(v, v->frame);
         return 1;
     }
 
@@ -1616,17 +1743,16 @@ static void draw_list(struct ui_view* v)
         if (row >= v->rows)
             break;
         const int y = v->frame.y + i * v->row_h;
+        const int w = content_w_of(v);
         if (row == v->selected)
-            wg_row_select(v->frame.x + 4, y, v->frame.w - 8, v->row_h - 2);
+            wg_row_select(v->frame.x + 4, y, w - 8, v->row_h - 2);
         const char* text = v->row_text != 0 ? v->row_text(v->user, row) : "";
         wg_text_clipped(v->frame.x + 12, y + 4, text != 0 ? text : "",
-                        wg_ink_colour(), v->frame.w - 20);
+                        wg_ink_colour(), w - 20);
     }
     /* Only when there is more than fits: a bar against a short list is chrome
      * that says nothing. */
-    if (v->rows > page)
-        wg_scrollbar_v(v->frame.x + v->frame.w - WG_SCROLL_W - 2, v->frame.y,
-                       v->frame.h, v->scroll, page, v->rows);
+    draw_bar(v);
 }
 
 void ui_draw(struct ui_view* v)
@@ -1714,9 +1840,10 @@ void ui_draw(struct ui_view* v)
          * it stops working the moment the chrome is a sibling in this tree
          * rather than something drawn last by hand. */
         if (v->draw != 0) {
+            const struct wg_clip_rect was = wg_clip_save();
             wg_clip(f.x, f.y, f.w, f.h);
             v->draw(v, v->user);
-            wg_clip_none();
+            wg_clip_restore(was);
         }
         break;
 
@@ -1999,6 +2126,7 @@ void ui_draw(struct ui_view* v)
 
     case UI_TABLE: {
         content_surface(&f);
+        draw_bar(v);
         /* The headings, then a rule, then the rows - and the columns are laid
          * out from the declared widths in both, so a cell cannot land under
          * the wrong heading. */
@@ -2030,6 +2158,7 @@ void ui_draw(struct ui_view* v)
 
     case UI_TREE: {
         content_surface(&f);
+        draw_bar(v);
         const int page = f.h / v->row_h;
         for (int i = 0; i < page; ++i) {
             const int row = v->scroll + i;
@@ -2059,7 +2188,8 @@ void ui_draw(struct ui_view* v)
 
     case UI_ICONGRID: {
         content_surface(&f);
-        const int cols = f.w / (v->cell_w > 0 ? v->cell_w : 1);
+        draw_bar(v);
+        const int cols = content_w_of(v) / (v->cell_w > 0 ? v->cell_w : 1);
         for (int i = 0; i < v->rows && cols > 0; ++i) {
             const int col = i % cols, row = i / cols - v->scroll;
             if (row < 0)
@@ -2119,9 +2249,7 @@ void ui_draw(struct ui_view* v)
         /* The child is drawn by the walk below; this draws the bar beside it.
          * Drawn before the children rather than after, so the clip that holds
          * them in does not also hold this out. */
-        if (v->max > 0)
-            wg_scrollbar_v(f.x + f.w - WG_SCROLL_W, f.y, f.h, v->scroll,
-                           f.h, v->rows);
+        draw_bar(v);
         break;
 
     case UI_SPLIT: {
@@ -2169,13 +2297,16 @@ void ui_draw(struct ui_view* v)
      * whatever the scroll view happens to sit next to. This is the whole
      * difference between a scroll view and a view that has been moved. */
     const int clipping = (v->kind == UI_SCROLL);
-    if (clipping)
+    struct wg_clip_rect was = { 0, 0, 0, 0 };
+    if (clipping) {
+        was = wg_clip_save();
         wg_clip(f.x, f.y, f.w, f.h);
+    }
     for (struct ui_view* c = v->child; c != 0; c = c->next)
         if (c->kind != UI_POPOVER)
             ui_draw(c);
     if (clipping)
-        wg_clip_none();
+        wg_clip_restore(was);
 
     /* The open drop-down is not drawn here.
      *

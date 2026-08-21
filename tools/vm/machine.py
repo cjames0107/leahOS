@@ -42,8 +42,8 @@ def _paths():
     n = _next_id[0]
     _next_id[0] += 1
     if n == 0:
-        return SOCK, LOG
-    return ("%s.%d" % (SOCK, n), "%s.%d" % (LOG, n))
+        return SOCK, LOG, SOCK + ".qmp"
+    return ("%s.%d" % (SOCK, n), "%s.%d" % (LOG, n), "%s.qmp.%d" % (SOCK, n))
 
 KEYMAP = {
     ' ': 'spc', '\n': 'ret', '.': 'dot', '/': 'slash', '-': 'minus',
@@ -61,8 +61,8 @@ KEYMAP = {
 
 class Machine:
     def __init__(self, cpus=1, mem="512M"):
-        self.sock, self.log = _paths()
-        for p in (self.sock, self.log):
+        self.sock, self.log, self.qmp_path = _paths()
+        for p in (self.sock, self.log, self.qmp_path):
             if os.path.exists(p):
                 os.remove(p)
         # The machine comes from the Makefile, not from a copy kept here.
@@ -91,6 +91,13 @@ class Machine:
             "-display", "none",
             "-serial", f"file:{self.log}",
             "-monitor", f"unix:{self.sock},server,nowait",
+            # A second monitor, speaking QMP.
+            #
+            # The human monitor cannot send a scroll wheel: its mouse_button
+            # takes 1, 2 and 4 for the three buttons and has no bits for a
+            # wheel, and input_send_event is not one of its commands. QMP has
+            # input-send-event, which does.
+            "-qmp", f"unix:{self.qmp_path},server,nowait",
         ], cwd=ROOT)     # the Makefile names its images relatively
         for _ in range(200):
             if os.path.exists(self.sock):
@@ -150,6 +157,46 @@ class Machine:
         for _ in (range(2) if double else range(1)):
             self.cmd("mouse_button 1", 0.06)
             self.cmd("mouse_button 0", 0.12)
+
+    def _qmp(self, command, arguments=None):
+        """One QMP command, with the capabilities handshake done on demand."""
+        import json
+        if getattr(self, "qmp", None) is None:
+            self.qmp = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            for _ in range(100):
+                try:
+                    self.qmp.connect(self.qmp_path)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            self.qmp.recv(65536)                    # the greeting
+            self.qmp.sendall(b'{"execute":"qmp_capabilities"}\n')
+            self.qmp.recv(65536)                    # its answer
+        message = {"execute": command}
+        if arguments is not None:
+            message["arguments"] = arguments
+        self.qmp.sendall((json.dumps(message) + "\n").encode())
+        time.sleep(0.05)
+        try:
+            return self.qmp.recv(65536)
+        except OSError:
+            return b""
+
+    def wheel(self, x, y, notches):
+        """Turn the wheel over a point. Positive is downwards.
+
+        QEMU sends a wheel as buttons 8 (up) and 16 (down) in the same
+        mouse_button mask the physical buttons use, which is how a PS/2 mouse
+        with the IntelliMouse extension reports it."""
+        self.move_to(x, y)
+        time.sleep(0.15)
+        button = "wheel-down" if notches > 0 else "wheel-up"
+        for _ in range(abs(notches)):
+            self._qmp("input-send-event", {"events": [
+                {"type": "btn", "data": {"down": True,  "button": button}},
+                {"type": "btn", "data": {"down": False, "button": button}},
+            ]})
+            time.sleep(0.08)
 
     def shot(self, name):
         ppm = f"/tmp/{name}.ppm"
@@ -261,10 +308,11 @@ class Machine:
             self.proc.wait(timeout=15)
         except Exception:
             pass
-        try:
-            os.remove(self.sock)
-        except OSError:
-            pass
+        for p in (self.sock, self.qmp_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
 
 
 # --- what a test is made of --------------------------------------------------

@@ -27,7 +27,13 @@ struct input_state {
     int32_t mouse_y;
     int32_t buttons;            /* 1 left, 2 right, 4 middle */
     int32_t key;                /* one character, or 0 when nothing is waiting */
-    int32_t modifiers;          /* MOD_SHIFT, MOD_CTRL - held now, for clicks */
+    int32_t modifiers;          /* MOD_SHIFT, MOD_CTRL - held with the key */
+    /* Notches of the wheel since this was last called, positive downwards.
+     *
+     * Taken rather than reported: a wheel has no position, so what a reader
+     * wants is how far it has been turned since it last looked - and reading
+     * it clears it, so two readers cannot both act on one turn. */
+    int32_t wheel;
 };
 
 #define MOD_SHIFT 1

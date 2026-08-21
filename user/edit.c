@@ -33,11 +33,12 @@ static int  g_caret;            /* byte offset of the insertion point */
 static int  g_anchor = -1;
 static int  g_hcol;             /* first visible column, for wide lines */
 static int  g_dirty;
-static int  g_scroll;           /* first visible line */
 static char g_file[256];
 static char g_status[128] = "";
 /* Where the text is drawn, handed over by the layout. */
 static struct ui_rect g_area;
+static struct ui_view* g_scroller;
+static struct ui_view* g_text_view;
 
 /* Where each line begins. Recomputed after every edit; see the header comment. */
 static int g_line_start[MAX_LINES];
@@ -159,10 +160,6 @@ static void backspace(void)
     relines();
 }
 
-static int text_rows(void)
-{
-    return g_area.h / WG_GLYPH_H;
-}
 
 
 /* The selection, low offset first, or 0 length when there is none. */
@@ -208,7 +205,7 @@ static int column_x(int line, int col)
 /* Where in the text a point in the window lands. */
 static int offset_at(int x, int y)
 {
-    int line = g_scroll + (y - TOOLBAR_H - 4) / WG_GLYPH_H;
+    int line = (y - g_area.y - 4) / WG_GLYPH_H;
     if (line < 0) line = 0;
     if (line >= g_lines) line = g_lines - 1;
 
@@ -274,12 +271,20 @@ static void paste(void)
 static void follow_caret(void)
 {
     const int line = line_of(g_caret);
-    if (line < g_scroll)
-        g_scroll = line;
-    else if (line >= g_scroll + text_rows())
-        g_scroll = line - text_rows() + 1;
-    if (g_scroll < 0)
-        g_scroll = 0;
+    if (g_scroller == 0 || g_text_view == 0)
+        return;
+    g_text_view->want_h = g_lines * WG_GLYPH_H + 12;
+    app_relayout(&g_app);
+
+    const int top = line * WG_GLYPH_H;
+    const int view = g_scroller->frame.h;
+    if (top < g_scroller->scroll)
+        g_scroller->scroll = top;
+    else if (top + WG_GLYPH_H > g_scroller->scroll + view)
+        g_scroller->scroll = top + WG_GLYPH_H - view;
+    if (g_scroller->scroll < 0)
+        g_scroller->scroll = 0;
+    app_relayout(&g_app);
 }
 
 static void draw_text(struct ui_view* view, void* user)
@@ -291,14 +296,13 @@ static void draw_text(struct ui_view* view, void* user)
     const int h = g_area.h;
     wg_fill(g_area.x, top, g_area.w, h, wg_body_colour());
 
-    const int rows = text_rows();
     const int caret_line = line_of(g_caret);
-    for (int r = 0; r < rows; ++r) {
-        const int line = g_scroll + r;
-        if (line >= g_lines)
-            break;
+    /* Every line, at where that line is. The scroll view clips what does not
+     * fit and moves the frame; this was a window of `rows` lines starting at
+     * an offset, with its own bar and its own keys. */
+    for (int line = 0; line < g_lines; ++line) {
         const int begin = g_line_start[line], end = line_end(line);
-        const int y = top + 4 + r * WG_GLYPH_H;
+        const int y = top + 4 + line * WG_GLYPH_H;
 
         /* Highlight first, so the glyphs sit on top of it. */
         int from, to;
@@ -325,9 +329,6 @@ static void draw_text(struct ui_view* view, void* user)
         }
     }
 
-    /* The bars sit inside the sunken well, along its right and bottom edges. */
-    wg_scrollbar_v(g_area.x + g_area.w - WG_SCROLL_W, top, h,
-                   g_scroll, rows, g_lines);
 }
 
 static const char* const kMenu[] = { "Copy", "Cut", "Paste", "Select all" };
@@ -379,12 +380,6 @@ static int on_event(struct app* a, const struct win_event* event)
     if (event->type == WIN_EVENT_MOUSE_DOWN) {
         if (event->y < g_area.y || event->y >= g_area.y + g_area.h)
             return 0;                   /* the toolbar's, not the text's */
-        if (event->x >= g_area.x + g_area.w - WG_SCROLL_W) {
-            g_scroll = wg_scroll_hit_v(event->x, event->y,
-                g_area.x + g_area.w - WG_SCROLL_W, g_area.y, g_area.h,
-                g_scroll, text_rows(), g_lines);
-            return 1;
-        }
         /* A click starts a selection; the drag extends it. */
         g_caret = offset_at(event->x, event->y);
         g_anchor = g_caret;
@@ -466,8 +461,17 @@ static int on_event(struct app* a, const struct win_event* event)
 
 int main(int argc, char** argv)
 {
-    if (argc > 1 && argv[1][0] != '\0' && argv[1][0] != '-')
-        load(argv[1]);
+    /* The first argument that is not a number, which is how every other
+     * application here finds the thing it was asked to open: the position
+     * comes first and a document after it, so taking argv[1] meant Edit was
+     * the one application that could be given a file or a place to be but
+     * never both. */
+    for (int i = 1; i < argc; ++i)
+        if (argv[i][0] != '\0' && argv[i][0] != '-' &&
+            (argv[i][0] < '0' || argv[i][0] > '9')) {
+            load(argv[i]);
+            break;
+        }
     else
         relines();
 
@@ -480,7 +484,8 @@ int main(int argc, char** argv)
     g_title = ui_label(bar, "");
     ui_grow(g_title, 1);
 
-    ui_custom(root, draw_text, 0);
+    g_scroller = ui_scroll(root);
+    g_text_view = ui_custom(g_scroller, draw_text, 0);
     g_where = ui_label(root, "");
     ui_grow(g_where, 0);
     sync_labels();

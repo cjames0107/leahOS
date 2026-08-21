@@ -595,6 +595,8 @@ static void bookmark(void)
 
 /* The page's room, handed over by the layout. */
 static struct ui_rect g_page;
+static struct ui_view* g_page_view;
+static struct ui_view* g_scroller;
 static int content_x(void) { return g_page.x; }
 static int content_w(void) { return g_page.w - WG_SCROLL_W - 8; }
 
@@ -606,7 +608,7 @@ static int flow(int draw_it)
     struct tab* t = cur();
     const int x0 = content_x() + 16;
     const int wide = content_w() - 24;
-    int x = x0, y = g_page.y + 12 - t->scroll;
+    int x = x0, y = g_page.y + 12;
     int line_h = WG_GLYPH_H + 4;
 
     for (int i = 0; i < t->links_n; ++i)
@@ -631,7 +633,9 @@ static int flow(int draw_it)
         if (r->br && x > x0) { x = x0; y += line_h; }
         if (r->heading && x > x0) { x = x0; y += line_h; }
         if (r->item) {
-            if (draw_it && y > g_page.y - line_h && y < g_page.y + g_page.h)
+            if (draw_it && g_scroller != 0 &&
+                y > g_scroller->frame.y - line_h &&
+                y < g_scroller->frame.y + g_scroller->frame.h)
                 wg_text(x0 - 10, y, "-", WG_DIM);
         }
 
@@ -650,7 +654,8 @@ static int flow(int draw_it)
             const int ww = wg_styled_width(word, (int)n, px, style);
             if (x + ww > x0 + wide && x > x0) { x = x0; y += line_h; }
 
-            if (draw_it && y > g_page.y - line_h && y < g_page.y + g_page.h) {
+            const struct ui_rect seen = g_scroller != 0 ? g_scroller->frame : g_page;
+            if (draw_it && y > seen.y - line_h && y < seen.y + seen.h) {
                 /* Underlined, because colour alone is not a link on a theme
                  * whose accent happens to be close to the ink. */
                 const unsigned how = style |
@@ -668,7 +673,7 @@ static int flow(int draw_it)
             at = wend + 1;
         }
     }
-    return y + t->scroll + 40;      /* the document's height */
+    return y - g_page.y + 40;       /* the document's height */
 }
 
 /* --- the interface ---------------------------------------------------------
@@ -736,12 +741,19 @@ static void draw_page(struct ui_view* v, void* user)
 {
     (void)user;
     g_page = v->frame;
-    flow(1);
+    /* Where this tab is looking, taken from the scroll view. Each tab keeps
+     * its own place - going back to a tab and finding it at the top is a tab
+     * that did not remember anything - so the offset lives on the tab and the
+     * scroll view is told it when the tab is chosen. */
     struct tab* t = cur();
+    if (g_scroller != 0)
+        t->scroll = g_scroller->scroll;
+    flow(1);
     const int height = flow(0);
-    if (height > g_page.h)
-        wg_scrollbar_v(g_page.x + g_page.w - WG_SCROLL_W, g_page.y, g_page.h,
-                       t->scroll, g_page.h, height);
+    if (g_page_view != 0 && g_page_view->want_h != height) {
+        g_page_view->want_h = height;
+        app_relayout(&g_app);
+    }
 }
 
 static void on_tab(struct ui_view* v, void* user)
@@ -754,6 +766,10 @@ static void on_tab(struct ui_view* v, void* user)
         if (seen == v->on) { g_cur = i; break; }
         ++seen;
     }
+    /* The scroll view is shared by every tab, so choosing one puts it back
+     * where that tab was looking. */
+    if (g_scroller != 0)
+        g_scroller->scroll = cur()->scroll;
     sync_chrome();
 }
 
@@ -815,12 +831,7 @@ static int on_event(struct app* a, const struct win_event* e)
         }
         return 0;
     }
-    if (e->type == WIN_EVENT_KEY) {
-        if (e->key == WIN_KEY_DOWN)       t->scroll += 40;
-        else if (e->key == WIN_KEY_UP)    t->scroll = t->scroll > 40 ? t->scroll - 40 : 0;
-        else return 0;
-        return 1;
-    }
+
     return 0;
 }
 
@@ -869,7 +880,8 @@ int main(int argc, char** argv)
     ui_on(g_sidelist, on_side, 0);
     ui_size(g_sidelist, SIDE_W, 0);
     g_sidelist->flags |= UI_HIDDEN;
-    ui_custom(body, draw_page, 0);
+    g_scroller = ui_scroll(body);
+    g_page_view = ui_custom(g_scroller, draw_page, 0);
 
     g_status = ui_label(root, "");
     ui_grow(g_status, 0);

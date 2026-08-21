@@ -1630,6 +1630,20 @@ static void handle_input(void)
         return;
 
     g_mods = (uint32_t)in.modifiers;
+
+    /* The wheel goes to the window under the pointer, not to the focused one:
+     * scrolling is about what is being looked at, and having to click a window
+     * before it will scroll is a thing people notice. */
+    if (in.wheel != 0) {
+        const int over = window_at(in.mouse_x, in.mouse_y);
+        if (over >= 0) {
+            struct ws_window* w = win(over);
+            push_event(over, WIN_EVENT_SCROLL,
+                       in.mouse_x - w->x - BORDER,
+                       in.mouse_y - w->y - content_offset(over),
+                       (uint32_t)in.wheel, 0);
+        }
+    }
     const int before_x = g_cursor_x, before_y = g_cursor_y;
 
     int x = in.mouse_x, y = in.mouse_y;

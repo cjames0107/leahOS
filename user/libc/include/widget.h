@@ -43,8 +43,21 @@
  * in window coordinates without checking whether it fits. */
 /* Where drawing may land, in window coordinates. Set it around a view that
  * draws past its own edges - a list with a pixel scroll, a canvas - so that
- * what spills goes nowhere instead of onto the chrome. wg_clip_none puts it
- * back to the whole window, which is also where wg_target leaves it. */
+ * what spills goes nowhere instead of onto the chrome.
+ *
+ * Clips nest, so wg_clip narrows the one already in force rather than
+ * replacing it: a canvas inside a scrolling pane is bounded by both, and the
+ * inner one asking for more than the outer allows does not get it.
+ *
+ * They also have to be put back rather than cleared. A nested clip that ends
+ * with wg_clip_none has not restored anything - it has removed the clip its
+ * parent was relying on, and everything drawn after it escapes. Save what was
+ * there and restore it. */
+struct wg_clip_rect { int x, y, w, h; };
+
+struct wg_clip_rect wg_clip_save(void);
+void wg_clip_restore(struct wg_clip_rect was);
+
 void wg_clip(int x, int y, int w, int h);
 void wg_clip_none(void);
 

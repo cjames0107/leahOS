@@ -79,9 +79,31 @@ static struct font* face(void)
  * needs, and a stack is a thing to get wrong in a drawing loop. */
 static int g_cx, g_cy, g_cw, g_ch;
 
+struct wg_clip_rect wg_clip_save(void)
+{
+    struct wg_clip_rect was = { g_cx, g_cy, g_cw, g_ch };
+    return was;
+}
+
+void wg_clip_restore(struct wg_clip_rect was)
+{
+    g_cx = was.x; g_cy = was.y; g_cw = was.w; g_ch = was.h;
+}
+
 void wg_clip(int x, int y, int w, int h)
 {
-    g_cx = x; g_cy = y; g_cw = w; g_ch = h;
+    /* Narrowed against what is already in force, never widened. A pane inside
+     * a scrolling pane is bounded by both of them, and the inner one asking
+     * for more than the outer allows was how content drew over the chrome
+     * above it. */
+    const int x0 = x > g_cx ? x : g_cx;
+    const int y0 = y > g_cy ? y : g_cy;
+    const int x1 = (x + w) < (g_cx + g_cw) ? (x + w) : (g_cx + g_cw);
+    const int y1 = (y + h) < (g_cy + g_ch) ? (y + h) : (g_cy + g_ch);
+    g_cx = x0;
+    g_cy = y0;
+    g_cw = x1 > x0 ? x1 - x0 : 0;
+    g_ch = y1 > y0 ? y1 - y0 : 0;
 }
 
 void wg_clip_none(void)
