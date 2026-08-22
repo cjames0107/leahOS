@@ -361,16 +361,14 @@ static void build_general(struct ui_view* page)
     getcwd(cwd, sizeof(cwd));
 
     struct ui_view* g = ui_group(page, "Account", UI_STACK_V, 12, 2);
-    ui_grow(g, 0);
-    ui_size(g, 0, 3 * 24 + 28);
+    ui_fit(g);
     kv(g, "User", name);
     snprintf(line, sizeof(line), "%u", getuid());
     kv(g, "User ID", line);
     kv(g, "Directory", cwd);
 
     struct ui_view* c = ui_group(page, "This Computer", UI_STACK_V, 12, 2);
-    ui_grow(c, 0);
-    ui_size(c, 0, 3 * 24 + 28);
+    ui_fit(c);
 
     struct fb_info fb;
     if (fb_info(&fb) == 0)
@@ -457,8 +455,7 @@ static void on_clear_paper(struct ui_view* v, void* user)
 static void build_appearance(struct ui_view* page)
 {
     struct ui_view* t = ui_group(page, "Theme", UI_STACK_V, 12, 4);
-    ui_grow(t, 0);
-    ui_size(t, 0, 2 * 30 + 28);
+    ui_fit(t);
 
     struct ui_view* r = row(t, "Appearance");
     struct ui_view* seg = ui_segmented(r, mode_name, PRESETS, 0);
@@ -475,8 +472,7 @@ static void build_appearance(struct ui_view* page)
     ui_on(seg, on_backdrop, 0);
 
     struct ui_view* d = ui_group(page, "Desktop", UI_STACK_V, 12, 4);
-    ui_grow(d, 0);
-    ui_size(d, 0, 2 * 30 + 28);
+    ui_fit(d);
 
     r = row(d, "Text Size");
     seg = ui_segmented(r, size_name, 2, 0);
@@ -551,8 +547,7 @@ static void build_sound(struct ui_view* page)
     }
 
     struct ui_view* g = ui_group(page, "Output", UI_STACK_V, 12, 6);
-    ui_grow(g, 0);
-    ui_size(g, 0, 3 * 30 + 28);
+    ui_fit(g);
 
     struct ui_view* r = ui_box(g, UI_STACK_H, 0, 10);
     ui_size(r, 0, 24);
@@ -575,8 +570,7 @@ static void build_sound(struct ui_view* page)
     snprintf(f, sizeof(f), "%u Hz, %u channels, 16-bit", g_audio.rate,
              g_audio.channels);
     struct ui_view* d = ui_group(page, "Format", UI_STACK_V, 12, 2);
-    ui_grow(d, 0);
-    ui_size(d, 0, 24 + 28);
+    ui_fit(d);
     kv(d, "Stream", f);
 
     ui_grow(ui_label(page,
@@ -598,8 +592,7 @@ static void build_network(struct ui_view* page)
         return;
     }
     struct ui_view* g = ui_group(page, "Interface", UI_STACK_V, 12, 2);
-    ui_grow(g, 0);
-    ui_size(g, 0, 4 * 24 + 28);
+    ui_fit(g);
 
     snprintf(line, sizeof(line), "%u.%u.%u.%u", (ni.ip >> 24) & 0xFF,
              (ni.ip >> 16) & 0xFF, (ni.ip >> 8) & 0xFF, ni.ip & 0xFF);
@@ -680,8 +673,7 @@ static void on_shared(struct ui_view* v, void* user)
 static void build_users(struct ui_view* page)
 {
     struct ui_view* g = ui_group(page, "Account", UI_STACK_V, 12, 6);
-    ui_grow(g, 0);
-    ui_size(g, 0, 3 * 30 + 28);
+    ui_fit(g);
 
     struct ui_view* r = ui_box(g, UI_STACK_H, 0, 10);
     ui_size(r, 0, 24);
@@ -707,8 +699,7 @@ static void build_users(struct ui_view* page)
     ui_spacer(r);
 
     struct ui_view* p = ui_group(page, "Home Directory", UI_STACK_V, 12, 6);
-    ui_grow(p, 0);
-    ui_size(p, 0, 2 * 30 + 28);
+    ui_fit(p);
     ui_grow(ui_label(p, "who may look inside it"), 0);
     r = ui_box(p, UI_STACK_H, 0, 10);
     ui_size(r, 0, 26);
@@ -729,8 +720,7 @@ static void build_users(struct ui_view* page)
 static void build_about(struct ui_view* page)
 {
     struct ui_view* g = ui_group(page, "leahOS", UI_STACK_V, 12, 2);
-    ui_grow(g, 0);
-    ui_size(g, 0, 7 * 24 + 28);
+    ui_fit(g);
     kv(g, "Kind", "a UNIX-like system for x86-64");
     kv(g, "Built", "from scratch: no third-party bootloader, no libc");
     kv(g, "Kernel", "NASM and C++23, higher half at -2 GiB");

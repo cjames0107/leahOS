@@ -151,6 +151,28 @@ class Machine:
             at_x += dx
             at_y += dy
 
+    def drag(self, from_x, from_y, to_x, to_y, steps=8, hold=None):
+        """Press at one point, walk to another, and let go.
+
+        The moves are relative - that is what the monitor's mouse_move is, and
+        passing it a destination sends the pointer somewhere else entirely -
+        so the walk is done in steps from where the press happened. `hold` is
+        called part way through, with the button still down, for anything that
+        wants to see what is happening rather than what it ended as."""
+        self.move_to(from_x, from_y)
+        time.sleep(0.15)
+        self.cmd("mouse_button 1", 0.12)
+        at_x, at_y = from_x, from_y
+        for i in range(1, steps + 1):
+            want_x = from_x + (to_x - from_x) * i // steps
+            want_y = from_y + (to_y - from_y) * i // steps
+            self.cmd("mouse_move %d %d" % (want_x - at_x, want_y - at_y), 0.12)
+            at_x, at_y = want_x, want_y
+            if hold is not None and i == steps // 2:
+                hold()
+        time.sleep(0.15)
+        self.cmd("mouse_button 0", 0.12)
+
     def click(self, x, y, double=False):
         self.move_to(x, y)
         time.sleep(0.15)

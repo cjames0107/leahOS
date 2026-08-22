@@ -34,6 +34,7 @@ void app_quit(struct app* a, int status)
 }
 
 static void paint(struct app* a);
+static int  back_buffer(struct app* a);
 
 void app_redraw(struct app* a)
 {
@@ -46,8 +47,8 @@ static int resized(struct app* a, int w, int h)
 {
     a->w = (unsigned)w;
     a->h = (unsigned)h;
-    a->px = win_map(a->id);
-    if (a->px == 0)
+    a->shown = win_map(a->id);
+    if (a->shown == 0 || !back_buffer(a))
         return -1;
     wg_target(a->px, a->w, a->h);
     /* The components are laid out against the window, so a new window size is
@@ -60,8 +61,29 @@ static int resized(struct app* a, int w, int h)
 
 /* Paint: the application's own background if it has one, then its components
  * over the top. */
+/* Room to draw a frame in, kept the size of the window. */
+static int back_buffer(struct app* a)
+{
+    const unsigned long want = (unsigned long)a->w * a->h * 4;
+    if (want == 0)
+        return 0;
+    static unsigned long have;
+    if (a->px != 0 && have >= want)
+        return 1;
+    uint32_t* fresh = (uint32_t*)malloc(want);
+    if (fresh == 0)
+        return 0;
+    memset(fresh, 0, want);
+    free(a->px);
+    a->px = fresh;
+    have = want;
+    return 1;
+}
+
 static void paint(struct app* a)
 {
+    if (a->px == 0 || a->shown == 0)
+        return;
     if (a->draw != 0)
         a->draw(a);
     else {
@@ -73,6 +95,19 @@ static void paint(struct app* a)
     if (a->overlay != 0)
         a->overlay(a);
     menu_draw();
+    /* The finished frame, a row at a time. Everything above drew into memory
+     * the compositor cannot see, so what it sees is only ever a whole frame.
+     *
+     * Row by row rather than in one go because the window's own buffer has
+     * room to spare - it is allocated wider than the window so that a resize
+     * need not replace it - and the rows of a buffer with slack in it are
+     * further apart than the pixels it is showing. */
+    const struct ws_window* w = ws_slot(a->id);
+    const unsigned stride = (w != 0 && w->stride != 0) ? w->stride : a->w;
+    for (unsigned row = 0; row < a->h; ++row)
+        memcpy(&a->shown[(unsigned long)row * stride],
+               &a->px[(unsigned long)row * a->w],
+               (unsigned long)a->w * 4);
     win_present(a->id);
 
     /* Then the sheet, into its own buffer. The toolkit draws wherever it was
@@ -911,8 +946,8 @@ int app_run(struct app* a, int argc, char** argv)
 
     a->w = a->width;
     a->h = a->height;
-    a->px = win_map(a->id);
-    if (a->px == 0)
+    a->shown = win_map(a->id);
+    if (a->shown == 0 || !back_buffer(a))
         return 1;
     wg_target(a->px, a->w, a->h);
 

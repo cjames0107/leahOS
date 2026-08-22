@@ -14,6 +14,7 @@
 #include <termios.h>
 #include <shm.h>
 #include <clipboard.h>
+#include <widget.h>
 #include <rtf.h>
 #include <textedit.h>
 #include <stdio.h>
@@ -2027,6 +2028,30 @@ static int is_directory(const char* path)
     return stat(path, &info) == 0 && info.st_type == S_IFDIR;
 }
 
+/* What a line of text actually measures.
+ *
+ * Almost every piece of layout in this system reserves WG_GLYPH_H - sixteen,
+ * the height of a cell in the console font - for one line. The interface is
+ * not drawn in the console font, so whether that is enough is a question with
+ * an answer, and until now nobody had asked it.
+ */
+static void test_text_metrics(void)
+{
+    section("text metrics");
+    if (wg_font() != 0) {
+        check("the font loads", 0);
+        return;
+    }
+    printf("       size %d, line height %d, WG_GLYPH_H %d\n",
+           wg_text_size(), wg_text_height(), WG_GLYPH_H);
+    check("a line fits in the height reserved for one",
+          wg_text_height() <= WG_GLYPH_H);
+    /* Descenders are the part that hangs below, and the part that gets clipped
+     * when a box is drawn exactly one line tall. */
+    check("a descender fits too",
+          wg_text_width("g") > 0 && wg_text_height() >= wg_text_size());
+}
+
 /* The text engine: a caret, a selection, the clipboard and undo.
  *
  * Checked here rather than by typing into a window, because what makes undo
@@ -3637,6 +3662,7 @@ int main(void)
     test_shell();
     test_rtf();
     test_textedit();
+    test_text_metrics();
     printf("\n%d failure(s)\n", g_failures);
 
     /* And to the serial console, which is readable from outside the machine.

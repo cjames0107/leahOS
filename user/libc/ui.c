@@ -7,9 +7,9 @@
  */
 
 #include <ui.h>
-#include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* An icon is 32x32 here as it is everywhere else; named rather than
@@ -617,6 +617,16 @@ void ui_popover_show(struct ui_view* v, int shown)
         if (g_popover == v)
             g_popover = 0;
     }
+    /* Laid out now that it is showing. A hidden popover is skipped by layout -
+     * it takes none of the room and is placed against its anchor rather than
+     * stacked - so its children have no frames at all until this, and the
+     * first frame after it opened drew them wherever they last happened to
+     * be. */
+    struct ui_view* root = v;
+    while (root->parent != 0)
+        root = root->parent;
+    if (root->frame.w > 0)
+        ui_layout(root, root->frame);
 }
 
 struct ui_view* ui_browser(struct ui_view* parent, int columns,
@@ -674,6 +684,216 @@ const char* ui_text(const struct ui_view* v) { return v != 0 ? v->text : ""; }
 void ui_set_text(struct ui_view* v, const char* text) { if (v) set_text(v, text); }
 struct ui_view* ui_focused(void) { return g_focus; }
 void ui_focus(struct ui_view* v) { g_focus = v; }
+
+/* --- a row that folds ------------------------------------------------------- */
+
+/* Take a view out of whichever list it is in. */
+static void unlink_view(struct ui_view* v)
+{
+    struct ui_view* parent = v->parent;
+    if (parent == 0)
+        return;
+    if (parent->child == v) {
+        parent->child = v->next;
+    } else {
+        for (struct ui_view* c = parent->child; c != 0; c = c->next)
+            if (c->next == v) { c->next = v->next; break; }
+    }
+    v->next = 0;
+    v->parent = 0;
+}
+
+/* Put it at the end of another's. */
+static void append_view(struct ui_view* parent, struct ui_view* v)
+{
+    v->parent = parent;
+    v->next = 0;
+    if (parent->child == 0) {
+        parent->child = v;
+        return;
+    }
+    struct ui_view* last = parent->child;
+    while (last->next != 0)
+        last = last->next;
+    last->next = v;
+}
+
+/* And just before another of its children. */
+static void insert_before(struct ui_view* parent, struct ui_view* at,
+                          struct ui_view* v)
+{
+    v->parent = parent;
+    if (parent->child == at) {
+        v->next = at;
+        parent->child = v;
+        return;
+    }
+    for (struct ui_view* c = parent->child; c != 0; c = c->next)
+        if (c->next == at) {
+            v->next = at;
+            c->next = v;
+            return;
+        }
+    append_view(parent, v);
+}
+
+static void overflow_clicked(struct ui_view* v, void* user)
+{
+    struct ui_view* popover = (struct ui_view*)user;
+    (void)v;
+    if (popover != 0)
+        ui_popover_show(popover, (popover->flags & UI_HIDDEN) != 0);
+}
+
+struct ui_view* ui_overflow(struct ui_view* box)
+{
+    if (box == 0 || box->layout != UI_STACK_H)
+        return box;
+    /* The button and the place things go, both children of the row so that
+     * they travel with it. The popover is laid out against the button. */
+    struct ui_view* more = ui_button(box, "»", 0, 0);
+    ui_grow(ui_size(more, 30, 24), 0);
+    struct ui_view* popover = ui_popover(box, more);
+    ui_on(more, overflow_clicked, popover);
+    box->flags |= UI_OVERFLOW;
+    /* Remembered on the row, so layout can find the two without walking. */
+    box->anchor = more;
+    return box;
+}
+
+/* Fold the row to the width it has been given.
+ *
+ * Run before the row is laid out, so what follows shares out only what is
+ * actually staying. Children move between the row and the popover rather than
+ * being copied: the same toggle, in a different place. */
+static void fold_row(struct ui_view* v, int width)
+{
+    struct ui_view* more = v->anchor;
+    if (more == 0)
+        return;
+    struct ui_view* popover = more->next;
+    while (popover != 0 && popover->kind != UI_POPOVER)
+        popover = popover->next;
+    if (popover == 0)
+        return;
+
+    /* Everything back in the row first, in the order it was declared, so that
+     * the decision below is made afresh every time and widening puts things
+     * back where they were. */
+    while (popover->child != 0) {
+        struct ui_view* c = popover->child;
+        unlink_view(c);
+        insert_before(v, more, c);
+    }
+
+    /* Does the whole row fit as it is? `width` is already inside the padding.
+     *
+     * Asked before anything else because the answer changes the question: if
+     * it does not fit, the button is going to be there and needs room of its
+     * own, and deciding what to keep without setting that aside is how the
+     * row came to keep exactly one control too many. */
+    int total = 0, n = 0;
+    for (struct ui_view* c = v->child; c != 0 && c != more; c = c->next) {
+        if ((c->flags & UI_HIDDEN) != 0)
+            continue;
+        total += (c->want_w > 0 ? c->want_w : 0) + (n > 0 ? v->gap : 0);
+        ++n;
+    }
+    if (total <= width) {
+        more->flags |= UI_HIDDEN;
+        popover->flags |= UI_HIDDEN;
+        return;
+    }
+
+    /* It does not, so keep whatever fits beside the button and fold the rest.
+     * One pass, from the front: the first control that does not fit is where
+     * the row is cut, and everything after it goes with it. */
+    const int room = width - more->want_w - v->gap;
+    int used = 0, count = 0;
+    struct ui_view* first_out = 0;
+    for (struct ui_view* c = v->child; c != 0 && c != more; c = c->next) {
+        if ((c->flags & UI_HIDDEN) != 0)
+            continue;
+        const int w = c->want_w > 0 ? c->want_w : 0;
+        const int step = w + (count > 0 ? v->gap : 0);
+        if (used + step > room && count > 0) {
+            first_out = c;
+            break;
+        }
+        used += step;
+        ++count;
+    }
+    if (first_out == 0) {
+        /* Everything fits beside the button after all, which means the row
+         * only overflowed by the button's own width. Nothing to fold. */
+        more->flags |= UI_HIDDEN;
+        popover->flags |= UI_HIDDEN;
+        return;
+    }
+    more->flags &= ~UI_HIDDEN;
+
+    /* From the first one that did not fit to the end of the row. */
+    struct ui_view* c = first_out;
+    while (c != 0 && c != more) {
+        struct ui_view* next = c->next;
+        unlink_view(c);
+        append_view(popover, c);
+        c = next;
+    }
+
+    /* The popover is as tall as what it now holds, and as wide as its widest. */
+    int tall = popover->pad * 2, wide = 0, held = 0;
+    for (struct ui_view* p = popover->child; p != 0; p = p->next) {
+        tall += (p->want_h > 0 ? p->want_h : 24) + (held > 0 ? popover->gap : 0);
+        if (p->want_w > wide) wide = p->want_w;
+        ++held;
+    }
+    popover->want_h = tall;
+    popover->want_w = wide + popover->pad * 2;
+}
+
+/* --- how big a thing needs to be --------------------------------------------
+ *
+ * Bottom-up, because that is the direction the answer flows: a box is as tall
+ * as its children plus what it puts between and around them. Layout proper
+ * stays a single top-down pass; this is asked only of the boxes that said they
+ * wanted to be measured.
+ */
+int ui_natural_h(struct ui_view* v)
+{
+    if (v == 0 || (v->flags & UI_HIDDEN) != 0)
+        return 0;
+    if (v->kind != UI_BOX && v->kind != UI_GROUP)
+        return v->want_h;
+
+    const int title = (v->kind == UI_GROUP) ? WG_GLYPH_H + 6 : 0;
+    int total = 0, count = 0;
+    for (struct ui_view* c = v->child; c != 0; c = c->next) {
+        if ((c->flags & UI_HIDDEN) != 0 || c->kind == UI_POPOVER)
+            continue;
+        const int h = ui_natural_h(c);
+        if (v->layout == UI_STACK_H) {
+            /* Side by side: as tall as the tallest of them. */
+            if (h > total)
+                total = h;
+        } else {
+            total += h;
+        }
+        ++count;
+    }
+    if (v->layout != UI_STACK_H && count > 1)
+        total += v->gap * (count - 1);
+    return total + v->pad * 2 + title;
+}
+
+struct ui_view* ui_fit(struct ui_view* v)
+{
+    if (v != 0) {
+        v->flags |= UI_FIT;
+        v->grow = 0;
+    }
+    return v;
+}
 
 /* --- layout ---------------------------------------------------------------
  *
@@ -745,7 +965,12 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
         return;
     }
 
-    if (v->kind != UI_BOX && v->kind != UI_GROUP)
+    /* A popover is a box that was given a different kind so it could be
+     * drawn and placed differently. It still lays its children out like one,
+     * and leaving it out here meant they were never given a position at all -
+     * so they were drawn whereever they last happened to be, which for a
+     * toolbar's overflow is back in the toolbar. */
+    if (v->kind != UI_BOX && v->kind != UI_GROUP && v->kind != UI_POPOVER)
         return;
 
     /* A group keeps room at the top for its title; a plain box does not. */
@@ -771,6 +996,20 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
         return;
     }
 
+    /* A row that folds decides what it is keeping before anything is shared
+     * out, because what it keeps is what there is to share between. */
+    if ((v->flags & UI_OVERFLOW) != 0 && horizontal)
+        fold_row(v, inner.w);
+
+    /* A child that fits is measured before anything is shared out, so the
+     * space it needs is taken off the top like any other fixed height. */
+    for (struct ui_view* c = v->child; c != 0; c = c->next)
+        if ((c->flags & UI_FIT) != 0) {
+            const int need = ui_natural_h(c);
+            if (horizontal) c->want_w = need;
+            else            c->want_h = need;
+        }
+
     /* Popovers are placed against their anchor rather than stacked, so they
      * are laid out after the others and take none of the room. */
     for (struct ui_view* c = v->child; c != 0; c = c->next) {
@@ -779,11 +1018,20 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
         const struct ui_view* at = c->anchor != 0 ? c->anchor : v;
         struct ui_rect r = { at->frame.x, at->frame.y + at->frame.h + 6,
                              c->want_w, c->want_h };
-        /* Kept inside the window: a popover that hangs off the edge is a
-         * popover with its content cut off. */
-        if (r.x + r.w > into.x + into.w) r.x = into.x + into.w - r.w;
-        if (r.x < into.x) r.x = into.x;
-        if (r.y + r.h > into.y + into.h) r.y = at->frame.y - r.h - 6;
+        /* Kept inside the *window*, not inside whatever box it hangs off.
+         *
+         * It was clamped to the parent's rectangle, and a popover under a
+         * toolbar is by definition taller than the toolbar - so the test that
+         * asks "does it fit below?" was always false and it was flipped up,
+         * off the top of the window, every time. */
+        const struct ui_view* root = v;
+        while (root->parent != 0)
+            root = root->parent;
+        const struct ui_rect win = root->frame;
+        if (r.x + r.w > win.x + win.w) r.x = win.x + win.w - r.w;
+        if (r.x < win.x) r.x = win.x;
+        if (r.y + r.h > win.y + win.h) r.y = at->frame.y - r.h - 6;
+        if (r.y < win.y) r.y = win.y;
         ui_layout(c, r);
     }
 
@@ -1753,6 +2001,16 @@ static void colour_panel(const struct ui_view* v, int* x, int* y, int* w,
  * most, which is why this needs no list. */
 static void draw_overlay(void)
 {
+    /* A popover first, if one is showing.
+     *
+     * It used to be drawn at the end of this function, which returns early
+     * when there is no drop-down - so a popover was only ever drawn when a
+     * menu happened to be open at the same time, which is never, because
+     * opening a menu closes the popover. It has its own reason to be above
+     * everything and does not need a menu's permission. */
+    if (g_popover != 0 && (g_popover->flags & UI_HIDDEN) == 0)
+        ui_draw(g_popover);
+
     struct ui_view* v = g_dropped;
     if (v == 0)
         return;
@@ -1771,8 +2029,6 @@ static void draw_overlay(void)
     draw_dropdown(v, x, y, w,
                   v->kind == UI_MENUBAR ? (ui_row_text)v->icon_of : v->row_text,
                   n, v->kind == UI_POPUP ? v->selected : -1);
-    if (g_popover != 0 && (g_popover->flags & UI_HIDDEN) == 0)
-        ui_draw(g_popover);
 }
 
 /* One drop-down: a popup's list of choices, or a menu bar's items. They are the

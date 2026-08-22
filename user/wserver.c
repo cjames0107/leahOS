@@ -256,8 +256,6 @@ static int g_resizing = -1;
 static int g_resize_w, g_resize_h;
 static int g_resize_start_w, g_resize_start_h;
 static int g_resize_from_x, g_resize_from_y;
-static struct rect g_band;
-static int g_band_shown;
 static int g_mouse_grab = -1;
 static int g_last_left;
 static int g_last_right;
@@ -477,6 +475,14 @@ static int is_desktop(int slot)
  * and when it goes belongs to the application. */
 /* Taken off the screen by its own client. It keeps its slot and its events; it
  * is simply not drawn and not hit. */
+/* How far apart a window's rows are. The client says; a client that has not
+ * said means its rows are exactly as wide as its window. */
+static unsigned stride_of(int slot)
+{
+    const unsigned s = win(slot)->stride;
+    return s != 0 ? s : g_width[slot];
+}
+
 static int is_hidden(int slot)
 {
     return (win(slot)->flags & WS_FLAG_HIDDEN) != 0;
@@ -756,7 +762,7 @@ static void draw_window(int slot, int focused)
         if (x1 <= x0)
             return;
         for (int y = y0; y < y1; ++y) {
-            const uint32_t* row = &dp[(unsigned long)(y - w->y) * g_width[slot]];
+            const uint32_t* row = &dp[(unsigned long)(y - w->y) * stride_of(slot)];
             memcpy(&g_back[(unsigned)y * g_fb.width + (unsigned)x0],
                    &row[x0 - w->x], (size_t)(x1 - x0) * sizeof(uint32_t));
         }
@@ -1009,7 +1015,7 @@ contents:
     const int translucent = (w->flags & WS_FLAG_ALPHA) != 0;
 
     for (int y = y0; y < y1; ++y) {
-        const uint32_t* row = &px[(unsigned long)(y - content_y) * g_width[slot]];
+        const uint32_t* row = &px[(unsigned long)(y - content_y) * stride_of(slot)];
         if (translucent && y < curved_from) {
             /* Three cases, and only one of them costs anything.
              *
@@ -1568,7 +1574,9 @@ static void reconcile(void)
                                 ? shm_open(WS_PIXEL_KEY(slot, gen), 0, 0) : -1;
                 if (fresh >= 0) {
                     const unsigned long bytes = shm_size(fresh);
-                    uint32_t* px = (bytes >= (unsigned long)width * height * 4)
+                    const unsigned long rows = w->stride != 0 ? w->stride
+                                                              : width;
+                    uint32_t* px = (bytes >= rows * height * 4)
                                  ? (uint32_t*)shm_map(fresh) : 0;
                     if (px != 0) {
                         damage_window(slot);    /* where it was */
@@ -1582,6 +1590,30 @@ static void reconcile(void)
                         g_mapped_gen[slot] = w->present;
                         damage_window(slot);    /* and where it now is */
                     }
+                }
+            }
+
+            /* A size that changed without the segment changing.
+             *
+             * That is what a resize is now: a client whose buffer has room to
+             * spare answers by showing more or less of it, and allocates
+             * nothing - so there is no new generation to notice. Without this
+             * the server kept compositing the window at whatever size it was
+             * when its segment was last replaced, and a window being dragged
+             * simply did not change.
+             *
+             * Damaged at the old size first, or the part it is vacating is
+             * left on the screen. */
+            if ((w->width != g_width[slot] || w->height != g_height[slot]) &&
+                w->width != 0 && w->height != 0 &&
+                w->width <= g_fb.width && w->height <= g_fb.height) {
+                const unsigned long rows = w->stride != 0 ? w->stride : w->width;
+                if (rows * w->height * 4 <= g_pixel_bytes[slot]) {
+                    damage_window(slot);
+                    g_width[slot] = w->width;
+                    g_height[slot] = w->height;
+                    blur_cache_drop(slot);
+                    damage_window(slot);
                 }
             }
 
@@ -1778,15 +1810,6 @@ static void handle_input(void)
     }
 
     if (released && g_resizing >= 0) {
-        /* Ask the client for the size the band ended at. It answers by
-         * replacing its segment, which reconcile picks up. */
-        struct ws_window* w = win(g_resizing);
-        if (g_resize_w != (int)g_width[g_resizing] ||
-            g_resize_h != (int)g_height[g_resizing]) {
-            w->req_width = (uint32_t)g_resize_w;
-            w->req_height = (uint32_t)g_resize_h;
-            __atomic_add_fetch(&w->resize_seq, 1, __ATOMIC_RELEASE);
-        }
         g_resizing = -1;
         g_mouse_grab = -1;
         g_dragging = -1;
@@ -1865,48 +1888,24 @@ static void handle_input(void)
         const int max_h = (int)g_fb.height - (BORDER * 2 + TITLE_HEIGHT);
         if (nw > max_w) nw = max_w;
         if (nh > max_h) nh = max_h;
-        g_resize_w = nw;
-        g_resize_h = nh;
+        /* Asked for as it happens, rather than drawn as an outline and asked
+         * for when the button comes up. The client answers by redrawing at the
+         * new size, which it can do without allocating anything because its
+         * buffer has room to spare - see `stride` in wproto.h. */
+        if (nw != g_resize_w || nh != g_resize_h) {
+            g_resize_w = nw;
+            g_resize_h = nh;
+            w->req_width = (uint32_t)nw;
+            w->req_height = (uint32_t)nh;
+            __atomic_add_fetch(&w->resize_seq, 1, __ATOMIC_RELEASE);
+        }
     }
 
     g_last_left = left;
 }
 
-/* --- the rubber band ------------------------------------------------------
- *
- * Drawn straight to the screen while a resize is in progress and rubbed out
- * from the backbuffer afterwards, exactly as the cursor is. Committing the size
- * on every pixel of movement would mean the client allocating and the server
- * mapping a new segment per frame, which is a great deal of work to show
- * something that is not final yet. */
-static void band_plot(int x, int y)
-{
-    if (x < 0 || y < 0 || (unsigned)x >= g_fb.width || (unsigned)y >= g_fb.height)
-        return;
-    uint32_t* p = (uint32_t*)(g_screen + (unsigned long)y * g_fb.pitch
-                              + (unsigned long)x * 4);
-    *p = OUTLINE;
-}
 
-static void draw_band(const struct rect* r)
-{
-    for (int i = 0; i < r->w; ++i) {
-        band_plot(r->x + i, r->y);
-        band_plot(r->x + i, r->y + r->h - 1);
-    }
-    for (int i = 0; i < r->h; ++i) {
-        band_plot(r->x, r->y + i);
-        band_plot(r->x + r->w - 1, r->y + i);
-    }
-}
 
-static void erase_band(const struct rect* r)
-{
-    present_region(r->x, r->y, (unsigned)r->w, 1);
-    present_region(r->x, r->y + r->h - 1, (unsigned)r->w, 1);
-    present_region(r->x, r->y, 1, (unsigned)r->h);
-    present_region(r->x + r->w - 1, r->y, 1, (unsigned)r->h);
-}
 
 int main(void)
 {
@@ -2051,10 +2050,6 @@ int main(void)
          * backbuffer, so it has to come off before anything composes over it.
          * The cursor no longer does - it is composed like a window, which is
          * what stopped it blinking. */
-        if (g_band_shown) {
-            erase_band(&g_band);
-            g_band_shown = 0;
-        }
 
         /* A pointer move is damage like anything else: where it was, and where
          * it is. Nothing draws to the screen outside the blit below, so the
@@ -2105,15 +2100,6 @@ int main(void)
         }
         g_damage_count = 0;
 
-        if (g_resizing >= 0) {
-            struct ws_window* w = win(g_resizing);
-            g_band.x = w->x;
-            g_band.y = w->y;
-            g_band.w = g_resize_w + BORDER * 2;
-            g_band.h = g_resize_h + BORDER * 2 + TITLE_HEIGHT;
-            draw_band(&g_band);
-            g_band_shown = 1;
-        }
 
         msleep(kFrameSleepMs);
     }

@@ -617,6 +617,10 @@ int main(int argc, char** argv)
 
     ui_spacer(bar);
     ui_grow(ui_size(ui_button(bar, "Save", on_save, 0), 64, 24), 0);
+    /* Folds when the window is narrower than the row. Everything from
+     * whichever control runs out of room goes behind the button at the end
+     * and comes back when there is room again. */
+    ui_overflow(bar);
 
     g_scroller = ui_scroll(root);
     g_page = ui_custom(g_scroller, draw_page, 0);
@@ -634,8 +638,10 @@ int main(int argc, char** argv)
 
     g_app.title = "Write";
     g_app.width = 720; g_app.height = 520;
-    /* Wide enough for the toolbar to fit on one line. */
-    g_app.min_width = 620; g_app.min_height = 320;
+    /* The toolbar folds now, so the window may be narrower than the row it
+     * holds - the minimum is what the page needs to be readable, not what the
+     * controls need to be laid out side by side. */
+    g_app.min_width = 360; g_app.min_height = 260;
     g_app.root = root;
     g_app.event = on_event;
     g_app.menu = kMenu;

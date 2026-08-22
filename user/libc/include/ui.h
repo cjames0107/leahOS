@@ -123,6 +123,10 @@ enum { UI_STACK_V, UI_STACK_H, UI_FIXED };
 #define UI_HIDDEN    1u
 #define UI_DISABLED  2u
 #define UI_FOCUSABLE 4u
+/* As tall as what is in it - see ui_fit. */
+#define UI_FIT       8u
+/* A row that folds what does not fit into a popover - see ui_overflow. */
+#define UI_OVERFLOW  16u
 
 struct ui_rect { int x, y, w, h; };
 
@@ -359,6 +363,35 @@ struct ui_view* ui_calendar(struct ui_view* parent, int year, int month,
  * is set to grow, and never gives it less. */
 struct ui_view* ui_size(struct ui_view* v, int w, int h);
 struct ui_view* ui_grow(struct ui_view* v, int share);
+
+/* As tall as what is in it, worked out rather than written down.
+ *
+ * A box's height was a number the caller computed - `3 * 24 + 28` for three
+ * rows of twenty-four in a group with twelve of padding - and every one of
+ * those is a sum that is wrong the moment a row is added, a padding changes,
+ * or a control's natural height does. Several of them were already wrong, and
+ * the symptom is the last thing in the box hanging out of the bottom of it.
+ *
+ * A box that fits asks its children instead. */
+struct ui_view* ui_fit(struct ui_view* v);
+
+/* What a view needs, for a caller that wants the number for itself. */
+int ui_natural_h(struct ui_view* v);
+
+/* A row of controls that folds when the window is too narrow for it.
+ *
+ * A toolbar laid out left to right in a window that can be made narrower
+ * eventually runs out of room, and what happened then was that the controls at
+ * the end were drawn off the edge - present, unreachable, and with no sign
+ * that anything was missing.
+ *
+ * Now the ones that do not fit move into a popover behind a button at the end
+ * of the row, and move back when the window is widened. They are the same
+ * controls, not copies of them: a toggle folded away and switched on in the
+ * popover is on when it comes back.
+ *
+ * Call it on a horizontal box after its children are added. */
+struct ui_view* ui_overflow(struct ui_view* box);
 struct ui_view* ui_on(struct ui_view* v, ui_action action, void* user);
 
 /* Everything goes back to the pool. Called between building one interface and

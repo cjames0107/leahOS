@@ -271,6 +271,7 @@ int main(int argc, char** argv)
     ui_grow(ui_size(ui_button(bar, "Clear", on_clear, 0), 64, 24), 0);
     ui_grow(ui_size(ui_button(bar, "PNG", on_png, 0), 56, 24), 0);
     ui_grow(ui_size(ui_button(bar, "GIF", on_gif, 0), 56, 24), 0);
+    ui_overflow(bar);
 
     /* The canvas: nothing at all, so that nothing draws over the picture. */
     ui_grow(ui_spacer(root), 1);
@@ -282,10 +283,8 @@ int main(int argc, char** argv)
     g_app.root = root;
     g_app.title = "Paint";
     g_app.width = g_w; g_app.height = g_h;
-    /* Wide enough for the whole toolbar: the controls are laid out
-     * left to right and the last of them is Save, which is not a control to
-     * let fall off the end. */
-    g_app.min_width = 600; g_app.min_height = 300;
+    /* The toolbar folds, so the window is only as wide as the canvas needs. */
+    g_app.min_width = 360; g_app.min_height = 260;
     /* What it is editing, so the framework can ask before it is lost and put
      * the name in the title bar. */
     g_app.doc_kind = "picture";

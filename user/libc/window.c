@@ -152,6 +152,18 @@ int ws_add_bank(void)
     return ws_slot_count();
 }
 
+/* How much a buffer is allocated for, given what is being asked of it.
+ *
+ * Rounded well up, so that a drag which grows a window by a pixel at a time
+ * does not allocate a new segment a pixel at a time. Shared memory has no
+ * realloc: growing means a new segment, a new mapping and a new generation,
+ * and doing that per frame is why a resize used to be an outline that waited
+ * for the button to come up. */
+static unsigned round_up(unsigned v)
+{
+    return (v + 255u) & ~255u;
+}
+
 int win_create(int x, int y, unsigned width, unsigned height, const char* title)
 {
     struct ws_shared* block = control();
@@ -199,7 +211,9 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
     /* The pixels are this client's own segment, keyed by the slot so the server
      * knows where to find them. Owned by this user, so another user cannot map
      * them even though the control block is public. */
-    const unsigned long bytes = (unsigned long)width * height * 4;
+    /* With room to spare, so the first resize does not have to allocate. */
+    const unsigned rows = round_up(width);
+    const unsigned long bytes = (unsigned long)rows * round_up(height) * 4;
     const int pixel_id = shm_open(WS_PIXEL_KEY(slot, 0), bytes, 0);
     if (pixel_id < 0) {
         __atomic_store_n(&w->state, WS_SLOT_FREE, __ATOMIC_RELEASE);
@@ -210,7 +224,7 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
         __atomic_store_n(&w->state, WS_SLOT_FREE, __ATOMIC_RELEASE);
         return -1;
     }
-    for (unsigned long i = 0; i < (unsigned long)width * height; ++i)
+    for (unsigned long i = 0; i < bytes / 4; ++i)
         pixels[i] = 0xFFFFFF;
     g_pixels[slot] = pixels;
     g_pixel_id[slot] = pixel_id;
@@ -218,6 +232,7 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
     g_pixel_gen[slot] = 0;
     g_seen_resize[slot] = 0;
 
+    w->stride = rows;
     w->owner_pid = (uint32_t)getpid();
     w->x = x;
     w->y = y;
@@ -286,8 +301,26 @@ static int apply_resize(int id, struct ws_window* w, struct win_event* out)
     if (width == 0 || height == 0)
         return 0;
 
+    /* Already room for it: the size changes and nothing is allocated. This is
+     * the case nearly every frame of a resize. */
+    const unsigned stride = w->stride != 0 ? w->stride : w->width;
+    if (width <= stride &&
+        (unsigned long)stride * height * 4 <= g_pixel_bytes[id]) {
+        w->width = width;
+        w->height = height;
+        out->type = WIN_EVENT_RESIZE;
+        out->window = (uint32_t)id;
+        out->x = (int32_t)width;
+        out->y = (int32_t)height;
+        out->button = 0;
+        out->key = 0;
+        return 1;
+    }
+
     const uint32_t gen = g_pixel_gen[id] + 1;
-    const unsigned long bytes = (unsigned long)width * height * 4;
+    const unsigned rows = round_up(width);
+    const unsigned tall = round_up(height);
+    const unsigned long bytes = (unsigned long)rows * tall * 4;
     const int fresh_id = shm_open(WS_PIXEL_KEY(id, gen), bytes, 0);
     if (fresh_id < 0)
         return 0;                       /* keep the old one; try again later */
@@ -296,11 +329,12 @@ static int apply_resize(int id, struct ws_window* w, struct win_event* out)
         shm_destroy(fresh_id);
         return 0;
     }
-    for (unsigned long i = 0; i < (unsigned long)width * height; ++i)
+    for (unsigned long i = 0; i < (unsigned long)rows * tall; ++i)
         fresh[i] = 0xFFFFFF;
 
     /* Dimensions before the generation: the server reads them the other way
      * round, so it can never see a new generation described by an old size. */
+    w->stride = rows;
     w->width = width;
     w->height = height;
     __atomic_store_n(&w->pixels_gen, gen, __ATOMIC_RELEASE);

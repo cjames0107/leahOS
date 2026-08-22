@@ -151,8 +151,18 @@ struct app {
 
     /* --- what app_run fills in ------------------------------------------ */
     int        id;                      /* the window */
-    uint32_t*  px;                      /* its pixels */
+    /* Where to draw. Not the window's own pixels: those are shared with the
+     * compositor, which reads them whenever it likes - including halfway
+     * through a repaint. An application that clears its window and draws it
+     * again therefore showed the cleared state now and then, which on
+     * something continuous like a drag is a flicker for as long as the drag
+     * lasts. This is private memory; the finished frame is copied across in
+     * one go and only then presented. */
+    uint32_t*  px;
     unsigned   w, h;                    /* its current size */
+    uint32_t*  shown;                   /* the window's own pixels, written
+                                           only by the copy at the end of a
+                                           frame */
     int        quit;                    /* set by app_quit */
     /* Whether a component already took the event `event` is being called
      * with. The handler is called either way - an application may well want to

@@ -238,6 +238,18 @@ struct ws_window {
     volatile int32_t  x, y;         /* top-left of the frame, owned by the server
                                        once live: dragging moves it */
     volatile uint32_t width, height;/* the content area, owned by the client   */
+    /* Pixels per row of the client's buffer, which is not always the width.
+     *
+     * A window's buffer is allocated with room to spare so that a resize can
+     * change what is shown without replacing anything: shared memory has no
+     * realloc, so growing meant a new segment, a new mapping and a new
+     * generation every time - once per frame of a drag, which is why the
+     * server used to draw a wireframe and wait for the button to come up
+     * instead of resizing as you moved.
+     *
+     * Zero means "the same as the width", which is what a client that has not
+     * thought about it leaves behind. */
+    volatile uint32_t stride;
     /* How wide this window's sidebar is, or zero. The server tints that column
      * across the title bar as well, because a sidebar that stops where the
      * chrome begins is a panel with a lid on it - the whole point of a full
