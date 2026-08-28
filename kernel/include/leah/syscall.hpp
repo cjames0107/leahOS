@@ -113,7 +113,12 @@ enum Number : u64 {
     LoadAvg     = 89,  // how many tasks wanted to run, smoothed
     OpenFifo    = 90,  // one end of a named pipe, by the inode that names it
     KLog        = 91,  // the kernel's own messages, read back from a ring
+    Power       = 92,  // stop the machine, or start it again
 };
+
+// What Power is being asked to do. Mirrored in user/libc/include/proc.h.
+constexpr u64 kPowerOff    = 0;
+constexpr u64 kPowerReboot = 1;
 
 // mmap protection and flags, mirrored in user/libc/include/sys/mman.h.
 constexpr u64 kProtRead  = 1;

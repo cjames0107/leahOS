@@ -3,6 +3,7 @@
 #include <leah/file.hpp>
 #include <leah/gdt.hpp>
 #include <leah/interrupts.hpp>
+#include <leah/io.hpp>
 #include <leah/memory.hpp>
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
@@ -1295,6 +1296,78 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         // measuring how long the machine has been up actually wants.
         frame->rax = timer::uptime_ms();
         break;
+
+    case Power: {
+        // Stopping the machine is root's alone: any process being able to end
+        // everyone's session is not a permission, it is an accident waiting to
+        // be typed.
+        if (scheduler::current_uid() != 0) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        // Nothing is flushed here, and that is not an oversight: the
+        // filesystem lives in a ring-3 server and the kernel cannot make it
+        // write anything. Whoever calls this syncs first - see power_off in
+        // <proc.h> - which is the same division as everywhere else in this
+        // system, and the reason the kernel is as small as it is.
+
+        if (frame->rdi == kPowerReboot) {
+            // Three ways, tried in order, because which of them a given
+            // machine answers is a fact about its chipset.
+            //
+            // 0xCF9 is the reset control register, which is what a modern PC
+            // uses: bit 1 arms it and bit 2 pulses the line. The keyboard
+            // controller's reset line is the older answer, and the one every
+            // PC had before there was another.
+            //
+            // And if neither answers, a triple fault - which is less a
+            // fallback than a fact about the architecture: a processor that
+            // faults while handling a fault while handling a fault has nowhere
+            // left to go and resets. Loading an interrupt table with no
+            // entries and then taking an interrupt is the shortest way to
+            // arrange one, and it cannot be refused.
+            io::out8(0xCF9, 0x02);
+            io::out8(0xCF9, 0x06);
+            io::out8(0x64, 0xFE);
+
+            struct __attribute__((packed)) { u16 limit; u64 base; }
+                nothing = { 0, 0 };
+            asm volatile("lidt %0" : : "m"(nothing));
+            asm volatile("int3");
+            for (;;)
+                asm volatile("hlt");
+        }
+
+        // ACPI's soft-off: SLP_EN with a sleep type of zero, written to the
+        // power-management control register.
+        //
+        // Where that register is, is a question with an answer rather than a
+        // guess: the chipset's power-management function carries its own I/O
+        // base in PCI configuration space, and reading it is four
+        // instructions. The two well-known addresses are written as well,
+        // afterwards, for a chipset this does not describe - a write to a port
+        // nobody decodes costs nothing.
+        //
+        // 0:1.3 is the PIIX4's ACPI function and 0x40 is its PMBA. The low six
+        // bits are flags rather than address; bit 0 says the range is enabled.
+        constexpr u32 kPmFunction = 0x80000000u | (1u << 11) | (3u << 8);
+        io::out32(0xCF8, kPmFunction | 0x40);
+        const u32 pmba = io::in32(0xCFC);
+        if ((pmba & 1) != 0) {
+            const u16 base = static_cast<u16>(pmba & 0xFFC0u);
+            if (base != 0)
+                io::out16(static_cast<u16>(base + 4), 0x2000);
+        }
+        // And the two well-known addresses anyway, for a chipset that is not
+        // this one. A write to a port nobody is listening on is free.
+        io::out16(0x604, 0x2000);
+        io::out16(0xB004, 0x2000);
+        // Still here: nothing answered. Say so rather than returning into a
+        // desktop that has already told the user it was shutting down.
+        console::printf("\npower: nothing answered a shutdown; halting\n");
+        for (;;)
+            asm volatile("cli; hlt");
+    }
 
     case SetSid: {
         const u32 sid = scheduler::set_sid();

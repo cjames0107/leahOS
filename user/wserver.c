@@ -535,6 +535,37 @@ static unsigned long buffer_needs(unsigned stride, unsigned width,
     return rows * (unsigned long)height * 4;
 }
 
+/* Chrome: the status bar, the dock and the panels they open. Above every
+ * ordinary window, and never given the keyboard. */
+static int is_overlay(int slot)
+{
+    return (win(slot)->flags & WS_FLAG_OVERLAY) != 0;
+}
+
+/* Where the ordinary windows begin: the number of overlays sitting in front of
+ * them. A window raised by a click goes here rather than to the very front, so
+ * the bar stays above it. */
+static int first_ordinary(void)
+{
+    int i = 0;
+    while (i < g_count && is_overlay(g_order[i]))
+        ++i;
+    return i;
+}
+
+/* Who has the keyboard: the frontmost window that is not chrome.
+ *
+ * It used to be g_order[0] and nothing else, which was right while the only
+ * thing above the desktop was an application. A dock at the front of that list
+ * would have taken every keystroke on the machine. */
+static int keyboard_slot(void)
+{
+    for (int i = 0; i < g_count; ++i)
+        if (!is_overlay(g_order[i]))
+            return g_order[i];
+    return -1;
+}
+
 static int is_hidden(int slot)
 {
     return (win(slot)->flags & WS_FLAG_HIDDEN) != 0;
@@ -1293,8 +1324,11 @@ static void compose_rect(const struct rect* r)
         f.y -= SHADOW_SPREAD;
         f.w += SHADOW_SPREAD * 2;
         f.h += SHADOW_SPREAD * 2;
+        /* Focused means it has the keyboard, which chrome never does - so a
+         * dock at the front of the order must not draw the window behind it
+         * as idle. */
         if (rects_overlap(&f, r))
-            draw_window(g_order[i], i == 0);
+            draw_window(g_order[i], g_order[i] == keyboard_slot());
     }
 
     /* Above the windows and below the cursor: it is being carried. */
@@ -1486,6 +1520,30 @@ static int window_at(int x, int y)
     return -1;
 }
 
+/* Put the overlays back in front of the ordinary windows.
+ *
+ * The layer a window belongs to is a flag its client sets, and a client sets
+ * it just after asking for the window rather than as part of asking - so there
+ * is a moment where the server has already adopted the window and placed it as
+ * an ordinary one. Sorting here rather than only at adoption means it does not
+ * matter when the flag arrives: the order is corrected on the next pass, and
+ * every pass after that costs one walk of a list with a handful of entries.
+ *
+ * A stable partition, so that what is in front of what within each layer is
+ * whatever the raising has made it. */
+static void sort_layers(void)
+{
+    int at = 0;
+    for (int i = 0; i < g_count; ++i) {
+        if (!is_overlay(g_order[i]))
+            continue;
+        const int slot = g_order[i];
+        for (int k = i; k > at; --k)
+            g_order[k] = g_order[k - 1];
+        g_order[at++] = slot;
+    }
+}
+
 static void raise_window(int slot)
 {
     /* The desktop stays underneath, always. Raising it would put it over the
@@ -1495,12 +1553,17 @@ static void raise_window(int slot)
     int at = 0;
     while (at < g_count && g_order[at] != slot)
         ++at;
-    if (at >= g_count || at == 0)
+    if (at >= g_count)
         return;
-    const int was_focused = g_order[0];
-    for (int i = at; i > 0; --i)
+    /* To the front of its own layer. An ordinary window stops behind the
+     * overlays; an overlay goes all the way. */
+    const int top = is_overlay(slot) ? 0 : first_ordinary();
+    if (at <= top)
+        return;
+    const int was_focused = keyboard_slot();
+    for (int i = at; i > top; --i)
         g_order[i] = g_order[i - 1];
-    g_order[0] = slot;
+    g_order[top] = slot;
     /* Both change: the raised window comes forward, and the one it displaced
      * loses its active title bar. */
     damage_window(slot);
@@ -1595,10 +1658,12 @@ static void reconcile(void)
                 /* Behind everything, and it stays there. */
                 g_order[g_count++] = slot;
             } else {
-                /* Newest on top, which is also focused. */
-                for (int i = g_count; i > 0; --i)
+                /* Newest on top of its own layer, which for an ordinary window
+                 * is also focused. Chrome goes above the lot. */
+                const int top = is_overlay(slot) ? 0 : first_ordinary();
+                for (int i = g_count; i > top; --i)
                     g_order[i] = g_order[i - 1];
-                g_order[0] = slot;
+                g_order[top] = slot;
                 ++g_count;
             }
             g_pixel_gen[slot] = gen;
@@ -1704,6 +1769,12 @@ static void reconcile(void)
                     damage_window(slot);
                 }
             }
+
+            /* Somebody asked for this one to come forward. Cleared first, so
+             * a second request arriving while this one is being served is not
+             * thrown away with it. */
+            if (__atomic_exchange_n(&w->raise_req, 0, __ATOMIC_ACQ_REL) != 0)
+                raise_window(slot);
 
             /* Hidden, or back. Damaged while its geometry still says where it
              * was, which is what lets the desktop underneath be put back. */
@@ -1820,10 +1891,13 @@ static void handle_input(void)
      * manager keeps for itself, which becomes a close request rather than a
      * keystroke the client has to know about. */
     if (in.key != 0 && g_count > 0) {
-        if (in.key == WIN_KEY_CLOSE)
-            push_event(g_order[0], WIN_EVENT_CLOSE, 0, 0, 0, 0);
-        else
-            push_event(g_order[0], WIN_EVENT_KEY, 0, 0, 0, (uint32_t)in.key);
+        const int to = keyboard_slot();
+        if (to >= 0) {
+            if (in.key == WIN_KEY_CLOSE)
+                push_event(to, WIN_EVENT_CLOSE, 0, 0, 0, 0);
+            else
+                push_event(to, WIN_EVENT_KEY, 0, 0, 0, (uint32_t)in.key);
+        }
     }
 
     const int left = (in.buttons & 1) != 0;
@@ -2167,6 +2241,7 @@ int main(void)
     for (;;) {
         reload_theme();
         reconcile();
+        sort_layers();
         handle_input();
 
         if (g_count > 0) {
@@ -2180,8 +2255,12 @@ int main(void)
          * than in handle_input because it is the passage of time that does it,
          * and handle_input is only reached when something happened. */
         const unsigned long blank_after = g_control->input.blank_ms;
-        if (!g_blanked && blank_after != 0 &&
-            uptime_ms() - g_last_input_ms > blank_after) {
+        const int asked_now =
+            __atomic_exchange_n(&g_control->input.blank_now, 0,
+                                __ATOMIC_ACQ_REL) != 0;
+        if (!g_blanked && (asked_now ||
+                           (blank_after != 0 &&
+                            uptime_ms() - g_last_input_ms > blank_after))) {
             g_blanked = 1;
             for (unsigned long i = 0;
                  i < (unsigned long)g_fb.width * g_fb.height; ++i)

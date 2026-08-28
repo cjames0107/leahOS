@@ -47,6 +47,34 @@ void win_set_min_size(int id, unsigned width, unsigned height);
  * draggable. Call before drawing; see WS_FLAG_DESKTOP in <wproto.h>. */
 void win_set_desktop(int id);
 
+/* Change how much of the buffer is shown, without allocating anything.
+ *
+ * For a window whose contents decide its size - a menu, a panel listing what
+ * is running - which would otherwise have to be made at the largest it will
+ * ever be and leave an invisible remainder swallowing clicks. Returns -1 when
+ * the size asked for does not fit the buffer already there, which is the only
+ * way this can fail: growing past the slack needs a new segment, and a call
+ * that sometimes reallocates would have a cost nobody could predict. */
+int win_set_size(int id, unsigned width, unsigned height);
+
+/* Bring a window to the front. `id` is any live slot, not only one of this
+ * process's own: this is what a list of running applications needs, and a
+ * window raising itself is what a click already does. */
+void win_raise(int id);
+
+/* Above the ordinary windows, and never given the keyboard: the status bar,
+ * the dock, and the panels they open. See WS_FLAG_OVERLAY. */
+void win_set_overlay(int id);
+
+/* Where an ordinary window may go - the screen, less whatever the bar and the
+ * dock have taken. Every caller that places a window should ask, or it will
+ * put one under the clock. The whole screen when nothing has claimed any. */
+void win_work_area(int* x, int* y, int* w, int* h);
+
+/* Claim part of the screen. For whoever owns that furniture; everything else
+ * only reads it. */
+void win_set_work_area(int x, int y, int w, int h);
+
 /* Make this window a sheet: no title bar, no controls, no dragging, no
  * resizing. For a dialogue, which belongs to the window that raised it and
  * must not be drawn into it. */

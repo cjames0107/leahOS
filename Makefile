@@ -122,12 +122,12 @@ KERNEL_BIN := $(BUILD)/kernel.bin
 # Names are lower case with no extension. They were upper case with .ELF
 # because the first filesystem this could read was FAT; that driver has been
 # gone for a long time and the shouting outlived it.
-SBIN_PROGRAMS := init login wserver desktop blockd vfsd netd e1000d audiod \
+SBIN_PROGRAMS := init login wserver desktop shell blockd vfsd netd e1000d audiod \
                  authd usbd ps2d syncd ahcid useradd passwd ifconfig
 BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami date \
                  chmod chown stat less grep find wc head tail sort diff tar \
-                 gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync
-USRBIN_PROGRAMS := hello gui tone lspci ping ping6 arp nslookup fetch fetch6 env \
+                 gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync shutdown
+USRBIN_PROGRAMS := hello gui tone say lspci ping ping6 arp nslookup fetch fetch6 env \
                  screenshot tests fsbench ipctest nictest nettest blktest vfstest \
                  mvtest v6test churn wintest
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player \
@@ -278,7 +278,12 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) | $(DIST)
 # The ext4 root filesystem (disk 1). BIN/NAME.ELF=build/name.elf for every
 # program, upper-cased to match the paths the kernel loads today.
 # Only the tools go to /BIN; the applications are placed as bundles by mkext.sh.
-EXT_ADDS := $(foreach p,$(SBIN_PROGRAMS),sbin/$(p)=$(BUILD)/$(p).elf) \
+# reboot is shutdown under another name, which is what the program expects:
+# it reads argv[0] and defaults accordingly. Installed twice rather than
+# linked, because this filesystem's builder has no symlinks - see the note
+# about .alias files in mkext.sh.
+EXT_ADDS := bin/reboot=$(BUILD)/shutdown.elf \
+            $(foreach p,$(SBIN_PROGRAMS),sbin/$(p)=$(BUILD)/$(p).elf) \
             $(foreach p,$(BIN_PROGRAMS),bin/$(p)=$(BUILD)/$(p).elf) \
             $(foreach p,$(USRBIN_PROGRAMS),usr/bin/$(p)=$(BUILD)/$(p).elf)
 EXT_APPS := $(foreach p,$(APP_PROGRAMS),$(p)=$(BUILD)/$(p).elf)
@@ -400,6 +405,8 @@ check: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	@python3 tools/vm/stride.py
 	@python3 tools/vm/settingspages.py
 	@python3 tools/vm/settingseffect.py
+	@python3 tools/vm/shellprobe.py
+	@python3 tools/vm/powerprobe.py
 
 run: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio

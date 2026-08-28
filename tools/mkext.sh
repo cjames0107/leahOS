@@ -119,8 +119,13 @@ stage_bundle() {
     # A drawn icon when there is one, and a generated tile when there is not.
     # mkicon.py stays for exactly that case: a bundle that claims an icon it
     # does not have is worse than one that claims none.
-    if [ -n "$icon" ] && [ -f "media/icons/$icon.png" ]; then
-        cp "media/icons/$icon.png" "$dir/Icon.png"
+    # media/icons/applications, which is where the drawn ones are. This looked
+    # in media/icons itself, where there has never been a PNG - so the test was
+    # false for every application and every one of them has been wearing a
+    # generated tile with its initial on it, including the nine that have had a
+    # proper icon drawn for them all along.
+    if [ -n "$icon" ] && [ -f "media/icons/applications/$icon.png" ]; then
+        cp "media/icons/applications/$icon.png" "$dir/Icon.png"
     else
         python3 tools/mkicon.py "$dir/Icon.png" "$app"
     fi

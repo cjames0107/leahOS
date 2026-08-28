@@ -60,7 +60,7 @@ KEYMAP = {
 
 
 class Machine:
-    def __init__(self, cpus=1, mem="512M"):
+    def __init__(self, cpus=1, mem="512M", may_reset=False):
         self.sock, self.log, self.qmp_path = _paths()
         for p in (self.sock, self.log, self.qmp_path):
             if os.path.exists(p):
@@ -81,6 +81,16 @@ class Machine:
             cwd=ROOT, capture_output=True, text=True).stdout.split()
         if not flags:
             raise RuntimeError("make print-qemuflags said nothing")
+
+        # -no-reboot and -no-shutdown are in the machine on purpose: they turn
+        # a triple fault from a silent reboot loop into a stopped machine
+        # somebody can inspect, which is what you want every time except one.
+        # The exception is testing the buttons that stop the machine, where
+        # they make a working shutdown indistinguishable from a broken one -
+        # the reset happens and QEMU is under orders to ignore it.
+        if may_reset:
+            flags = [f for f in flags
+                     if f not in ("-no-reboot", "-no-shutdown")]
 
         self.proc = subprocess.Popen([
             "qemu-system-x86_64", *flags,
@@ -348,9 +358,9 @@ class Test:
     """A booted machine, logged in, with a shell that reports to the serial
     line rather than to a screen nobody is watching."""
 
-    def __init__(self, cpus=2, boot_timeout=420):
+    def __init__(self, cpus=2, boot_timeout=420, may_reset=False):
         start = time.time()
-        self.m = Machine(cpus=cpus)
+        self.m = Machine(cpus=cpus, may_reset=may_reset)
         self.checks = 0
         # Markers are counted separately from checks. They were the same
         # number until a check that runs no command was added, and then the

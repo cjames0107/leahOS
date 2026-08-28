@@ -170,17 +170,23 @@ static void places_save(void)
  * this - as a starting suggestion, not as the arrangement. */
 static void auto_place(int index, int* out_x, int* out_y)
 {
-    const int rows = ((int)g_h - 24) / CELL_H;
+    /* Inside what the status bar and the dock have left. The desktop is behind
+     * both of them and is the full size of the screen, so an icon laid out
+     * from the top-left corner goes underneath the clock and cannot be clicked
+     * - the bar is in front of it and takes the press. */
+    int wx = 0, wy = 0, ww = (int)g_w, wh = (int)g_h;
+    win_work_area(&wx, &wy, &ww, &wh);
+    const int rows = (wh - 24) / CELL_H;
     for (int slot = 0; slot < MAX_ICONS; ++slot) {
-        const int x = 12 + (slot / (rows > 0 ? rows : 1)) * CELL_W;
-        const int y = 12 + (slot % (rows > 0 ? rows : 1)) * CELL_H;
+        const int x = wx + 12 + (slot / (rows > 0 ? rows : 1)) * CELL_W;
+        const int y = wy + 12 + (slot % (rows > 0 ? rows : 1)) * CELL_H;
         int taken = 0;
         for (int j = 0; j < index; ++j)
             if (g_ix[j] == x && g_iy[j] == y) { taken = 1; break; }
         if (!taken) { *out_x = x; *out_y = y; return; }
     }
-    *out_x = 12;
-    *out_y = 12;
+    *out_x = wx + 12;
+    *out_y = wy + 12;
 }
 
 static void rescan(void)
@@ -198,6 +204,21 @@ static void rescan(void)
         if (p >= 0) {
             g_ix[i] = g_place_x[p];
             g_iy[i] = g_place_y[p];
+            /* Nudged out from under the furniture. A position remembered from
+             * before there was a status bar puts an icon behind it, where the
+             * bar takes every press and the icon cannot be picked up to be
+             * moved out - so it is moved here instead of being left somewhere
+             * nothing can reach it. */
+            int wx = 0, wy = 0, ww = (int)g_w, wh = (int)g_h;
+            win_work_area(&wx, &wy, &ww, &wh);
+            if (g_ix[i] < wx) g_ix[i] = wx + 12;
+            if (g_iy[i] < wy) g_iy[i] = wy + 12;
+            if (g_ix[i] > wx + ww - CELL_W) g_ix[i] = wx + ww - CELL_W;
+            if (g_iy[i] > wy + wh - CELL_H) g_iy[i] = wy + wh - CELL_H;
+            if (g_ix[i] != g_place_x[p] || g_iy[i] != g_place_y[p]) {
+                place_set(g_items[i].d_name, g_ix[i], g_iy[i]);
+                placed = 1;
+            }
         } else {
             auto_place(i, &g_ix[i], &g_iy[i]);
             place_set(g_items[i].d_name, g_ix[i], g_iy[i]);

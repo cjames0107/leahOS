@@ -1,4 +1,5 @@
 #include <proc.h>
+#include <unistd.h>
 #include <sys/syscall.h>
 
 int proc_list(struct proc_info* out, int max)
@@ -25,4 +26,19 @@ unsigned long klog_read(unsigned long long* from, char* out, unsigned long max)
 {
     const long n = __syscall(SYS_klog, (long)from, (long)out, (long)max, 0, 0);
     return n < 0 ? 0 : (unsigned long)n;
+}
+
+/* See <proc.h>. Sync first: the kernel cannot flush a filesystem that lives in
+ * ring 3, so the last writes would otherwise be replayed from the journal on
+ * the way back up - or lost, on a filesystem without one. */
+void power_off(void)
+{
+    sync();
+    __syscall(SYS_power, 0, 0, 0, 0, 0);
+}
+
+void power_reboot(void)
+{
+    sync();
+    __syscall(SYS_power, 1, 0, 0, 0, 0);
 }

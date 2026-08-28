@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <display.h>
 #include <screen.h>
+#include <time.h>
 #include <window.h>
 
 /* Distinct from any status a shell is likely to return, so the parent can tell
@@ -55,16 +56,21 @@ static void session(void)
 {
     if (win_server_running()) {
         printf("starting the desktop - the terminal window is your shell.\n");
-        /* The desktop first, so it is at the back before anything else opens. */
+        /* The desktop first, so it is at the back before anything else opens,
+         * and the shell second: it claims the part of the screen the bar and
+         * the dock take, and every window opened after it is placed inside
+         * what is left. One opened before would land under the clock. */
         char* desk[]   = { "desktop", 0 };
+        char* shell[]  = { "shell", 0 };
         char* browse[] = { "browse", "40", "40", 0 };
         char* term[]   = { "term", "60", "300", 0 };
         char* setts[]  = { "settings", "380", "60", 0 };
-        const char* which[] = { "/sbin/desktop", app_path("Files"),
+        const char* which[] = { "/sbin/desktop", "/sbin/shell",
+                                app_path("Files"),
                                 app_path("Terminal"), app_path("Settings") };
-        char** argv[] = { desk, browse, term, setts };
+        char** argv[] = { desk, shell, browse, term, setts };
         int started = 0;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
             const int pid = fork();
             if (pid == 0) {
                 execve(which[i], argv[i], 0);
@@ -72,6 +78,26 @@ static void session(void)
             }
             if (pid > 0)
                 ++started;
+            /* Wait for the shell to say what is left of the screen before
+             * starting anything that opens a window in it. Forking in order
+             * does not run in order, so without this the first application is
+             * placed against the whole screen and comes up under the clock -
+             * intermittently, which is the worst way for it to be wrong. A
+             * second is generous and finite: if the shell is not coming, the
+             * windows go where they would have gone anyway. */
+            if (i == 1) {
+                const unsigned long until = uptime_ms() + 1000;
+                for (;;) {
+                    /* The top edge, because that is what the bar moves and it
+                     * is zero until something has. The width is not: the bar
+                     * spans the screen and leaves it alone. */
+                    int y = 0;
+                    win_work_area(0, &y, 0, 0);
+                    if (y > 0 || uptime_ms() >= until)
+                        break;
+                    msleep(20);
+                }
+            }
         }
         for (int i = 0; i < started; ++i)
             wait(0);

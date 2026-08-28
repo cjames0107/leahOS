@@ -150,6 +150,21 @@
  * a window nothing can bring back is a window that has been lost. */
 #define WS_FLAG_HIDDEN 16u
 
+/* Above the ordinary windows: the status bar, the dock, and the panels they
+ * open.
+ *
+ * The desktop is the layer below everything and this is the layer above it, so
+ * the order on screen is desktop, windows, overlays. An overlay stays there -
+ * raising an ordinary window brings it to the front of the ordinary ones, not
+ * in front of the bar, because a clock that disappears behind whatever was
+ * clicked last is not a clock.
+ *
+ * And an overlay never takes the keyboard. It is chrome: clicking the dock to
+ * start something should not stop the window you were typing in from receiving
+ * what you type next. Focus goes to the frontmost window that is not one of
+ * these. */
+#define WS_FLAG_OVERLAY 32u
+
 /* Slot states. A client walks 0 -> CLAIMED -> LIVE and finally back to FREE. */
 #define WS_SLOT_FREE    0u
 #define WS_SLOT_CLAIMED 1u   /* won by a client, not yet filled in           */
@@ -255,6 +270,13 @@ struct ws_window {
      * chrome begins is a panel with a lid on it - the whole point of a full
      * height sidebar is that it is one surface from the top of the window. */
     volatile uint32_t sidebar;
+    /* Bring this window to the front, asked for by somebody who is not it.
+     *
+     * A window raises itself by being clicked, which is the server's business
+     * and needs nothing here. This is for the other case: a list of what is
+     * running, with the one you pick coming forward. Set it and the server
+     * raises the window and clears it; there is nothing to wait for. */
+    volatile uint32_t raise_req;
     volatile uint32_t present;      /* client bumps it after drawing           */
     volatile uint32_t drawn;        /* server copies present here once shown   */
     char title[WS_TITLE_LEN];
@@ -393,6 +415,11 @@ struct ws_input {
     /* How long the screen may sit untouched before it goes dark. Zero never
      * blanks it. Any key or movement brings it back. */
     volatile uint32_t blank_ms;
+    /* Turn the screen off now, rather than after the idle time above. Set by
+     * whoever offers a Sleep button; the compositor blanks and clears it. What
+     * this system has instead of a suspend: there is no ACPI sleep state here,
+     * and a button that claimed to suspend and only dimmed would be a lie. */
+    volatile uint32_t blank_now;
 };
 
 /* What was here: four backdrop patterns - a grid, dots, a weave and a two-tone
@@ -406,6 +433,34 @@ struct ws_bank {
     struct ws_window windows[WS_BANK_WINDOWS];
 };
 
+/* Something a program wants to say that is not worth a window.
+ *
+ * A ring rather than a queue, and a sequence number rather than a count, so
+ * that posting is one atomic increment and a write: a program saying something
+ * must never wait for anything to read it, and a reader that is not running -
+ * or has fallen behind - must not stop the ring from turning. A reader
+ * remembers the last sequence it saw; anything above that is new, and anything
+ * more than WS_NOTES_MAX behind has been overwritten and is gone, which is the
+ * right thing to do with a stale notification.
+ *
+ * `seq` is written last and read first, so a reader never sees half a message:
+ * a slot whose sequence is not the one expected is one being written. */
+#define WS_NOTES_MAX  8
+#define WS_NOTE_FROM  24
+#define WS_NOTE_TEXT  144
+
+struct ws_note {
+    volatile uint32_t seq;              /* 0 until it has been written */
+    volatile uint32_t at_ms;            /* uptime when it was posted   */
+    char from[WS_NOTE_FROM];            /* the application's own name  */
+    char text[WS_NOTE_TEXT];
+};
+
+struct ws_notes {
+    volatile uint32_t next;             /* the sequence the next post takes */
+    struct ws_note ring[WS_NOTES_MAX];
+};
+
 struct ws_shared {
     volatile uint32_t magic;
     volatile uint32_t server_pid;
@@ -415,6 +470,17 @@ struct ws_shared {
     volatile uint32_t banks;
     struct ws_theme theme;
     struct ws_input input;
+
+    /* Where an ordinary window may go: the screen, less whatever the status
+     * bar and the dock have taken.
+     *
+     * Written by whoever owns that furniture and read by everything that has
+     * to place a window, so that a new one does not open underneath the clock.
+     * A zero width means nobody has claimed anything and the whole screen is
+     * available - which is what this was before there was a bar or a dock, and
+     * what it still is if neither is running. */
+    volatile int32_t work_x, work_y, work_w, work_h;
+    struct ws_notes notes;
     struct ws_drag  drag;
     struct ws_window windows[WS_BANK_WINDOWS];
 };

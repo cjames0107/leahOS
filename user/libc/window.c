@@ -5,6 +5,7 @@
  * a structure the server is also looking at.
  */
 
+#include <display.h>
 #include <shm.h>
 #include <sys/mman.h>
 #include <stdlib.h>
@@ -545,6 +546,73 @@ void win_set_desktop(int id)
     if (w == 0)
         return;
     w->flags |= WS_FLAG_DESKTOP;
+}
+
+int win_set_size(int id, unsigned width, unsigned height)
+{
+    struct ws_window* w = ws_slot(id);
+    if (w == 0 || width == 0 || height == 0 || id < 0 || id >= g_known)
+        return -1;
+    /* Only into the room the buffer already has. A window's pixels are
+     * allocated with slack so a resize can change what is shown without
+     * allocating anything, and this is that path taken deliberately rather
+     * than in answer to a drag: no new segment, no new generation, nothing for
+     * the server to remap. Anything larger would need one, and a call that
+     * sometimes reallocates and sometimes does not is a call whose cost the
+     * caller cannot reason about - so it is refused. */
+    const unsigned stride = w->stride != 0 ? w->stride : w->width;
+    if (width > stride ||
+        (unsigned long)stride * height * 4 > g_pixel_bytes[id])
+        return -1;
+    w->width = width;
+    w->height = height;
+    return 0;
+}
+
+void win_raise(int id)
+{
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
+        return;
+    __atomic_store_n(&w->raise_req, 1, __ATOMIC_RELEASE);
+}
+
+void win_set_overlay(int id)
+{
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
+        return;
+    w->flags |= WS_FLAG_OVERLAY;
+}
+
+void win_work_area(int* x, int* y, int* w, int* h)
+{
+    struct ws_shared* block = control();
+    /* The whole screen when nobody has claimed any of it, which is what a
+     * system with no bar and no dock looks like. */
+    int wx = 0, wy = 0, ww = 0, wh = 0;
+    if (block != 0 && block->magic == WS_MAGIC && block->work_w > 0) {
+        wx = block->work_x; wy = block->work_y;
+        ww = block->work_w; wh = block->work_h;
+    } else {
+        struct fb_info fb;
+        if (fb_info(&fb) == 0) { ww = (int)fb.width; wh = (int)fb.height; }
+    }
+    if (x != 0) *x = wx;
+    if (y != 0) *y = wy;
+    if (w != 0) *w = ww;
+    if (h != 0) *h = wh;
+}
+
+void win_set_work_area(int x, int y, int w, int h)
+{
+    struct ws_shared* block = control();
+    if (block == 0)
+        return;
+    block->work_x = x;
+    block->work_y = y;
+    block->work_w = w;
+    block->work_h = h;
 }
 
 /* --- dragging things between windows ------------------------------------- */

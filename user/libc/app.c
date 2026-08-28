@@ -923,6 +923,23 @@ int app_run(struct app* a, int argc, char** argv)
         }
     }
 
+    /* Inside the part of the screen that is actually free. A window opened
+     * under the status bar has its title strip covered by the clock and cannot
+     * be dragged out from under it, and one that starts below the dock is
+     * partly off the bottom of the screen. This moves a window that would land
+     * there; it does not resize one, because a window that came back a
+     * different size every time the dock appeared would be worse. */
+    {
+        int wx, wy, ww, wh;
+        win_work_area(&wx, &wy, &ww, &wh);
+        if (ww > 0 && wh > 0) {
+            if (x + (int)a->width > wx + ww) x = wx + ww - (int)a->width;
+            if (y + (int)a->height > wy + wh) y = wy + wh - (int)a->height;
+            if (x < wx) x = wx;
+            if (y < wy) y = wy;
+        }
+    }
+
     a->id = win_create(x, y, a->width, a->height,
                        a->title != 0 ? a->title : "Window");
     if (a->id < 0) {

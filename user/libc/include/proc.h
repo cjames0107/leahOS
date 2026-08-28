@@ -66,3 +66,14 @@ unsigned long klog_read(unsigned long long* from, char* out,
                         unsigned long max);
 
 #endif /* _PROC_H */
+
+/* --- stopping the machine --------------------------------------------------
+ *
+ * Root only, and neither returns if it works.
+ *
+ * Both sync first. The kernel cannot: the filesystem is a ring-3 server and
+ * nothing in ring 0 can make it write, so flushing is the caller's job and
+ * doing it here means every caller gets it right rather than the careful ones.
+ */
+void power_off(void);
+void power_reboot(void);
