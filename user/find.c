@@ -6,6 +6,7 @@
  */
 
 #include <errno.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -53,38 +54,26 @@ static const char* base_name(const char* path)
     return last;
 }
 
-static void walk(const char* path, unsigned type, int depth)
+/* One entry: printed if it passes both tests. cli_walk does the descending,
+ * the depth limit and the "." and ".." skipping, which is the part that was
+ * written out again in every program that walks a tree. */
+static int seen(const char* path, unsigned type, void* user)
 {
+    (void)user;
     if ((g_want_type < 0 || (unsigned)g_want_type == type) &&
         match(g_pattern, base_name(path))) {
         printf("%s\n", path);
         ++g_found;
     }
-    if (type != S_IFDIR || depth >= g_max_depth)
-        return;
-
-    /* One buffer per level of the walk, on the stack, because the tree is
-     * walked depth first and the parent's listing has to survive the child's.
-     * Sixty-four entries at a time keeps that frame small; a directory with
-     * more is read in several passes by getdents' own contract. */
-    struct dirent entries[64];
-    const int n = getdents(path, entries, 64);
-    if (n < 0)
-        return;
-    for (int i = 0; i < n; ++i) {
-        const char* name = entries[i].d_name;
-        if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
-            continue;
-        char child[256];
-        const unsigned long len = strlen(path);
-        snprintf(child, sizeof(child), "%s%s%s", path,
-                 (len > 0 && path[len - 1] == '/') ? "" : "/", name);
-        walk(child, entries[i].d_type, depth + 1);
-    }
+    return 0;                           /* every match, not the first */
 }
 
 int main(int argc, char** argv)
 {
+    /* find's arguments are words, not letters - -name and -type are tests and
+     * take values - so the library is told to leave them alone. */
+    cli_begin(argc, argv, "[path] [-name pattern] [-type f|d]", 0);
+
     const char* start = ".";
     int i = 1;
 
@@ -98,18 +87,22 @@ int main(int argc, char** argv)
             ++i;
             if (argv[i][0] == 'f')      g_want_type = S_IFREG;
             else if (argv[i][0] == 'd') g_want_type = S_IFDIR;
-            else { printf("find: -type takes f or d\n"); return 2; }
+            else cli_die("-type takes f or d");
         } else {
-            printf("usage: find [path] [-name pattern] [-type f|d]\n");
-            return 2;
+            cli_usage();
         }
     }
 
     struct stat info;
     if (stat(start, &info) != 0) {
-        fprintf(stderr, "find: %s: %s\n", start, strerror(errno));
+        cli_fail("%s: %s", start, strerror(errno));
         return 1;
     }
-    walk(start, info.st_type, 0);
+    /* The starting point is a result too - `find . -type d` names the
+     * directory it was pointed at - and the walk reports what is inside a
+     * root, not the root, so it is tested here. */
+    seen(start, info.st_type, 0);
+    if (info.st_type == S_IFDIR)
+        cli_walk(start, g_max_depth, seen, 0);
     return g_found > 0 ? 0 : 1;
 }

@@ -6,12 +6,14 @@
 
 #include <ipc.h>
 #include <netd.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "", "");
     int port = -1;
     for (int i = 0; i < 400 && port < 0; ++i) {
         port = port_open(IPC_PORT_NET);

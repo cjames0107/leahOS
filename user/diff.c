@@ -13,6 +13,7 @@
 
 #include <fcntl.h>
 #include <errno.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -33,7 +34,7 @@ static int load(const char* path, int which)
 {
     const int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        fprintf(stderr, "diff: %s: %s\n", path, strerror(errno));
+        cli_fail("%s: %s", path, strerror(errno));
         return -1;
     }
     char buffer[1024], line[1024];
@@ -73,14 +74,13 @@ static int load(const char* path, int which)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3) {
-        printf("usage: diff <file1> <file2>\n");
-        return 2;
-    }
-    if (load(argv[1], 0) != 0 || load(argv[2], 1) != 0)
+    cli_begin(argc, argv, "FILE1 FILE2", "");
+    if (cli_argc() != 2)
+        cli_usage();
+    if (load(cli_arg(0), 0) != 0 || load(cli_arg(1), 1) != 0)
         return 2;
     if (g_truncated[0] || g_truncated[1])
-        printf("diff: comparing the first %d lines only\n", MAX_LINES);
+        cli_fail("comparing the first %d lines only", MAX_LINES);
 
     const int n = g_count[0], m = g_count[1];
 

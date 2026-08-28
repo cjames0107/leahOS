@@ -1,3 +1,4 @@
+#include <cli.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <stdio.h>
@@ -23,29 +24,35 @@ static int copy_fd(int fd)
 
 int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "[file...]", "");
+
     /* No files: copy stdin to stdout, which is what makes `... | cat` work. */
-    if (argc < 2) {
-        if (copy_fd(0) != 0) {
-            fprintf(stderr, "cat: %s\n", strerror(errno));
-            return 1;
-        }
-        return 0;
+    if (cli_argc() < 1) {
+        if (copy_fd(0) == 0)
+            return 0;
+        cli_fail("%s", strerror(errno));
+        return 1;
     }
 
     int status = 0;
-    for (int i = 1; i < argc; ++i) {
-        const int fd = open(argv[i], O_RDONLY);
+    for (int i = 0; i < cli_argc(); ++i) {
+        const char* name = cli_arg(i);
+
+        /* A lone "-" is standard input by name, so it can be put in the
+         * middle: `cat header - footer`. */
+        const int fd = strcmp(name, "-") == 0 ? 0 : open(name, O_RDONLY);
         if (fd < 0) {
-            fprintf(stderr, "cat: %s: %s\n", argv[i], strerror(errno));
+            cli_fail("%s: %s", name, strerror(errno));
             status = 1;
             continue;
         }
 
         if (copy_fd(fd) != 0) {
-            fprintf(stderr, "cat: %s: %s\n", argv[i], strerror(errno));
+            cli_fail("%s: %s", name, strerror(errno));
             status = 1;
         }
-        close(fd);
+        if (fd != 0)
+            close(fd);
     }
     return status;
 }

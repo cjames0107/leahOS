@@ -4,6 +4,7 @@
  * something in the middle of one be looked at without being taken out of it.
  */
 
+#include <cli.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -14,24 +15,15 @@
 
 int main(int argc, char** argv)
 {
-    int fds[MAX_FILES], count = 0, append = 0, at = 1;
+    cli_begin(argc, argv, "[-a] [file...]", "a");
+    const int append = cli_flag("-a");
 
-    for (; at < argc && argv[at][0] == '-' && argv[at][1] != '\0'; ++at) {
-        for (int c = 1; argv[at][c] != '\0'; ++c) {
-            if (argv[at][c] == 'a') {
-                append = 1;
-            } else {
-                fprintf(stderr, "tee: -%c: not an option here\n", argv[at][c]);
-                return 1;
-            }
-        }
-    }
-
-    for (; at < argc && count < MAX_FILES; ++at) {
-        const int fd = open(argv[at], O_WRONLY | O_CREAT |
+    int fds[MAX_FILES], count = 0;
+    for (int i = 0; i < cli_argc() && count < MAX_FILES; ++i) {
+        const int fd = open(cli_arg(i), O_WRONLY | O_CREAT |
                             (append ? O_APPEND : O_TRUNC));
         if (fd < 0) {
-            fprintf(stderr, "tee: %s: %s\n", argv[at], strerror(errno));
+            cli_fail("%s: %s", cli_arg(i), strerror(errno));
             continue;
         }
         fds[count++] = fd;

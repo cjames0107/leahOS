@@ -9,6 +9,7 @@
  * case of "do this to each of these" into one command.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,10 +108,11 @@ static void convert(const char* spec, char final, const char* argument)
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        fprintf(stderr, "usage: printf FORMAT [ARGUMENT...]\n");
-        return 1;
-    }
+    /* The format is written by the caller and may well begin with a dash, so
+     * the library parses nothing here. */
+    cli_begin(argc, argv, "FORMAT [ARGUMENT...]", 0);
+    if (argc < 2)
+        cli_usage();
 
     char format[1024];
     unescape(argv[1], format, sizeof(format));

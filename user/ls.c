@@ -1,3 +1,4 @@
+#include <cli.h>
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
@@ -29,19 +30,14 @@ static void join(const char* dir, const char* name, char* out, int max)
 
 int main(int argc, char** argv)
 {
-    int long_format = 0;
-    const char* path = ".";
-    for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "-l") == 0)
-            long_format = 1;
-        else
-            path = argv[i];
-    }
+    cli_begin(argc, argv, "[-l] [dir]", "l");
+    const int long_format = cli_flag("-l");
+    const char* path = cli_argc() > 0 ? cli_arg(0) : ".";
 
     struct dirent entries[64];
     const int n = getdents(path, entries, 64);
     if (n < 0) {
-        printf("ls: %s: not a directory\n", path);
+        cli_fail("%s: not a directory", path);
         return 1;
     }
 

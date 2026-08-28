@@ -10,6 +10,7 @@
  * this will not find it, and that is itself worth knowing.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -18,16 +19,12 @@
 
 int main(int argc, char** argv)
 {
-    int rounds = 40;
+    cli_begin(argc, argv, "[rounds]", "");
     int r, i;
 
-    if (argc > 1) {
-        rounds = 0;
-        for (i = 0; argv[1][i] >= '0' && argv[1][i] <= '9'; ++i)
-            rounds = rounds * 10 + (argv[1][i] - '0');
-        if (rounds <= 0)
-            rounds = 40;
-    }
+    int rounds = cli_argc() > 0 ? atoi_simple(cli_arg(0)) : 40;
+    if (rounds <= 0)
+        rounds = 40;
 
     printf("churn: %d rounds of %d\n", rounds, BATCH);
     for (r = 0; r < rounds; ++r) {

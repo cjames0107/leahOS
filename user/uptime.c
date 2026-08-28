@@ -7,12 +7,14 @@
  * the three numbers here mean what they mean everywhere.
  */
 
+#include <cli.h>
 #include <proc.h>
 #include <stdio.h>
 #include <time.h>
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "", "");
     const unsigned long ms = uptime_ms();
     const unsigned long seconds = ms / 1000;
     const unsigned long days = seconds / 86400;

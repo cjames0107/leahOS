@@ -1,3 +1,4 @@
+#include <cli.h>
 #include <stdio.h>
 #include <sys/stat.h>
 
@@ -17,18 +18,17 @@ static int parse_uint(const char* text, unsigned* out)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3) {
-        printf("usage: chown <uid> <file>\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "UID FILE", "");
+    if (cli_argc() != 2)
+        cli_usage();
     unsigned uid;
-    if (parse_uint(argv[1], &uid) < 0) {
-        printf("chown: bad uid '%s'\n", argv[1]);
+    if (parse_uint(cli_arg(0), &uid) < 0) {
+        cli_fail("bad uid '%s'", cli_arg(0));
         return 1;
     }
     /* -1 leaves the group alone. */
-    if (chown(argv[2], uid, (unsigned)-1) < 0) {
-        printf("chown: cannot change '%s' (are you root?)\n", argv[2]);
+    if (chown(cli_arg(1), uid, (unsigned)-1) < 0) {
+        cli_fail("cannot change '%s' (are you root?)", cli_arg(1));
         return 1;
     }
     return 0;

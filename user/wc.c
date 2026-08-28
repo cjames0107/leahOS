@@ -7,6 +7,7 @@
 
 #include <fcntl.h>
 #include <errno.h>
+#include <cli.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -48,21 +49,12 @@ static void show(const struct counts* c, const char* name, int lines_only,
 
 int main(int argc, char** argv)
 {
-    int lines_only = 0, words_only = 0, bytes_only = 0, first_file = argc;
-    int i = 1;
-    for (; i < argc; ++i) {
-        if (argv[i][0] != '-' || argv[i][1] == '\0')
-            break;
-        for (int k = 1; argv[i][k] != '\0'; ++k) {
-            if (argv[i][k] == 'l') lines_only = 1;
-            else if (argv[i][k] == 'w') words_only = 1;
-            else if (argv[i][k] == 'c') bytes_only = 1;
-            else { printf("wc: unknown option -%c\n", argv[i][k]); return 2; }
-        }
-    }
-    first_file = i;
+    cli_begin(argc, argv, "[-lwc] [file...]", "lwc");
+    const int lines_only = cli_flag("-l");
+    const int words_only = cli_flag("-w");
+    const int bytes_only = cli_flag("-c");
 
-    if (first_file >= argc) {
+    if (cli_argc() < 1) {
         struct counts c = { 0, 0, 0 };
         tally(stdin, &c);
         show(&c, 0, lines_only, words_only, bytes_only);
@@ -71,17 +63,18 @@ int main(int argc, char** argv)
 
     struct counts total = { 0, 0, 0 };
     int status = 0, files = 0;
-    for (i = first_file; i < argc; ++i) {
-        FILE* in = fopen(argv[i], "r");
+    for (int i = 0; i < cli_argc(); ++i) {
+        const char* name = cli_arg(i);
+        FILE* in = fopen(name, "r");
         if (in == 0) {
-            fprintf(stderr, "wc: %s: %s\n", argv[i], strerror(errno));
+            cli_fail("%s: %s", name, strerror(errno));
             status = 1;
             continue;
         }
         struct counts c = { 0, 0, 0 };
         tally(in, &c);
         fclose(in);
-        show(&c, argv[i], lines_only, words_only, bytes_only);
+        show(&c, name, lines_only, words_only, bytes_only);
         total.lines += c.lines; total.words += c.words; total.bytes += c.bytes;
         ++files;
     }

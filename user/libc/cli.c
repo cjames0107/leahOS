@@ -13,15 +13,71 @@
 
 static const char* g_name = "program";
 static const char* g_usage;
+static const char* g_options;
 static char*       g_argv[CLI_MAX_ARGS];
 static int         g_argc;
 static char*       g_rest[CLI_MAX_ARGS];
 static int         g_rest_n;
 static int         g_split;     /* the options have been separated out */
 
-void cli_begin(int argc, char** argv, const char* usage)
+/* Whether `letter` is an option this program takes a value for. */
+static int takes_value(char letter)
+{
+    if (g_options == 0)
+        return 0;
+    for (const char* o = g_options; *o != '\0'; ++o)
+        if (*o == letter)
+            return o[1] == ':';
+    return 0;
+}
+
+static int known_option(char letter)
+{
+    if (g_options == 0)
+        return 1;
+    for (const char* o = g_options; *o != '\0'; ++o)
+        if (*o == letter)
+            return 1;
+    return 0;
+}
+
+/* Refuse what the program does not understand, once and in one voice. */
+static void check_options(void)
+{
+    if (g_options == 0)
+        return;
+    for (int i = 0; i < g_argc; ++i) {
+        const char* a = g_argv[i];
+        if (a[0] == '-' && a[1] == '-' && a[2] == '\0')
+            break;
+        if (a[0] != '-' || a[1] == '\0')
+            continue;
+        if (a[1] == '-') {
+            /* A long option. Every program that declares its options answers
+             * --help the same way, so it is answered here; the rest are the
+             * program's own business. */
+            if (strcmp(a, "--help") == 0) {
+                printf("usage: %s %s\n", g_name, g_usage != 0 ? g_usage : "");
+                exit(0);
+            }
+            continue;
+        }
+        for (int k = 1; a[k] != '\0'; ++k) {
+            if (!known_option(a[k])) {
+                fprintf(stderr, "%s: unknown option -%c\n", g_name, a[k]);
+                cli_usage();
+            }
+            /* The rest of a run is this option's value: -n10. */
+            if (takes_value(a[k]))
+                break;
+        }
+    }
+}
+
+void cli_begin(int argc, char** argv, const char* usage, const char* options)
 {
     g_usage = usage;
+    g_options = options;
     if (argc > 0 && argv[0] != 0 && argv[0][0] != '\0') {
         /* The last component: a program invoked as /bin/ls should say "ls",
          * because that is what the person typed and what they will search for
@@ -37,6 +93,7 @@ void cli_begin(int argc, char** argv, const char* usage)
         g_argv[g_argc++] = argv[i];
     g_split = 0;
     g_rest_n = 0;
+    check_options();
 }
 
 int cli_fail(const char* fmt, ...)
@@ -90,10 +147,19 @@ static void split_args(void)
             only_files = 1;
             continue;
         }
-        if (only_files || a[0] != '-' || a[1] == '\0') {
-            if (g_rest_n < CLI_MAX_ARGS)
-                g_rest[g_rest_n++] = g_argv[i];
+        if (!only_files && a[0] == '-' && a[1] != '\0') {
+            /* An option. If the last letter of it takes a value and the value
+             * was not written against it, the next argument is that value and
+             * is not a file. */
+            int k = 1;
+            while (a[k] != '\0' && !takes_value(a[k]))
+                ++k;
+            if (a[k] != '\0' && a[k + 1] == '\0')
+                ++i;                    /* -n 10: skip the 10 */
+            continue;
         }
+        if (g_rest_n < CLI_MAX_ARGS)
+            g_rest[g_rest_n++] = g_argv[i];
     }
 }
 
@@ -223,15 +289,22 @@ static int walk_from(const char* dir, int depth, int max_depth,
     if (n < 0)
         return 0;
     for (int i = 0; i < n; ++i) {
-        if (here[i].d_name[0] == '.')
-            continue;                   /* . and .. and the hidden ones */
+        const char* name = here[i].d_name;
+        /* "." and ".." only. A name beginning with a dot is an ordinary file
+         * that happens to be hidden from a listing, and a walker that skipped
+         * those would make `find / -name .profile` answer nothing - which
+         * looks like the file is missing. */
+        if (name[0] == '.' &&
+            (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
+            continue;
         char full[512];
         if (strcmp(dir, "/") == 0)
-            snprintf(full, sizeof(full), "/%s", here[i].d_name);
+            snprintf(full, sizeof(full), "/%s", name);
         else
-            snprintf(full, sizeof(full), "%s/%s", dir, here[i].d_name);
-        const int is_dir = here[i].d_type == S_IFDIR;
-        const int stop = fn(full, is_dir, user);
+            snprintf(full, sizeof(full), "%s/%s", dir, name);
+        const unsigned type = here[i].d_type;
+        const int is_dir = type == S_IFDIR;
+        const int stop = fn(full, type, user);
         if (stop != 0)
             return stop;
         if (is_dir) {

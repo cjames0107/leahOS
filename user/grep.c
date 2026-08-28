@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <regex.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -115,42 +116,11 @@ static void search_fd(int fd, const char* pattern, const char* name)
     }
 }
 
-static int search_path(const char* path, const char* pattern);
-
-static void search_dir(const char* path, const char* pattern)
+static int search_file(const char* path, const char* pattern)
 {
-    static struct dirent entries[128];
-    const int n = getdents(path, entries, 128);
-    if (n < 0)
-        return;
-    for (int i = 0; i < n; ++i) {
-        if (entries[i].d_name[0] == '.')
-            continue;                   /* including . and .. */
-        char child[256];
-        snprintf(child, sizeof(child), "%s%s%s", path,
-                 path[strlen(path) - 1] == '/' ? "" : "/", entries[i].d_name);
-        search_path(child, pattern);
-    }
-}
-
-static int search_path(const char* path, const char* pattern)
-{
-    struct stat info;
-    if (stat(path, &info) != 0) {
-        fprintf(stderr, "grep: %s: %s\n", path, strerror(errno));
-        return 1;
-    }
-    if (info.st_type == S_IFDIR) {
-        if (g_recursive) {
-            search_dir(path, pattern);
-            return 0;
-        }
-        fprintf(stderr, "grep: %s: is a directory\n", path);
-        return 1;
-    }
     const int fd = open(path, O_RDONLY);
     if (fd < 0) {
-        fprintf(stderr, "grep: %s: %s\n", path, strerror(errno));
+        cli_fail("%s: %s", path, strerror(errno));
         return 1;
     }
     search_fd(fd, pattern, path);
@@ -158,33 +128,51 @@ static int search_path(const char* path, const char* pattern)
     return 0;
 }
 
+/* One entry of a recursive search. Only regular files are opened: a search
+ * that read a fifo would sit there waiting for a writer that is not coming,
+ * and one that read a device would search the device. */
+static int found_by_walk(const char* path, unsigned type, void* user)
+{
+    if (type == S_IFREG)
+        search_file(path, (const char*)user);
+    return 0;                           /* all of them, not the first */
+}
+
+static int search_path(const char* path, const char* pattern)
+{
+    struct stat info;
+    if (stat(path, &info) != 0) {
+        cli_fail("%s: %s", path, strerror(errno));
+        return 1;
+    }
+    if (info.st_type == S_IFDIR) {
+        if (g_recursive) {
+            cli_walk(path, 64, found_by_walk, (void*)pattern);
+            return 0;
+        }
+        cli_fail("%s: is a directory", path);
+        return 1;
+    }
+    return search_file(path, pattern);
+}
+
 int main(int argc, char** argv)
 {
-    int i = 1;
-    for (; i < argc; ++i) {
-        if (argv[i][0] != '-' || argv[i][1] == '\0')
-            break;
-        for (int k = 1; argv[i][k] != '\0'; ++k) {
-            switch (argv[i][k]) {
-            case 'i': g_ignore_case = 1; break;
-            case 'F': g_fixed = 1; break;
-            case 'v': g_invert = 1; break;
-            case 'n': g_numbers = 1; break;
-            case 'c': g_count_only = 1; break;
-            case 'r': g_recursive = 1; break;
-            case 'l': g_names_only = 1; break;
-            default:
-                printf("grep: unknown option -%c\n", argv[i][k]);
-                return 2;
-            }
-        }
-    }
-    if (i >= argc) {
-        printf("usage: grep [-ivncrlF] PATTERN [FILE...]\n");
-        printf("  the pattern is a regular expression; -F for a literal one\n");
-        return 2;
-    }
-    const char* pattern = argv[i++];
+    cli_begin(argc, argv,
+              "[-ivncrlF] PATTERN [FILE...]\n"
+              "  the pattern is a regular expression; -F for a literal one",
+              "iFvncrl");
+    g_ignore_case = cli_flag("-i");
+    g_fixed       = cli_flag("-F");
+    g_invert      = cli_flag("-v");
+    g_numbers     = cli_flag("-n");
+    g_count_only  = cli_flag("-c");
+    g_recursive   = cli_flag("-r");
+    g_names_only  = cli_flag("-l");
+
+    if (cli_argc() < 1)
+        cli_usage();
+    const char* pattern = cli_arg(0);
 
     if (!g_fixed) {
         const char* error = 0;
@@ -192,22 +180,22 @@ int main(int argc, char** argv)
         if (g_re == 0) {
             /* Said plainly and once, before anything is read: a pattern that
              * cannot be compiled is not a search that found nothing. */
-            fprintf(stderr, "grep: %s: %s\n", pattern, error);
+            cli_fail("%s: %s", pattern, error);
             return 2;
         }
     }
 
-    if (i >= argc) {
+    if (cli_argc() < 2) {
         search_fd(0, pattern, "(standard input)");
         return g_total_matches > 0 ? 0 : 1;
     }
     /* The name goes on each line when there is more than one file to tell
      * apart, which is what makes a recursive search readable. */
-    g_show_name = (argc - i > 1) || g_recursive;
+    g_show_name = (cli_argc() > 2) || g_recursive;
 
     int status = 0;
-    for (; i < argc; ++i)
-        if (search_path(argv[i], pattern) != 0)
+    for (int i = 1; i < cli_argc(); ++i)
+        if (search_path(cli_arg(i), pattern) != 0)
             status = 2;
     if (status != 0)
         return status;

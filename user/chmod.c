@@ -1,3 +1,4 @@
+#include <cli.h>
 #include <stdio.h>
 #include <sys/stat.h>
 
@@ -20,17 +21,16 @@ static int parse_octal(const char* text, unsigned* out)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3) {
-        printf("usage: chmod <octal-mode> <file>\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "OCTAL-MODE FILE", "");
+    if (cli_argc() != 2)
+        cli_usage();
     unsigned mode;
-    if (parse_octal(argv[1], &mode) < 0) {
-        printf("chmod: bad mode '%s'\n", argv[1]);
+    if (parse_octal(cli_arg(0), &mode) < 0) {
+        cli_fail("bad mode '%s'", cli_arg(0));
         return 1;
     }
-    if (chmod(argv[2], mode) < 0) {
-        printf("chmod: cannot change '%s'\n", argv[2]);
+    if (chmod(cli_arg(1), mode) < 0) {
+        cli_fail("cannot change '%s'", cli_arg(1));
         return 1;
     }
     return 0;

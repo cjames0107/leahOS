@@ -17,6 +17,7 @@
  */
 
 #include <fcntl.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,14 +72,15 @@ static unsigned long read_all(int which, int of)
 
 int main(int argc, char** argv)
 {
-    int readers = argc > 1 ? atoi_simple(argv[1]) : 1;
+    cli_begin(argc, argv, "[readers]", "");
+    int readers = cli_argc() > 0 ? atoi_simple(cli_arg(0)) : 1;
     if (readers < 1) readers = 1;
     if (readers > 8) readers = 8;
 
     collect("/usr/bin");
     collect("/bin");
     if (g_files == 0) {
-        printf("fsbench: nothing to read\n");
+        cli_fail("nothing to read");
         return 1;
     }
 

@@ -5,6 +5,7 @@
  * this program.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -26,16 +27,16 @@ static int read_line(const char* prompt, char* out, int max)
 
 int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "[user]", "");
+    if (cli_argc() > 1)
+        cli_usage();
+
     char self[32] = {};
     if (username(getuid(), self) != 0) {
-        printf("passwd: no account for this uid\n");
+        cli_fail("no account for this uid");
         return 1;
     }
-    const char* target = argc == 2 ? argv[1] : self;
-    if (argc > 2) {
-        printf("usage: passwd [user]\n");
-        return 1;
-    }
+    const char* target = cli_argc() == 1 ? cli_arg(0) : self;
 
     char old_password[128] = {};
     const int need_old = getuid() != 0;
@@ -51,12 +52,12 @@ int main(int argc, char** argv)
         return 1;
 
     if (strcmp(new_password, again) != 0) {
-        printf("passwd: passwords do not match\n");
+        cli_fail("passwords do not match");
         return 1;
     }
 
     if (passwd(target, need_old ? old_password : 0, new_password) < 0) {
-        printf("passwd: could not change the password for %s\n", target);
+        cli_fail("could not change the password for %s", target);
         return 1;
     }
     memset(old_password, 0, sizeof(old_password));

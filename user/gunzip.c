@@ -7,6 +7,7 @@
 
 #include <fcntl.h>
 #include <inflate.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,33 +34,27 @@ static void output_name(const char* in, char* out, unsigned long max)
 
 int main(int argc, char** argv)
 {
-    int to_stdout = 0, list_only = 0, i = 1;
-    for (; i < argc; ++i) {
-        if (argv[i][0] != '-' || argv[i][1] == '\0')
-            break;
-        for (int k = 1; argv[i][k] != '\0'; ++k) {
-            if (argv[i][k] == 'c')      to_stdout = 1;
-            else if (argv[i][k] == 'l') list_only = 1;
-            else { printf("gunzip: unknown option -%c\n", argv[i][k]); return 2; }
-        }
-    }
-    if (i >= argc) {
-        printf("usage: gunzip [-c] [-l] <file.gz>...\n");
-        printf("  -c  write to standard output    -l  list, do not extract\n");
-        return 2;
-    }
+    cli_begin(argc, argv,
+              "[-c] [-l] <file.gz>...\n"
+              "  -c  write to standard output    -l  list, do not extract",
+              "cl");
+    const int to_stdout = cli_flag("-c");
+    const int list_only = cli_flag("-l");
+    if (cli_argc() < 1)
+        cli_usage();
 
     g_in = (unsigned char*)malloc(MAX_INPUT);
     if (g_in == 0) {
-        printf("gunzip: out of memory\n");
+        cli_fail("out of memory");
         return 1;
     }
 
     int status = 0;
-    for (; i < argc; ++i) {
-        const int fd = open(argv[i], O_RDONLY);
+    for (int i = 0; i < cli_argc(); ++i) {
+        const char* src = cli_arg(i);
+        const int fd = open(src, O_RDONLY);
         if (fd < 0) {
-            printf("gunzip: %s: cannot open\n", argv[i]);
+            cli_fail("%s: cannot open", src);
             status = 1;
             continue;
         }
@@ -70,19 +65,19 @@ int main(int argc, char** argv)
 
         const long size = inflate_gzip_size(g_in, (unsigned long)len);
         if (size < 0) {
-            printf("gunzip: %s: not a gzip file\n", argv[i]);
+            cli_fail("%s: not a gzip file", src);
             status = 1;
             continue;
         }
         if (list_only) {
-            printf("%10ld %10ld  %s\n", len, size, argv[i]);
+            printf("%10ld %10ld  %s\n", len, size, src);
             continue;
         }
 
         unsigned char* out = (unsigned char*)malloc((unsigned long)size + 1);
         if (out == 0) {
-            printf("gunzip: %s: needs %ld bytes and there are not that many\n",
-                   argv[i], size);
+            cli_fail("%s: needs %ld bytes and there are not that many",
+                     src, size);
             status = 1;
             continue;
         }
@@ -91,7 +86,7 @@ int main(int argc, char** argv)
         if (got < 0) {
             /* The CRC is checked, so this covers a truncated file and a
              * corrupted one as well as a malformed stream. */
-            printf("gunzip: %s: damaged, or not really gzip\n", argv[i]);
+            cli_fail("%s: damaged, or not really gzip", src);
             status = 1;
             continue;
         }
@@ -101,21 +96,21 @@ int main(int argc, char** argv)
             continue;
         }
         char name[256];
-        output_name(argv[i], name, sizeof(name));
+        output_name(src, name, sizeof(name));
         const int wfd = open(name, O_WRONLY | O_CREAT | O_TRUNC);
         if (wfd < 0) {
-            printf("gunzip: %s: cannot create\n", name);
+            cli_fail("%s: cannot create", name);
             status = 1;
             continue;
         }
         const long wrote = write(wfd, out, (unsigned long)got);
         close(wfd);
         if (wrote != got) {
-            printf("gunzip: %s: wrote %ld of %ld bytes\n", name, wrote, got);
+            cli_fail("%s: wrote %ld of %ld bytes", name, wrote, got);
             status = 1;
             continue;
         }
-        printf("%s -> %s (%ld bytes)\n", argv[i], name, got);
+        printf("%s -> %s (%ld bytes)\n", src, name, got);
     }
     return status;
 }

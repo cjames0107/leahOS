@@ -1,21 +1,16 @@
 /* fsck - check the filesystem, and put right what can be put right. */
 
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/statfs.h>
 
 int main(int argc, char** argv)
 {
-    int repair = 0;
-    for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "-y") == 0 || strcmp(argv[i], "-p") == 0)
-            repair = 1;
-        else {
-            printf("usage: fsck [-y]\n");
-            printf("  -y  repair what can be repaired, without asking\n");
-            return 2;
-        }
-    }
+    cli_begin(argc, argv,
+              "[-y]   (-y repairs what can be repaired, without asking)",
+              "yp");
+    const int repair = cli_flag("-y") || cli_flag("-p");
 
     char report[4096];
     unsigned fixed = 0;
@@ -25,7 +20,7 @@ int main(int argc, char** argv)
         printf("%s", report);
 
     if (problems < 0) {
-        printf("fsck: the check could not be run\n");
+        cli_fail("the check could not be run");
         return 2;
     }
     if (problems == 0)

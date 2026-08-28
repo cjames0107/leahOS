@@ -5,18 +5,18 @@
  * and send somebody home.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        printf("usage: dirname PATH\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "PATH", "");
+    if (cli_argc() < 1)
+        cli_usage();
 
     char work[512];
-    snprintf(work, sizeof(work), "%s", argv[1]);
+    snprintf(work, sizeof(work), "%s", cli_arg(0));
 
     unsigned long n = strlen(work);
     while (n > 1 && work[n - 1] == '/')

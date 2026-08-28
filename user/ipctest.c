@@ -7,6 +7,7 @@
  */
 
 #include <ipc.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -55,8 +56,9 @@ static int server(void)
     }
 }
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "", "");
     const int pid = fork();
     if (pid == 0)
         exit(server());

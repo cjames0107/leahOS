@@ -26,6 +26,7 @@
 #include <fcntl.h>
 #include <paths.h>
 #include <signal.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -736,7 +737,7 @@ static int run_simple(char words[][256], int start, int end, int background,
 
     const int pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "sh: cannot fork: %s\n", strerror(errno));
+        cli_fail("cannot fork: %s", strerror(errno));
         return 1;
     }
     if (pid == 0) {
@@ -779,7 +780,7 @@ static int run_pipeline(char words[][256], int start, int end, int background,
         const int to = (stage < count) ? bars[stage] : end;
         int pfd[2] = { -1, -1 };
         if (stage < count && pipe(pfd) < 0) {
-            fprintf(stderr, "sh: cannot pipe: %s\n", strerror(errno));
+            cli_fail("cannot pipe: %s", strerror(errno));
             return 1;
         }
 
@@ -904,7 +905,7 @@ static int run_script(const char* path, int argc, char** argv)
 {
     FILE* in = fopen(path, "r");
     if (in == 0) {
-        fprintf(stderr, "sh: %s: %s\n", path, strerror(errno));
+        cli_fail("%s: %s", path, strerror(errno));
         return 127;
     }
     char** saved_args = g_args;
@@ -929,6 +930,10 @@ static int run_script(const char* path, int argc, char** argv)
 
 int main(int argc, char** argv)
 {
+    /* Everything after the script or the -c string belongs to what is being
+     * run, not to this shell, so the library parses none of it. */
+    cli_begin(argc, argv, "[-c command | script [arg...]]", 0);
+
     /* A script named on the command line, or -c and a string. Either way this
      * shell is not interactive and prints no prompt - a prompt written into a
      * pipe is noise in whatever reads it. */

@@ -10,14 +10,16 @@
 #include <ipc.h>
 #include <nic.h>
 #include <shm.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 static void put16(uint8_t* p, unsigned v) { p[0] = v >> 8; p[1] = v & 0xFF; }
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "", "");
     int port = -1;
     for (int i = 0; i < 300 && port < 0; ++i) {
         port = port_open(IPC_PORT_NIC);

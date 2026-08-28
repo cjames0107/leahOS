@@ -4,6 +4,7 @@
  * directory and gives it to its new owner. Nothing here ever holds a digest.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -38,19 +39,18 @@ static unsigned parse_uint(const char* text, unsigned fallback)
 
 int main(int argc, char** argv)
 {
-    if (argc < 2 || argc > 3) {
-        printf("usage: useradd <name> [uid]\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "NAME [uid]", "");
+    if (cli_argc() < 1 || cli_argc() > 2)
+        cli_usage();
     if (getuid() != 0) {
-        printf("useradd: only root can create accounts\n");
+        cli_fail("only root can create accounts");
         return 1;
     }
 
-    const char* name = argv[1];
+    const char* name = cli_arg(0);
     /* 0 asks the kernel for the next free uid; an explicit one is honoured but
      * refused if it is already in use. */
-    const unsigned uid = argc == 3 ? parse_uint(argv[2], 0) : 0;
+    const unsigned uid = cli_argc() == 2 ? parse_uint(cli_arg(1), 0) : 0;
 
     char password[128] = {};
     char again[128] = {};
@@ -59,11 +59,11 @@ int main(int argc, char** argv)
     if (read_line("Retype password: ", again, sizeof(again), 0) < 0)
         return 1;
     if (strcmp(password, again) != 0) {
-        printf("useradd: passwords do not match\n");
+        cli_fail("passwords do not match");
         return 1;
     }
     if (password[0] == '\0') {
-        printf("useradd: refusing to create an account with no password\n");
+        cli_fail("refusing to create an account with no password");
         return 1;
     }
 
@@ -71,7 +71,7 @@ int main(int argc, char** argv)
     snprintf(home, sizeof(home), "/home/%s", name);
 
     if (useradd(name, password, uid, uid, home) < 0) {
-        printf("useradd: could not create '%s' (does it already exist?)\n", name);
+        cli_fail("could not create '%s' (does it already exist?)", name);
         return 1;
     }
     memset(password, 0, sizeof(password));

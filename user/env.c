@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <paths.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,12 @@
 
 int main(int argc, char** argv)
 {
+    /* env's own options stop at the command, whose arguments are the
+     * command's business and must not be read as env's - so the library is
+     * told to parse nothing and env reads its two options itself. */
+    cli_begin(argc, argv, "[-i] [-u NAME] [NAME=VALUE...] [command [arg...]]",
+              0);
+
     int i = 1;
 
     for (; i < argc; ++i) {
@@ -46,10 +53,10 @@ int main(int argc, char** argv)
 
     char path[256];
     if (path_find_program(argv[i], path, sizeof(path)) != 0) {
-        fprintf(stderr, "env: %s: command not found\n", argv[i]);
+        cli_fail("%s: command not found", argv[i]);
         return 127;
     }
     execve(path, &argv[i], environ);
-    fprintf(stderr, "env: %s: %s\n", argv[i], strerror(errno));
+    cli_fail("%s: %s", argv[i], strerror(errno));
     return 126;
 }

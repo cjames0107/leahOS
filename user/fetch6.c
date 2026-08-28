@@ -7,6 +7,7 @@
  */
 
 #include <net.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -21,11 +22,12 @@ static void print6(const unsigned char* a)
 
 int main(int argc, char** argv)
 {
-    const char* host = argc > 1 ? argv[1] : "example.com";
+    cli_begin(argc, argv, "[host]", "");
+    const char* host = cli_argc() > 0 ? cli_arg(0) : "example.com";
 
     unsigned char address[16];
     if (resolve6(host, address) != 0) {
-        printf("fetch6: no AAAA record for %s\n", host);
+        cli_fail("no AAAA record for %s", host);
         return 1;
     }
     printf("fetch6: %s is ", host);
@@ -34,11 +36,11 @@ int main(int argc, char** argv)
 
     const int conn = tcp_connect6(address, 80);
     if (conn == -2) {
-        printf("fetch6: refused - the segment arrived and was turned down\n");
+        cli_fail("refused - the segment arrived and was turned down");
         return 1;
     }
     if (conn < 0) {
-        printf("fetch6: no answer - nothing came back at all\n");
+        cli_fail("no answer - nothing came back at all");
         return 1;
     }
     printf("fetch6: connected\n");

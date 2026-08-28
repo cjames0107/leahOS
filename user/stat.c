@@ -1,5 +1,6 @@
 /* stat - what the filesystem knows about a file. */
 
+#include <cli.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -30,14 +31,14 @@ static void print_owner(const char* label, unsigned id)
 
 int main(int argc, char** argv)
 {
-    if (argc != 2) {
-        printf("usage: stat <file>\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "FILE", "");
+    if (cli_argc() != 1)
+        cli_usage();
+    const char* name = cli_arg(0);
 
     struct stat st;
-    if (stat(argv[1], &st) < 0) {
-        printf("stat: %s: no such file\n", argv[1]);
+    if (stat(name, &st) < 0) {
+        cli_fail("%s: no such file", name);
         return 1;
     }
 
@@ -51,7 +52,7 @@ int main(int argc, char** argv)
                      : st.st_type == S_IFBLK  ? "block device"
                                               : "regular file";
 
-    printf("  file: %s\n", argv[1]);
+    printf("  file: %s\n", name);
     printf("  type: %s\n", kind);
     /* A device has no size worth printing; it has a driver. */
     if (st.st_type == S_IFCHR || st.st_type == S_IFBLK)

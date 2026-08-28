@@ -9,20 +9,21 @@
  * pointless loss.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        printf("usage: sleep SECONDS\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "SECONDS...", "");
+    if (cli_argc() < 1)
+        cli_usage();
 
     unsigned long total = 0;
-    for (int i = 1; i < argc; ++i) {
-        const char* text = argv[i];
+    for (int i = 0; i < cli_argc(); ++i) {
+        const char* start = cli_arg(i);
+        const char* text = start;
         unsigned long ms = 0;
         int digits = 0;
 
@@ -45,7 +46,7 @@ int main(int argc, char** argv)
                 ++text;
         }
         if (digits == 0 || *text != '\0') {
-            fprintf(stderr, "sleep: %s: not a number of seconds\n", argv[i]);
+            cli_fail("%s: not a number of seconds", start);
             return 1;
         }
         total += ms;

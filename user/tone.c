@@ -7,6 +7,7 @@
  */
 
 #include <audio.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -62,12 +63,11 @@ static short envelope(short sample, long i, long total)
 
 int main(int argc, char** argv)
 {
-    const int hz = argc > 1 ? atoi_simple(argv[1]) : 440;
-    const int ms = argc > 2 ? atoi_simple(argv[2]) : 500;
-    if (hz <= 0 || ms <= 0) {
-        printf("usage: tone [hz] [ms]\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "[hz] [ms]", "");
+    const int hz = cli_argc() > 0 ? atoi_simple(cli_arg(0)) : 440;
+    const int ms = cli_argc() > 1 ? atoi_simple(cli_arg(1)) : 500;
+    if (hz <= 0 || ms <= 0)
+        cli_usage();
 
     const long frames = (long)AUDIO_RATE * ms / 1000;
     /* 16.16 fixed point: how far around the table each frame advances. */

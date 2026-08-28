@@ -10,6 +10,7 @@
  */
 
 #include <bundle.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -19,18 +20,19 @@ static void launch(const char* path, char** argv)
 {
     const int pid = fork();
     if (pid < 0) {
-        printf("gui: cannot fork for %s\n", path);
+        cli_fail("cannot fork for %s", path);
         return;
     }
     if (pid == 0) {
         execve(path, argv, 0);
-        printf("gui: cannot exec %s\n", path);
+        cli_fail("cannot exec %s", path);
         exit(127);
     }
 }
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "", "");
     /* Bring a server up if there is not one already. Mapping the framebuffer is
      * root's to do, so an ordinary user cannot start the desktop from a shell -
      * login starts it for them instead. */
@@ -43,7 +45,7 @@ int main(void)
         for (int i = 0; i < 600 && !win_server_running(); ++i)
             msleep(10);
         if (!win_server_running()) {
-            printf("gui: no window server, and only root can start one.\n");
+            cli_fail("no window server, and only root can start one.");
             printf("     log in again - the desktop starts by itself.\n");
             return 1;
         }

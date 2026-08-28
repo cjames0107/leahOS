@@ -1,23 +1,24 @@
 #include <net.h>
+#include <cli.h>
 #include <stdio.h>
 
 int main(int argc, char** argv)
 {
-    if (argc != 2) {
-        printf("usage: ping <host>\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "HOST", "");
+    if (cli_argc() != 1)
+        cli_usage();
+    const char* host = cli_arg(0);
 
     /* Accept a dotted-quad directly, otherwise resolve the name over DNS. */
     uint32_t ip;
-    if (parse_ip(argv[1], &ip) < 0) {
-        if (resolve(argv[1], &ip) < 0) {
-            printf("ping: cannot resolve '%s'\n", argv[1]);
+    if (parse_ip(host, &ip) < 0) {
+        if (resolve(host, &ip) < 0) {
+            cli_fail("cannot resolve '%s'", host);
             return 1;
         }
     }
 
-    printf("PING %s (%u.%u.%u.%u): 32 data bytes\n", argv[1],
+    printf("PING %s (%u.%u.%u.%u): 32 data bytes\n", host,
            (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 
     int sent = 0;
@@ -27,7 +28,7 @@ int main(int argc, char** argv)
         ++sent;
         int result = ping(ip, seq, &ttl);
         if (result < 0) {
-            printf("ping: no network\n");
+            cli_fail("no network");
             return 1;
         }
         if (result == 0)

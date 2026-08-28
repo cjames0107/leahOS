@@ -12,6 +12,7 @@
 
 #include <display.h>
 #include <image.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,29 +20,29 @@
 
 int main(int argc, char** argv)
 {
-    const char* path = (argc > 1) ? argv[1] : "/root/screen.png";
+    cli_begin(argc, argv, "[file.png]", "");
+    const char* path = cli_argc() > 0 ? cli_arg(0) : "/root/screen.png";
 
     struct fb_info fb;
     if (fb_info(&fb) != 0 || fb.width == 0 || fb.height == 0) {
-        printf("screenshot: no framebuffer\n");
+        cli_fail("no framebuffer");
         return 1;
     }
     if (fb.bits_per_pixel != 32) {
-        printf("screenshot: the screen is %u bits per pixel, not 32\n",
-               fb.bits_per_pixel);
+        cli_fail("the screen is %u bits per pixel, not 32", fb.bits_per_pixel);
         return 1;
     }
 
     const unsigned char* pixels = (const unsigned char*)fb_map();
     if (pixels == 0) {
         /* The likely reason, said plainly rather than as a bare failure. */
-        printf("screenshot: cannot map the screen (this needs root)\n");
+        cli_fail("cannot map the screen (this needs root)");
         return 1;
     }
 
     uint32_t* shot = (uint32_t*)malloc((unsigned long)fb.width * fb.height * 4);
     if (shot == 0) {
-        printf("screenshot: out of memory for %ux%u\n", fb.width, fb.height);
+        cli_fail("out of memory for %ux%u", fb.width, fb.height);
         return 1;
     }
 
@@ -56,7 +57,7 @@ int main(int argc, char** argv)
     }
 
     if (img_write_png(path, shot, fb.width, fb.height) != 0) {
-        printf("screenshot: cannot write %s\n", path);
+        cli_fail("cannot write %s", path);
         return 1;
     }
     printf("%ux%u -> %s\n", fb.width, fb.height, path);

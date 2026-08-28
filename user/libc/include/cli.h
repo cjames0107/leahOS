@@ -5,29 +5,57 @@
 
 /* The things a command-line program here writes every time.
  *
- * Counted rather than guessed at: thirty-three programs print their own usage
- * text, eighteen open a file and read it whole by hand, nine walk a directory
- * tree, and most of them format an error as "name: something went wrong" with
- * the name typed out again as a literal. None of that is what any of those
- * programs is about.
+ * Counted rather than guessed at, before any of it was moved here:
+ * thirty-three programs printed their own usage text, eighteen opened a file
+ * and read it whole by hand, nine walked a directory tree, and most of them
+ * formatted an error as "name: something went wrong" with the name typed out
+ * again as a literal. None of that was what any of those programs was about.
  *
- * The pattern this replaces, from head.c, is representative:
+ * The pattern this replaced, from head.c, is representative:
  *
  *     if (i < argc && argv[i][0] == '-' && argv[i][1] == 'n') {
  *         if (argv[i][2] != '\0') { want = atoi_simple(&argv[i][2]); ++i; }
  *         else if (i + 1 < argc)  { want = atoi_simple(argv[i + 1]); i += 2; }
  *     }
  *
- * - which is correct, and is written again in the next program, and is where
- * the difference between "-n10" and "-n 10" is decided one program at a time.
+ * - which is correct, and was written again in the next program, and is where
+ * the difference between "-n10" and "-n 10" was decided one program at a
+ * time. Every command-line program under user/ now begins with cli_begin, so
+ * that decision is made once, here.
+ *
+ * A few of them pass 0 for the options and keep their own argument handling:
+ * sh, env, echo, printf, kill and find, whose arguments are not letters after
+ * a dash - a signal, a format, a command to run with its own options, a test
+ * spelled as a word. They still take their name and their usage line from
+ * here, which is the part that was being written out by hand.
  */
 
-/* Start up: remember the program's name for messages, and the usage line for
- * when it is asked for or needed. `usage` may be 0.
+/* Start up: remember the program's name for messages, the usage line for when
+ * it is asked for or needed, and which options this program understands.
  *
  * The name comes from argv[0] rather than a literal, so a program that is
- * renamed says its new name. */
-void cli_begin(int argc, char** argv, const char* usage);
+ * renamed says its new name.
+ *
+ * `options` is the letters, with a colon after any that take a value: "n:v"
+ * means -n takes one and -v does not. Two things follow from saying so:
+ *
+ *  - the value is not mistaken for a filename. Without it "head -n 10 x"
+ *    leaves "10" among the positional arguments, and head opens a file called
+ *    10. The separated form cannot be told from a flag followed by a filename
+ *    by looking at it, so the program has to say.
+ *
+ *  - an option the program does not understand is refused, once, here, rather
+ *    than being silently treated as a filename by some programs and reported
+ *    by others in their own words.
+ *
+ * Declaring options also answers --help with the usage line, so every program
+ * that has options has that without writing it.
+ *
+ * Pass 0 when the arguments are not option-shaped at all - `echo -n`, `kill
+ * -9`, `printf '%s'` - and nothing is parsed, refused, or answered, because
+ * those programs must pass `--help` through as the word it is. `usage` may
+ * be 0. */
+void cli_begin(int argc, char** argv, const char* usage, const char* options);
 
 /* "name: ..." on stderr. cli_fail returns -1 so it can be the whole of an
  * error path; cli_die does not return. */
@@ -76,16 +104,22 @@ int cli_write_file(const char* path, const void* data, unsigned long bytes);
 
 /* --- walking a tree --------------------------------------------------------
  *
- * Nine programs walk directories. The tricky parts are the same every time and
- * are decided here: how deep to go, that "." and ".." are not entries to
- * recurse into, and that a bundle is a document rather than a folder to
- * descend into.
+ * Nine programs walked directories. The tricky parts are the same every time
+ * and are decided here: how deep to go, that "." and ".." are not entries to
+ * recurse into, and that a name beginning with a dot is an ordinary file that
+ * is walked like any other.
  *
- * The callback gets the full path and whether it is a directory, and returns 0
- * to carry on or non-zero to stop the whole walk - which is what makes "find
- * the first one" as cheap as it should be.
+ * The callback gets the full path and the entry's type - one of the S_IF*
+ * values, so a caller can tell a regular file from a device or a fifo and not
+ * only from a directory - and returns 0 to carry on or non-zero to stop the
+ * whole walk, which is what makes "find the first one" as cheap as it should
+ * be.
+ *
+ * The root itself is not passed to the callback; what is walked is what is
+ * inside it. A caller that has something to say about the root says it before
+ * calling, where it has the root's own name to hand.
  */
-typedef int (*cli_walk_fn)(const char* path, int is_dir, void* user);
+typedef int (*cli_walk_fn)(const char* path, unsigned type, void* user);
 
 int cli_walk(const char* root, int max_depth, cli_walk_fn fn, void* user);
 

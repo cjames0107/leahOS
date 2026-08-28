@@ -11,6 +11,7 @@
  */
 
 #include <display.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -37,12 +38,12 @@ static int bench(int ms)
 {
     struct fb_info fb;
     if (fb_info(&fb) != 0) {
-        printf("wintest: no framebuffer\n");
+        cli_fail("no framebuffer");
         return 1;
     }
     const int id = win_create(0, 0, fb.width - 40, fb.height - 120, "bench");
     if (id < 0) {
-        printf("wintest: could not open a window\n");
+        cli_fail("could not open a window");
         return 1;
     }
     win_set_alpha(id);
@@ -99,19 +100,19 @@ static int blitbench(int rounds)
 {
     struct fb_info fb;
     if (fb_info(&fb) != 0) {
-        printf("wintest: no framebuffer\n");
+        cli_fail("no framebuffer");
         return 1;
     }
     unsigned char* screen = (unsigned char*)fb_map();
     if (screen == 0) {
-        printf("wintest: cannot map the framebuffer\n");
+        cli_fail("cannot map the framebuffer");
         return 1;
     }
     const unsigned long bytes = (unsigned long)fb.width * fb.height * 4;
     uint32_t* ram = (uint32_t*)malloc(bytes);
     uint32_t* ram2 = (uint32_t*)malloc(bytes);
     if (ram == 0 || ram2 == 0) {
-        printf("wintest: out of memory\n");
+        cli_fail("out of memory");
         return 1;
     }
     for (unsigned long i = 0; i < bytes / 4; ++i)
@@ -172,19 +173,22 @@ static int keys(int ms)
 
 int main(int argc, char** argv)
 {
-    if (argc > 1 && strcmp(argv[1], "keys") == 0)
-        return keys(argc > 2 ? atoi_simple(argv[2]) : 6000);
-    if (argc > 1 && strcmp(argv[1], "blit") == 0)
-        return blitbench(argc > 2 ? atoi_simple(argv[2]) : 20);
-    if (argc > 1 && strcmp(argv[1], "bench") == 0)
-        return bench(argc > 2 ? atoi_simple(argv[2]) : 4000);
+    cli_begin(argc, argv, "[keys|blit|bench] [n]   (or: [windows] [ms])", "");
+    const char* what = cli_arg(0);
 
-    const int want = argc > 1 ? atoi_simple(argv[1]) : 40;
-    const int hold = argc > 2 ? atoi_simple(argv[2]) : 3000;
+    if (what != 0 && strcmp(what, "keys") == 0)
+        return keys(cli_argc() > 1 ? atoi_simple(cli_arg(1)) : 6000);
+    if (what != 0 && strcmp(what, "blit") == 0)
+        return blitbench(cli_argc() > 1 ? atoi_simple(cli_arg(1)) : 20);
+    if (what != 0 && strcmp(what, "bench") == 0)
+        return bench(cli_argc() > 1 ? atoi_simple(cli_arg(1)) : 4000);
+
+    const int want = what != 0 ? atoi_simple(what) : 40;
+    const int hold = cli_argc() > 1 ? atoi_simple(cli_arg(1)) : 3000;
 
     int* ids = (int*)malloc(sizeof(int) * (unsigned)want);
     if (ids == 0) {
-        printf("wintest: out of memory\n");
+        cli_fail("out of memory");
         return 1;
     }
 

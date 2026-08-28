@@ -7,6 +7,7 @@
  */
 
 #include <signal.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +54,12 @@ static void list_signals(void)
 
 int main(int argc, char** argv)
 {
+    /* The arguments are not option-shaped: -9 and -TERM name a signal, not
+     * flags, so the library is told to leave them alone and kill reads them
+     * itself. */
+    cli_begin(argc, argv, "[-SIGNAL] pid...   (a negative pid is a job)\n"
+                          "       kill -l", 0);
+
     int signo = SIGTERM;
     int at = 1;
 
@@ -67,23 +74,20 @@ int main(int argc, char** argv)
     if (argc > 2 && argv[1][0] == '-' && argv[1][1] != '\0') {
         signo = signal_of(argv[1] + 1);
         if (signo < 0) {
-            fprintf(stderr, "kill: %s: no such signal\n", argv[1] + 1);
+            cli_fail("%s: no such signal", argv[1] + 1);
             return 1;
         }
         at = 2;
     }
 
-    if (at >= argc) {
-        printf("usage: kill [-SIGNAL] pid...   (a negative pid is a job)\n");
-        printf("       kill -l\n");
-        return 1;
-    }
+    if (at >= argc)
+        cli_usage();
 
     int failed = 0;
     for (; at < argc; ++at) {
         const int pid = atoi_simple(argv[at]);
         if (kill(pid, signo) != 0) {
-            fprintf(stderr, "kill: %s: no such process\n", argv[at]);
+            cli_fail("%s: no such process", argv[at]);
             failed = 1;
         }
     }

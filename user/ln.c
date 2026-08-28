@@ -13,6 +13,7 @@
  */
 
 #include <errno.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -37,32 +38,21 @@ static void resolve_destination(const char* target, const char* given,
 
 int main(int argc, char** argv)
 {
-    int symbolic = 0, at = 1;
+    cli_begin(argc, argv,
+              "[-s] TARGET NAME   (without -s, another name for the same file)",
+              "s");
+    const int symbolic = cli_flag("-s");
+    if (cli_argc() != 2)
+        cli_usage();
 
-    for (; at < argc && argv[at][0] == '-' && argv[at][1] != '\0'; ++at) {
-        for (int c = 1; argv[at][c] != '\0'; ++c) {
-            if (argv[at][c] == 's') {
-                symbolic = 1;
-            } else {
-                fprintf(stderr, "ln: -%c: not an option here\n", argv[at][c]);
-                return 1;
-            }
-        }
-    }
-
-    if (argc - at != 2) {
-        printf("usage: ln [-s] TARGET NAME\n");
-        printf("  without -s, another name for the same file\n");
-        return 1;
-    }
+    const char* target = cli_arg(0);
     char destination[256];
-    resolve_destination(argv[at], argv[at + 1], destination,
-                        sizeof(destination));
+    resolve_destination(target, cli_arg(1), destination, sizeof(destination));
 
-    const int failed = symbolic ? symlink(argv[at], destination)
-                                : link(argv[at], destination);
+    const int failed = symbolic ? symlink(target, destination)
+                                : link(target, destination);
     if (failed != 0) {
-        fprintf(stderr, "ln: %s: %s\n", destination, strerror(errno));
+        cli_fail("%s: %s", destination, strerror(errno));
         return 1;
     }
     return 0;

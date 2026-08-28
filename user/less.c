@@ -20,6 +20,7 @@
 
 #include <fcntl.h>
 #include <errno.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,13 +83,9 @@ static void show(int top, const char* name)
 
 int main(int argc, char** argv)
 {
-    const char* path = 0;
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i][0] == '-' && argv[i][1] == 'N' && i + 1 < argc)
-            g_rows = atoi_simple(argv[++i]) - 1;
-        else if (argv[i][0] != '-')
-            path = argv[i];
-    }
+    cli_begin(argc, argv, "[-N rows] [file]", "N:");
+    g_rows = (int)cli_number("-N", 0) - 1;
+    const char* path = cli_arg(0);
     if (g_rows < 2)
         g_rows = 23;
 
@@ -97,7 +94,7 @@ int main(int argc, char** argv)
     if (path != 0) {
         const int fd = open(path, O_RDONLY);
         if (fd < 0) {
-            fprintf(stderr, "less: %s: %s\n", path, strerror(errno));
+            cli_fail("%s: %s", path, strerror(errno));
             return 1;
         }
         load(fd);
@@ -106,7 +103,7 @@ int main(int argc, char** argv)
         load(0);
     }
     if (g_truncated)
-        printf("less: showing the first %d lines only\n", g_count);
+        cli_fail("showing the first %d lines only", g_count);
 
     /* Keys come from the terminal, not from standard input, which may well be
      * the pipe the text arrived on. */

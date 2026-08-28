@@ -6,20 +6,25 @@
  * printing zeros, which would read as "full".
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/statfs.h>
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "[-h]", "h");
+    const int human = cli_flag("-h");
+
     FILE* in = fopen("/proc/mounts", "r");
     if (in == 0) {
-        fprintf(stderr, "df: /proc/mounts is not there\n");
+        cli_fail("/proc/mounts is not there");
         return 1;
     }
 
     printf("%-12s %10s %10s %10s %5s  %s\n",
-           "filesystem", "1K-blocks", "used", "free", "use%", "on");
+           "filesystem", human ? "size" : "1K-blocks", "used", "free",
+           "use%", "on");
 
     char line[256];
     while (fgets(line, sizeof(line), in) != 0) {
@@ -40,8 +45,17 @@ int main(void)
         const unsigned long used = total - free_kb;
         const unsigned long percent = total > 0 ? (used * 100 + total / 2) / total : 0;
 
-        printf("%-12s %10lu %10lu %10lu %4lu%%  %s\n",
-               what, total, used, free_kb, percent, at);
+        if (human) {
+            char a[24], b[24], c[24];
+            cli_human((unsigned long long)total * 1024, a, sizeof(a));
+            cli_human((unsigned long long)used * 1024, b, sizeof(b));
+            cli_human((unsigned long long)free_kb * 1024, c, sizeof(c));
+            printf("%-12s %10s %10s %10s %4lu%%  %s\n",
+                   what, a, b, c, percent, at);
+        } else {
+            printf("%-12s %10lu %10lu %10lu %4lu%%  %s\n",
+                   what, total, used, free_kb, percent, at);
+        }
     }
     fclose(in);
     return 0;

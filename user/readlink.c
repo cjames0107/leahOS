@@ -5,6 +5,7 @@
  * text and only means a path once somebody decides where to read it from.
  */
 
+#include <cli.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,17 +14,17 @@
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        printf("usage: readlink NAME...\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "NAME...", "");
+    if (cli_argc() < 1)
+        cli_usage();
 
     int failed = 0;
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 0; i < cli_argc(); ++i) {
+        const char* name = cli_arg(i);
         char target[512];
-        const long n = readlink(argv[i], target, sizeof(target) - 1);
+        const long n = readlink(name, target, sizeof(target) - 1);
         if (n < 0) {
-            fprintf(stderr, "readlink: %s: %s\n", argv[i], strerror(errno));
+            cli_fail("%s: %s", name, strerror(errno));
             failed = 1;
             continue;
         }

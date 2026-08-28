@@ -1,4 +1,5 @@
 #include <net.h>
+#include <cli.h>
 #include <stdio.h>
 
 static void print_ip(uint32_t ip)
@@ -7,11 +8,13 @@ static void print_ip(uint32_t ip)
            (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
 }
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "", "");
+
     struct netinfo ni;
     if (netinfo(&ni) < 0) {
-        printf("ifconfig: no network interface\n");
+        cli_fail("no network interface");
         return 1;
     }
 

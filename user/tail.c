@@ -8,6 +8,7 @@
 
 #include <fcntl.h>
 #include <errno.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,55 +101,41 @@ static void follow(const char* path, long from)
 
 int main(int argc, char** argv)
 {
-    long want = 10;
-    int following = 0;
-    int i = 1;
-
-    for (; i < argc && argv[i][0] == '-' && argv[i][1] != '\0'; ) {
-        if (argv[i][1] == 'n') {
-            if (argv[i][2] != '\0') { want = atoi_simple(&argv[i][2]); ++i; }
-            else if (i + 1 < argc) { want = atoi_simple(argv[i + 1]); i += 2; }
-            else ++i;
-        } else if (argv[i][1] == 'f') {
-            following = 1;
-            ++i;
-        } else {
-            fprintf(stderr, "tail: %s: not an option here\n", argv[i]);
-            return 1;
-        }
-    }
+    cli_begin(argc, argv, "[-f] [-n lines] [file...]", "n:f");
+    long want = cli_number("-n", 10);
+    const int following = cli_flag("-f");
     if (want < 0)
         want = 0;
 
-    if (i >= argc) {
+    if (cli_argc() < 1) {
         last(0, want);
         return 0;
     }
-    const int many = (argc - i) > 1;
+    const int many = cli_argc() > 1;
     if (following && many) {
         /* Following several at once means interleaving them and reprinting a
          * header whenever the source changes, which is a different program. */
-        fprintf(stderr, "tail: -f follows one file at a time\n");
-        return 1;
+        cli_die("-f follows one file at a time");
     }
     int status = 0;
-    for (int k = 0; i < argc; ++i, ++k) {
-        const int fd = open(argv[i], O_RDONLY);
+    for (int i = 0; i < cli_argc(); ++i) {
+        const char* name = cli_arg(i);
+        const int fd = open(name, O_RDONLY);
         if (fd < 0) {
-            fprintf(stderr, "tail: %s: %s\n", argv[i], strerror(errno));
+            cli_fail("%s: %s", name, strerror(errno));
             status = 1;
             continue;
         }
         if (many) {
-            if (k > 0) printf("\n");
-            printf("==> %s <==\n", argv[i]);
+            if (i > 0) printf("\n");
+            printf("==> %s <==\n", name);
         }
         last(fd, want);
         const long at = lseek(fd, 0, SEEK_CUR);
         close(fd);
 
         if (following)
-            follow(argv[i], at);        /* never returns; Ctrl-C ends it */
+            follow(name, at);           /* never returns; Ctrl-C ends it */
     }
     return status;
 }

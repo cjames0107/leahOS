@@ -9,45 +9,44 @@
  * the one the system booted from.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/statfs.h>
 
-static int usage(void)
-{
-    printf("usage: mount              list what is mounted\n");
-    printf("       mount DISK AT      attach disk DISK at AT\n");
-    printf("       mount -u AT        detach whatever is at AT\n");
-    return 2;
-}
-
 int main(int argc, char** argv)
 {
-    if (argc == 3 && strcmp(argv[1], "-u") == 0) {
-        if (fs_umount(argv[2]) != 0) {
-            fprintf(stderr, "mount: %s: nothing to detach there\n", argv[2]);
+    cli_begin(argc, argv,
+              "                 list what is mounted\n"
+              "       mount DISK AT      attach disk DISK at AT\n"
+              "       mount -u AT        detach whatever is at AT", "u");
+
+    if (cli_flag("-u")) {
+        if (cli_argc() != 1)
+            cli_usage();
+        if (fs_umount(cli_arg(0)) != 0) {
+            cli_fail("%s: nothing to detach there", cli_arg(0));
             return 1;
         }
         return 0;
     }
-    if (argc == 3) {
-        const int disk = atoi_simple(argv[1]);
+    if (cli_argc() == 2) {
+        const int disk = atoi_simple(cli_arg(0));
         if (disk < 0)
-            return usage();
-        if (fs_mount((unsigned)disk, argv[2]) != 0) {
-            fprintf(stderr, "mount: disk %d will not attach at %s\n",
-                    disk, argv[2]);
+            cli_usage();
+        if (fs_mount((unsigned)disk, cli_arg(1)) != 0) {
+            cli_fail("disk %d will not attach at %s", disk, cli_arg(1));
             return 1;
         }
         return 0;
     }
-    if (argc != 1)
-        return usage();
+    if (cli_argc() != 0)
+        cli_usage();
 
     FILE* in = fopen("/proc/mounts", "r");
     if (in == 0) {
-        fprintf(stderr, "mount: /proc/mounts is not there\n");
+        cli_fail("/proc/mounts is not there");
         return 1;
     }
 

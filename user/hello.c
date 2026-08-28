@@ -6,6 +6,7 @@
  * so the return value is the machine-checkable half of the test and the
  * printed lines are the human-readable half. */
 
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,8 +14,7 @@
 
 int main(int argc, char** argv)
 {
-    (void)argc;
-    (void)argv;
+    cli_begin(argc, argv, "", "");
 
     printf("hello from a C program running in ring 3\n");
     printf("  pid          = %d\n", getpid());

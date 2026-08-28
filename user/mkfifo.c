@@ -13,6 +13,7 @@
  * and what it wrote would go nowhere.
  */
 
+#include <cli.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,14 +21,13 @@
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        printf("usage: mkfifo NAME...\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "NAME...", "");
+    if (cli_argc() < 1)
+        cli_usage();
     int failed = 0;
-    for (int i = 1; i < argc; ++i)
-        if (mkfifo(argv[i], 0644) != 0) {
-            fprintf(stderr, "mkfifo: %s: %s\n", argv[i], strerror(errno));
+    for (int i = 0; i < cli_argc(); ++i)
+        if (mkfifo(cli_arg(i), 0644) != 0) {
+            cli_fail("%s: %s", cli_arg(i), strerror(errno));
             failed = 1;
         }
     return failed;

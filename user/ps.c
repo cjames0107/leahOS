@@ -11,6 +11,7 @@
  */
 
 #include <proc.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -32,28 +33,16 @@ static const char* state_name(unsigned state)
 
 int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "[-T threads] [-a all users] [-l jobs]", "Tale");
     struct proc_info tasks[MAX_TASKS];
-    int threads = 0, everyone = 0, wide = 0;
-
-    for (int i = 1; i < argc; ++i) {
-        const char* flag = argv[i];
-        if (flag[0] != '-') continue;
-        for (int c = 1; flag[c] != '\0'; ++c) {
-            switch (flag[c]) {
-            case 'T': threads  = 1; break;   /* threads too, not just processes */
-            case 'a': everyone = 1; break;   /* other people's as well as mine */
-            case 'l': wide     = 1; break;   /* the job and login columns */
-            case 'e': everyone = 1; break;   /* what every other ps calls it */
-            default:
-                printf("usage: ps [-T threads] [-a all users] [-l jobs]\n");
-                return 1;
-            }
-        }
-    }
+    const int threads  = cli_flag("-T");     /* threads too, not just processes */
+    const int wide     = cli_flag("-l");     /* the job and login columns */
+    /* -e is what every other ps calls -a. */
+    const int everyone = cli_flag("-a") || cli_flag("-e");
 
     const int n = proc_list(tasks, MAX_TASKS);
     if (n < 0) {
-        printf("ps: cannot read the task list\n");
+        cli_fail("cannot read the task list");
         return 1;
     }
 

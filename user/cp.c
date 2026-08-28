@@ -1,21 +1,21 @@
 #include <fcntl.h>
+#include <cli.h>
 #include <stdio.h>
 #include <unistd.h>
 
 int main(int argc, char** argv)
 {
-    if (argc != 3) {
-        printf("usage: cp SRC DST\n");
-        return 1;
-    }
-    const int in = open(argv[1], O_RDONLY);
+    cli_begin(argc, argv, "SRC DST", "");
+    if (cli_argc() != 2)
+        cli_usage();
+    const int in = open(cli_arg(0), O_RDONLY);
     if (in < 0) {
-        printf("cp: %s: cannot open\n", argv[1]);
+        cli_fail("%s: cannot open", cli_arg(0));
         return 1;
     }
-    const int out = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC);
+    const int out = open(cli_arg(1), O_WRONLY | O_CREAT | O_TRUNC);
     if (out < 0) {
-        printf("cp: %s: cannot create\n", argv[2]);
+        cli_fail("%s: cannot create", cli_arg(1));
         close(in);
         return 1;
     }

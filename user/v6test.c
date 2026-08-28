@@ -17,6 +17,7 @@
 #include <ipc.h>
 #include <net.h>
 #include <netd.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,20 +91,19 @@ int main(int argc, char** argv)
     long n, total = 0;
     int saw_http = 0;
 
-    if (argc > 1) {
-        if (parse6(argv[1], addr) != 0) {
-            printf("v6test: '%s' is not an address\n", argv[1]);
+    cli_begin(argc, argv, "[address] [port]", "");
+
+    if (cli_argc() > 0) {
+        if (parse6(cli_arg(0), addr) != 0) {
+            cli_fail("'%s' is not an address", cli_arg(0));
             return 1;
         }
     } else {
         memset(addr, 0, 16);
         addr[0] = 0xFE; addr[1] = 0xC0; addr[15] = 0x02;   /* fec0::2 */
     }
-    if (argc > 2) {
-        unsigned i;
-        port = 0;
-        for (i = 0; argv[2][i] >= '0' && argv[2][i] <= '9'; ++i)
-            port = port * 10 + (unsigned)(argv[2][i] - '0');
+    if (cli_argc() > 1) {
+        port = (unsigned)atoi_simple(cli_arg(1));
         if (port == 0) port = 8099;
     }
 

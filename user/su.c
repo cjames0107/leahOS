@@ -10,6 +10,7 @@
  * reaching another ordinary user costs two passwords: root's, then theirs.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,21 +35,20 @@ static int read_password(char* out, int max)
 
 int main(int argc, char** argv)
 {
-    if (argc > 2) {
-        printf("usage: su [user]\n");
-        return 1;
-    }
-    const char* user = argc == 2 ? argv[1] : "root";
+    cli_begin(argc, argv, "[user]", "");
+    if (cli_argc() > 1)
+        cli_usage();
+    const char* user = cli_argc() == 1 ? cli_arg(0) : "root";
 
     /* Say why before asking for a password that cannot possibly work. */
     if (getuid() != 0 && strcmp(user, "root") != 0) {
-        printf("su: only root can become %s - su to root first\n", user);
+        cli_fail("only root can become %s - su to root first", user);
         return 1;
     }
 
     char password[128] = {};
     if (read_password(password, sizeof(password)) < 0) {
-        printf("su: could not read a password\n");
+        cli_fail("could not read a password");
         return 1;
     }
 
@@ -56,16 +56,16 @@ int main(int argc, char** argv)
     if (login(user, password, home) < 0) {
         /* Deliberately vague: saying which of the two was wrong tells an
          * attacker which usernames exist. */
-        printf("su: authentication failed\n");
+        cli_fail("authentication failed");
         return 1;
     }
     memset(password, 0, sizeof(password));
 
     if (home[0] != '\0' && chdir(home) < 0)
-        printf("su: no home directory %s\n", home);
+        cli_fail("no home directory %s", home);
 
     char* sh[] = { "sh", 0 };
     execve("/bin/sh", sh, 0);
-    printf("su: could not start a shell\n");
+    cli_fail("could not start a shell");
     return 1;
 }

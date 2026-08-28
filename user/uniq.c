@@ -4,35 +4,21 @@
  * whole of it, which is why this and sort are so often written together.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 
 int main(int argc, char** argv)
 {
-    int counting = 0, only_repeated = 0, only_unique = 0;
-    const char* path = 0;
-
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i][0] == '-' && argv[i][1] != '\0') {
-            for (int c = 1; argv[i][c] != '\0'; ++c) {
-                switch (argv[i][c]) {
-                case 'c': counting = 1; break;
-                case 'd': only_repeated = 1; break;
-                case 'u': only_unique = 1; break;
-                default:
-                    fprintf(stderr, "uniq: -%c: not an option here\n",
-                            argv[i][c]);
-                    return 1;
-                }
-            }
-        } else {
-            path = argv[i];
-        }
-    }
+    cli_begin(argc, argv, "[-cdu] [file]", "cdu");
+    const int counting = cli_flag("-c");
+    const int only_repeated = cli_flag("-d");
+    const int only_unique = cli_flag("-u");
+    const char* path = cli_arg(0);
 
     FILE* in = path != 0 ? fopen(path, "r") : stdin;
     if (in == 0) {
-        fprintf(stderr, "uniq: %s: cannot open\n", path);
+        cli_fail("%s: cannot open", path);
         return 1;
     }
 

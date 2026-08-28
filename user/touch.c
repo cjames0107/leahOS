@@ -1,3 +1,4 @@
+#include <cli.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <stdio.h>
@@ -16,18 +17,18 @@
  * case does not move mtime, and -c is the flag for people who care. */
 int main(int argc, char** argv)
 {
-    if (argc < 2) {
-        printf("usage: touch FILE...\n");
-        return 1;
-    }
+    cli_begin(argc, argv, "FILE...", "");
+    if (cli_argc() < 1)
+        cli_usage();
     int status = 0;
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 0; i < cli_argc(); ++i) {
+        const char* name = cli_arg(i);
         struct stat info;
-        const int existed = (stat(argv[i], &info) == 0);
+        const int existed = (stat(name, &info) == 0);
 
         if (existed && info.st_type == S_IFREG && info.st_size > 0) {
             /* Rewrite the last byte with itself. */
-            const int rd = open(argv[i], O_RDONLY);
+            const int rd = open(name, O_RDONLY);
             char byte = 0;
             int ok = 0;
             if (rd >= 0) {
@@ -36,7 +37,7 @@ int main(int argc, char** argv)
                     ok = 1;
                 close(rd);
             }
-            const int wr = ok ? open(argv[i], O_WRONLY) : -1;
+            const int wr = ok ? open(name, O_WRONLY) : -1;
             if (wr >= 0) {
                 if (lseek(wr, (long)info.st_size - 1, SEEK_SET) < 0 ||
                     write(wr, &byte, 1) != 1)
@@ -46,15 +47,15 @@ int main(int argc, char** argv)
                 ok = 0;
             }
             if (!ok) {
-                fprintf(stderr, "touch: %s: %s\n", argv[i], strerror(errno));
+                cli_fail("%s: %s", name, strerror(errno));
                 status = 1;
             }
             continue;
         }
 
-        const int fd = open(argv[i], O_WRONLY | O_CREAT);
+        const int fd = open(name, O_WRONLY | O_CREAT);
         if (fd < 0) {
-            fprintf(stderr, "touch: %s: %s\n", argv[i], strerror(errno));
+            cli_fail("%s: %s", name, strerror(errno));
             status = 1;
         } else {
             close(fd);

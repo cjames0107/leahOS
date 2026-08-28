@@ -7,6 +7,7 @@
 
 #include <fcntl.h>
 #include <errno.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,29 +101,19 @@ static void merge_sort(int lo, int hi, int ignore_case, int numeric)
 
 int main(int argc, char** argv)
 {
-    int reverse = 0, ignore_case = 0, numeric = 0, unique = 0;
-    int i = 1;
-    for (; i < argc; ++i) {
-        if (argv[i][0] != '-' || argv[i][1] == '\0')
-            break;
-        for (int k = 1; argv[i][k] != '\0'; ++k) {
-            switch (argv[i][k]) {
-            case 'r': reverse = 1; break;
-            case 'f': ignore_case = 1; break;
-            case 'n': numeric = 1; break;
-            case 'u': unique = 1; break;
-            default: printf("sort: unknown option -%c\n", argv[i][k]); return 2;
-            }
-        }
-    }
+    cli_begin(argc, argv, "[-rfnu] [file...]", "rfnu");
+    const int reverse = cli_flag("-r");
+    const int ignore_case = cli_flag("-f");
+    const int numeric = cli_flag("-n");
+    const int unique = cli_flag("-u");
 
-    if (i >= argc) {
+    if (cli_argc() < 1) {
         slurp(0);
     } else {
-        for (; i < argc; ++i) {
-            const int fd = open(argv[i], O_RDONLY);
+        for (int i = 0; i < cli_argc(); ++i) {
+            const int fd = open(cli_arg(i), O_RDONLY);
             if (fd < 0) {
-                fprintf(stderr, "sort: %s: %s\n", argv[i], strerror(errno));
+                cli_fail("%s: %s", cli_arg(i), strerror(errno));
                 return 1;
             }
             slurp(fd);
@@ -130,7 +121,7 @@ int main(int argc, char** argv)
         }
     }
     if (g_overflow)
-        printf("sort: too much input, sorting the first %d lines\n", g_count);
+        cli_fail("too much input, sorting the first %d lines", g_count);
 
     merge_sort(0, g_count, ignore_case, numeric);
 

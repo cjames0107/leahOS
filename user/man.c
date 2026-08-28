@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <paths.h>
 #include <stdlib.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -36,7 +37,7 @@ static int list_pages(void)
     struct dirent entries[128];
     const int n = getdents(MAN_DIR, entries, 128);
     if (n < 0) {
-        fprintf(stderr, "man: %s is not there\n", MAN_DIR);
+        cli_fail("%s is not there", MAN_DIR);
         return 1;
     }
 
@@ -59,12 +60,13 @@ static int list_pages(void)
 
 int main(int argc, char** argv)
 {
-    if (argc < 2)
+    cli_begin(argc, argv, "[page]", "");
+    if (cli_argc() < 1)
         return list_pages();
 
     char path[256];
-    if (page_path(argv[1], path, sizeof(path)) != 0) {
-        fprintf(stderr, "man: no manual entry for %s\n", argv[1]);
+    if (page_path(cli_arg(0), path, sizeof(path)) != 0) {
+        cli_fail("no manual entry for %s", cli_arg(0));
         return 1;
     }
 
@@ -86,7 +88,7 @@ int main(int argc, char** argv)
 
     FILE* in = fopen(path, "r");
     if (in == 0) {
-        fprintf(stderr, "man: %s: %s\n", path, strerror(errno));
+        cli_fail("%s: %s", path, strerror(errno));
         return 1;
     }
     char line[1024];

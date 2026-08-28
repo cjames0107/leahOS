@@ -1,10 +1,20 @@
 df - how much room is left
 
 SYNOPSIS
-    df
+    df [-h]
 
 DESCRIPTION
     Prints the size and free space of each mounted filesystem.
+
+    Sizes are in 1K blocks, which is the form to do arithmetic on. -h prints
+    them as KiB, MiB and GiB instead, which is the form to read.
+
+    A filesystem that cannot answer - procfs has no blocks to count - is
+    listed with dashes rather than left out, so that `df` and `mount` show the
+    same set of names.
+
+OPTIONS
+    -h  sizes as KiB, MiB and GiB rather than as 1K blocks
 
 SEE ALSO
     mount, du

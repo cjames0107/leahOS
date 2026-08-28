@@ -8,6 +8,7 @@
 
 #include <ipc.h>
 #include <netd.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,9 +77,11 @@ static int parse6(const char* text, unsigned char* out)
 
 int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "[address]", "");
+
     const int port = port_open(IPC_PORT_NET);
     if (port < 0) {
-        printf("ping6: no network stack is running\n");
+        cli_fail("no network stack is running");
         return 1;
     }
 
@@ -87,7 +90,7 @@ int main(int argc, char** argv)
     memset(&a, 0, sizeof(a));
     q.tag = NET6_INFO;
     if (ipc_call(port, &q, &a) != 0) {
-        printf("ping6: the stack did not answer\n");
+        cli_fail("the stack did not answer");
         return 1;
     }
     printf("link-local  ");
@@ -102,9 +105,9 @@ int main(int argc, char** argv)
     }
 
     unsigned char target[16];
-    if (argc > 1) {
-        if (parse6(argv[1], target) != 0) {
-            printf("ping6: '%s' is not an address\n", argv[1]);
+    if (cli_argc() > 0) {
+        if (parse6(cli_arg(0), target) != 0) {
+            cli_fail("'%s' is not an address", cli_arg(0));
             return 1;
         }
     } else if (a.word[0]) {
@@ -114,7 +117,7 @@ int main(int argc, char** argv)
         memset(target + 8, 0, 8);
         target[15] = 2;
     } else {
-        printf("ping6: nothing to ping and no router to ask\n");
+        cli_fail("nothing to ping and no router to ask");
         return 1;
     }
 

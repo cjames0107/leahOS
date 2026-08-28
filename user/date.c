@@ -6,6 +6,7 @@
  * write the CMOS back.
  */
 
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -13,28 +14,26 @@
 
 int main(int argc, char** argv)
 {
-    int utc = 0;
-    const char* format = 0;
+    cli_begin(argc, argv,
+              "[-u] [-R] [+format]\n"
+              "  -u  UTC rather than local    -R  a fuller form\n"
+              "  %Y %m %d %H %M %S %a %A %b %B %e %j %p %I %F %T %s",
+              "uR");
+    const int utc = cli_flag("-u");
+    const char* format = cli_flag("-R") ? "%a, %d %b %Y %H:%M:%S" : 0;
 
-    for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "-u") == 0) {
-            utc = 1;
-        } else if (argv[i][0] == '+') {
-            format = argv[i] + 1;       /* the traditional +FORMAT */
-        } else if (strcmp(argv[i], "-R") == 0) {
-            format = "%a, %d %b %Y %H:%M:%S";
-        } else {
-            printf("usage: date [-u] [-R] [+format]\n");
-            printf("  -u  UTC rather than local    -R  a fuller form\n");
-            printf("  %%Y %%m %%d %%H %%M %%S %%a %%A %%b %%B %%e %%j %%p %%I %%F %%T %%s\n");
-            return 2;
-        }
+    /* The traditional +FORMAT, which is not an option and so arrives here as
+     * an ordinary argument. */
+    for (int i = 0; i < cli_argc(); ++i) {
+        if (cli_arg(i)[0] != '+')
+            cli_usage();
+        format = cli_arg(i) + 1;
     }
 
     const time_t now = time(0);
     struct tm t;
     if ((utc ? gmtime_r(&now, &t) : localtime_r(&now, &t)) == 0) {
-        printf("date: cannot read the clock\n");
+        cli_fail("cannot read the clock");
         return 1;
     }
 
@@ -53,8 +52,8 @@ int main(int argc, char** argv)
         }
     } else {
         if (strftime(line, sizeof(line), format, &t) == 0) {
-            printf("date: that format does not fit in %d characters\n",
-                   (int)sizeof(line));
+            cli_fail("that format does not fit in %d characters",
+                     (int)sizeof(line));
             return 1;
         }
         printf("%s\n", line);

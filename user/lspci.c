@@ -10,6 +10,7 @@
  */
 
 #include <driver.h>
+#include <cli.h>
 #include <stdio.h>
 
 #define PCI_ADDRESS 0xCF8
@@ -56,14 +57,15 @@ static const char* class_name(unsigned char class_code, unsigned char subclass)
     }
 }
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "", "");
     unsigned bus, slot, fn, found = 0;
 
     /* The two config-space ports, and nothing else. A program that can read
      * the bus cannot thereby drive anything on it. */
     if (io_permit(PCI_ADDRESS, 8) != 0) {
-        printf("lspci: only root can read config space\n");
+        cli_fail("only root can read config space");
         return 1;
     }
 
@@ -95,6 +97,6 @@ int main(void)
     }
 
     if (found == 0)
-        printf("lspci: no devices\n");
+        cli_fail("no devices");
     return 0;
 }

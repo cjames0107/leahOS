@@ -11,6 +11,7 @@
  */
 
 #include <fcntl.h>
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,20 +49,16 @@ static int intact(const char* path)
 
 int main(int argc, char** argv)
 {
-    int rounds = 200;
-    int r, i;
+    cli_begin(argc, argv, "[rounds]", "");
+    int r;
     int bad_content = 0, bad_move = 0;
 
-    if (argc > 1) {
-        rounds = 0;
-        for (i = 0; argv[1][i] >= '0' && argv[1][i] <= '9'; ++i)
-            rounds = rounds * 10 + (argv[1][i] - '0');
-        if (rounds <= 0)
-            rounds = 200;
-    }
+    int rounds = cli_argc() > 0 ? atoi_simple(cli_arg(0)) : 200;
+    if (rounds <= 0)
+        rounds = 200;
 
     if (write_file("/root/mv-a.txt", TEXT) != 0) {
-        printf("mvtest: cannot create the file\n");
+        cli_fail("cannot create the file");
         return 1;
     }
 

@@ -17,6 +17,7 @@
 #include <widget.h>
 #include <rtf.h>
 #include <textedit.h>
+#include <cli.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -3621,8 +3622,9 @@ static void test_shell(void)
     check("the shell returns what it was told to", status == 3);
 }
 
-int main(void)
+int main(int argc, char** argv)
 {
+    cli_begin(argc, argv, "", "");
     printf("\nleahOS self-tests\n\n");
     test_mmap();
     test_threads();

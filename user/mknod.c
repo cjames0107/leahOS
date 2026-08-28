@@ -1,3 +1,4 @@
+#include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,14 +19,14 @@
  */
 int main(int argc, char** argv)
 {
-    if (argc != 5) {
-        printf("usage: mknod NAME TYPE MAJOR MINOR\n");
-        printf("  TYPE is c for a character device or b for a block device\n");
-        return 1;
-    }
+    cli_begin(argc, argv,
+              "NAME TYPE MAJOR MINOR   (TYPE is c for character, b for block)",
+              "");
+    if (cli_argc() != 4)
+        cli_usage();
 
-    const char* path = argv[1];
-    const char* type = argv[2];
+    const char* path = cli_arg(0);
+    const char* type = cli_arg(1);
 
     unsigned kind;
     if (strcmp(type, "c") == 0 || strcmp(type, "u") == 0)
@@ -33,20 +34,20 @@ int main(int argc, char** argv)
     else if (strcmp(type, "b") == 0)
         kind = S_IFBLK;
     else {
-        printf("mknod: %s: type is c or b\n", type);
+        cli_fail("%s: type is c or b", type);
         return 1;
     }
 
-    const long maj = atoi_simple(argv[3]);
-    const long min = atoi_simple(argv[4]);
+    const long maj = atoi_simple(cli_arg(2));
+    const long min = atoi_simple(cli_arg(3));
     if (maj < 0 || maj > 255 || min < 0 || min > 255) {
-        printf("mknod: major and minor are 0 to 255\n");
+        cli_fail("major and minor are 0 to 255");
         return 1;
     }
 
     if (mknod(path, kind, kind == S_IFCHR ? 0666 : 0660,
               makedev((unsigned)maj, (unsigned)min)) != 0) {
-        printf("mknod: %s: cannot create it\n", path);
+        cli_fail("%s: cannot create it", path);
         return 1;
     }
     return 0;
