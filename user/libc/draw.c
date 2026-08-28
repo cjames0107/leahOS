@@ -40,11 +40,19 @@ uint32_t draw_over(uint32_t under, uint32_t over)
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
+/* How far apart the rows are: the stride when there is one, the width when
+ * there is not. Every pixel goes through this rather than through s->w, which
+ * says how wide the drawing is and not how the buffer is laid out. */
+static long pitch(const struct surface* s)
+{
+    return s->stride > 0 ? (long)s->stride : (long)s->w;
+}
+
 void draw_pixel(const struct surface* s, int x, int y, uint32_t colour)
 {
     if (x < 0 || y < 0 || x >= s->w || y >= s->h)
         return;
-    uint32_t* p = &s->pixels[(long)y * s->w + x];
+    uint32_t* p = &s->pixels[(long)y * pitch(s) + x];
     *p = draw_over(*p, colour);
 }
 
@@ -67,7 +75,7 @@ void draw_rect(const struct surface* s, int x, int y, int w, int h,
         return;
 
     for (int py = y0; py < y1; ++py) {
-        uint32_t* row = &s->pixels[(long)py * s->w];
+        uint32_t* row = &s->pixels[(long)py * pitch(s)];
         if (a == 255) {
             for (int px = x0; px < x1; ++px)
                 row[px] = colour | 0xFF000000u;
@@ -242,7 +250,7 @@ void draw_round_rect(const struct surface* s, int x, int y, int w, int h,
     const uint32_t rgb = colour & 0x00FFFFFFu;
 
     for (int py = y0; py < y1; ++py) {
-        uint32_t* row = &s->pixels[(long)py * s->w];
+        uint32_t* row = &s->pixels[(long)py * pitch(s)];
         /* The middle band has no curvature, so the whole row between the
          * corners is a straight fill and needs no distance at all. */
         const int in_band = py >= y + radius && py < y + h - radius;
@@ -296,7 +304,7 @@ void draw_round_rect_outline(const struct surface* s, int x, int y,
     const int inner_radius = radius - thickness > 0 ? radius - thickness : 0;
 
     for (int py = y0; py < y1; ++py) {
-        uint32_t* row = &s->pixels[(long)py * s->w];
+        uint32_t* row = &s->pixels[(long)py * pitch(s)];
 
         /* Rows down the straight sides only touch the ring at their two ends.
          * Walking the whole width of them was scanning the entire interior of
@@ -453,7 +461,7 @@ void draw_blur(const struct surface* s, int x, int y, int w, int h,
                 const int py = y + sy * BLUR_SHRINK + by;
                 if (py >= y + h)
                     break;
-                const uint32_t* row = &s->pixels[(long)py * s->w];
+                const uint32_t* row = &s->pixels[(long)py * pitch(s)];
                 for (int bx = 0; bx < BLUR_SHRINK; ++bx) {
                     const int px = x + sx * BLUR_SHRINK + bx;
                     if (px >= x + w)
@@ -492,7 +500,7 @@ void draw_blur(const struct surface* s, int x, int y, int w, int h,
         int y1 = y0 + 1;
         if (y1 >= sh) { y1 = sh - 1; if (y0 > y1) y0 = y1; }
 
-        uint32_t* out = &s->pixels[(long)(y + py) * s->w + x];
+        uint32_t* out = &s->pixels[(long)(y + py) * pitch(s) + x];
         for (int px = 0; px < w; ++px) {
             const float fx = ((float)px + 0.5f) / BLUR_SHRINK - 0.5f;
             int x0 = (int)floor(fx);
@@ -782,7 +790,7 @@ void draw_shadow_cast(const struct surface* target, const struct shadow* s,
         const int py = oy + sy;
         if (py < 0 || py >= target->h)
             continue;
-        uint32_t* row = &target->pixels[(long)py * target->w];
+        uint32_t* row = &target->pixels[(long)py * pitch(target)];
         const unsigned char* line = &s->alpha[(long)sy * s->w];
         for (int sx = sx0; sx < sx1; ++sx) {
             const unsigned a = line[sx];

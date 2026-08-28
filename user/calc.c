@@ -437,7 +437,11 @@ int main(int argc, char** argv)
     if (g_px == 0)
         return 1;
     win_set_min_size(id, 270, 340);
-    wg_target(g_px, g_w, g_h);
+    /* Straight into the window's own buffer, whose rows are further apart
+     * than they are wide - so the stride is what to step by. Drawing at the
+     * width put every row a little past the one before it, and the server,
+     * which reads at the stride, showed this window sheared into bands. */
+    wg_target_strided(g_px, g_w, g_h, win_stride(id));
     draw();
     win_present(id);
 
@@ -449,7 +453,7 @@ int main(int argc, char** argv)
                 g_w = (unsigned)e.x; g_h = (unsigned)e.y;
                 g_px = win_map(id);
                 if (g_px == 0) return 1;
-                wg_target(g_px, g_w, g_h);
+                wg_target_strided(g_px, g_w, g_h, win_stride(id));
             } else if (e.type == WIN_EVENT_MOUSE_DOWN) {
                 for (int i = 0; i < MODE_COUNT; ++i) {
                     int x, y, w, h;

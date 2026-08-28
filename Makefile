@@ -397,6 +397,7 @@ check: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	@python3 tools/vm/smoke.py
 	@python3 tools/vm/converted.py
 	@python3 tools/vm/scrolled.py
+	@python3 tools/vm/stride.py
 
 run: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	$(QEMU) $(QEMUFLAGS) -serial stdio

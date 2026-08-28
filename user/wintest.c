@@ -54,7 +54,12 @@ static int bench(int ms)
 
     unsigned width = 0, height = 0;
     win_size(id, &width, &height);
-    const unsigned long pixels = (unsigned long)width * height;
+    /* The rows are further apart than they are wide, so the fill walks rows
+     * rather than running straight through the buffer. The same number of
+     * pixels either way, which is what is being measured; running straight
+     * through put them in the wrong places, and the window came out part
+     * filled and part whatever it was allocated with. */
+    const unsigned stride = win_stride(id);
 
     const unsigned long start = uptime_ms();
     unsigned long frames = 0;
@@ -66,8 +71,11 @@ static int bench(int ms)
          * solid. A window filled with translucent pixels measures the blend
          * path and nothing else, and no real window looks like that. */
         const uint32_t ink = 0xFF000000u | (0x101010u * (++tick & 0xF));
-        for (unsigned long i = 0; i < pixels; ++i)
-            px[i] = ink;
+        for (unsigned y = 0; y < height; ++y) {
+            uint32_t* row = &px[(unsigned long)y * stride];
+            for (unsigned x = 0; x < width; ++x)
+                row[x] = ink;
+        }
         win_present(id);
 
         struct win_event e;
@@ -150,8 +158,10 @@ static int keys(int ms)
         return 1;
     uint32_t* px = win_map(id);
     if (px != 0) {
-        for (int i = 0; i < 320 * 120; ++i)
-            px[i] = 0xFF202830u;
+        const unsigned stride = win_stride(id);
+        for (int y = 0; y < 120; ++y)
+            for (int x = 0; x < 320; ++x)
+                px[(unsigned long)y * stride + (unsigned)x] = 0xFF202830u;
         win_present(id);
     }
     FILE* out = fopen("/dev/console", "w");
@@ -208,8 +218,10 @@ int main(int argc, char** argv)
             break;
         /* A different shade each, so a screenshot shows how many there are. */
         const uint32_t ink = 0xFF000000u | (uint32_t)(0x203040 + i * 0x050301);
-        for (int p = 0; p < TILE * 60; ++p)
-            px[p] = ink;
+        const unsigned stride = win_stride(id);
+        for (int y = 0; y < 60; ++y)
+            for (int x = 0; x < TILE; ++x)
+                px[(unsigned long)y * stride + (unsigned)x] = ink;
         win_present(id);
         ids[got++] = id;
     }

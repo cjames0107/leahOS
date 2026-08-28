@@ -136,6 +136,7 @@ static unsigned long* g_pixel_bytes;
  * client's fields stay writable by the client; these do not. */
 static unsigned*  g_width;
 static unsigned*  g_height;
+static unsigned*  g_stride;
 static int*       g_order;    /* front to back; [0] is focused */
 static int        g_count;
 static int        g_slots;    /* how many slots those tables hold */
@@ -193,6 +194,7 @@ static int track_slots(void)
         { (void**)&g_pixel_bytes, sizeof(unsigned long) },
         { (void**)&g_width,       sizeof(unsigned)      },
         { (void**)&g_height,      sizeof(unsigned)      },
+        { (void**)&g_stride,      sizeof(unsigned)      },
         { (void**)&g_order,       sizeof(int)           },
         { (void**)&g_move_seen,   sizeof(uint32_t)      },
         { (void**)&g_hidden_seen, sizeof(int)           },
@@ -386,6 +388,11 @@ static struct surface canvas(void)
     s.pixels = g_back;
     s.w = (int)g_fb.width;
     s.h = (int)g_fb.height;
+    /* The backbuffer has no slack: its rows are exactly the screen's width
+     * apart. Said rather than left out, because every field of this is
+     * assigned by hand and one left behind is a stack value being used as a
+     * row pitch. */
+    s.stride = 0;
     s.cx = g_clip.x;
     s.cy = g_clip.y;
     s.cw = g_clip.w;
@@ -476,11 +483,43 @@ static int is_desktop(int slot)
 /* Taken off the screen by its own client. It keeps its slot and its events; it
  * is simply not drawn and not hit. */
 /* How far apart a window's rows are. The client says; a client that has not
- * said means its rows are exactly as wide as its window. */
+ * said means its rows are exactly as wide as its window.
+ *
+ * From the server's own copy, like the width and the height beside it, and not
+ * from the window - which is shared memory a client writes whenever it likes.
+ * This read it live, once per row of every frame, while the width, the height
+ * and the size of the mapping they were all checked against were frozen at the
+ * moment of checking. So the one number that decides how far each row is from
+ * the last was the one number a client could change afterwards, and changing
+ * it moved every read the compositor makes without touching anything that had
+ * been validated.
+ *
+ * Two things came of that. A stride that changes between two rows of one frame
+ * draws the window in bands, each from the wrong place. A stride larger than
+ * the one the buffer was measured against walks off the end of the mapping,
+ * and the compositor dies - taking the desktop with it, because it is the
+ * desktop. */
 static unsigned stride_of(int slot)
 {
-    const unsigned s = win(slot)->stride;
+    const unsigned s = g_stride[slot];
     return s != 0 ? s : g_width[slot];
+}
+
+/* How many bytes a buffer must hold to be read at this geometry, or 0 when the
+ * geometry describes nothing readable.
+ *
+ * A stride narrower than the window is that case: the rows would overlap, and
+ * every row after the first would be read from inside the one before it. It is
+ * rejected rather than clamped, because a client that says that has not told
+ * us how wide its rows are, and guessing is how the compositor ends up reading
+ * something nobody drew. */
+static unsigned long buffer_needs(unsigned stride, unsigned width,
+                                  unsigned height)
+{
+    const unsigned long rows = stride != 0 ? stride : width;
+    if (rows < width)
+        return 0;
+    return rows * (unsigned long)height * 4;
 }
 
 static int is_hidden(int slot)
@@ -1493,7 +1532,12 @@ static void reconcile(void)
              * desktop down with it. So the geometry is checked against the
              * screen, and then against the size of the memory actually backing
              * it. */
+            /* Read once each, into locals, and everything from here on uses
+             * the locals. Reading a client's field twice - once to check it
+             * and once to use it - is the same hole as not checking it: the
+             * two reads can see different numbers. */
             const unsigned width = w->width, height = w->height;
+            const unsigned stride = w->stride;
             if (width == 0 || height == 0 ||
                 width > g_fb.width || height > g_fb.height) {
                 __atomic_store_n(&w->state, WS_SLOT_FREE, __ATOMIC_RELEASE);
@@ -1511,7 +1555,14 @@ static void reconcile(void)
             if (id < 0)
                 continue;               /* not ready yet; try again next pass */
             const unsigned long bytes = shm_size(id);
-            if (bytes < (unsigned long)width * height * 4) {
+            /* Against the stride, not the width. The rows of a buffer with
+             * room to spare are further apart than the window is wide, so
+             * width * height * 4 is not what the compositor reads - and a
+             * window whose buffer passed that check could still be read off
+             * the end of. The two paths below already measured it this way;
+             * this one, where a window first appears, did not. */
+            const unsigned long need = buffer_needs(stride, width, height);
+            if (need == 0 || bytes < need) {
                 __atomic_store_n(&w->state, WS_SLOT_FREE, __ATOMIC_RELEASE);
                 continue;
             }
@@ -1523,6 +1574,7 @@ static void reconcile(void)
              * compositor's reads outside what it validated. */
             g_width[slot] = width;
             g_height[slot] = height;
+            g_stride[slot] = stride;
             g_pixels[slot] = px;
             g_pixel_bytes[slot] = bytes;
             g_mapped_gen[slot] = w->present;
@@ -1557,6 +1609,7 @@ static void reconcile(void)
             g_pixels[slot] = 0;
             blur_cache_drop(slot);
             g_pixel_bytes[slot] = 0;
+            g_stride[slot] = 0;
             g_pixel_gen[slot] = 0xFFFFFFFFu;
             if (g_dragging == slot)   g_dragging = -1;
             if (g_mouse_grab == slot) g_mouse_grab = -1;
@@ -1569,14 +1622,15 @@ static void reconcile(void)
             const uint32_t gen = __atomic_load_n(&w->pixels_gen, __ATOMIC_ACQUIRE);
             if (gen != g_pixel_gen[slot]) {
                 const unsigned width = w->width, height = w->height;
+                const unsigned stride = w->stride;
                 const int fresh = (width != 0 && height != 0 &&
                                    width <= g_fb.width && height <= g_fb.height)
                                 ? shm_open(WS_PIXEL_KEY(slot, gen), 0, 0) : -1;
                 if (fresh >= 0) {
                     const unsigned long bytes = shm_size(fresh);
-                    const unsigned long rows = w->stride != 0 ? w->stride
-                                                              : width;
-                    uint32_t* px = (bytes >= rows * height * 4)
+                    const unsigned long need =
+                        buffer_needs(stride, width, height);
+                    uint32_t* px = (need != 0 && bytes >= need)
                                  ? (uint32_t*)shm_map(fresh) : 0;
                     if (px != 0) {
                         damage_window(slot);    /* where it was */
@@ -1586,6 +1640,7 @@ static void reconcile(void)
                         g_pixel_bytes[slot] = bytes;
                         g_width[slot] = width;
                         g_height[slot] = height;
+                        g_stride[slot] = stride;
                         g_pixel_gen[slot] = gen;
                         g_mapped_gen[slot] = w->present;
                         damage_window(slot);    /* and where it now is */
@@ -1604,14 +1659,34 @@ static void reconcile(void)
              *
              * Damaged at the old size first, or the part it is vacating is
              * left on the screen. */
-            if ((w->width != g_width[slot] || w->height != g_height[slot]) &&
-                w->width != 0 && w->height != 0 &&
-                w->width <= g_fb.width && w->height <= g_fb.height) {
-                const unsigned long rows = w->stride != 0 ? w->stride : w->width;
-                if (rows * w->height * 4 <= g_pixel_bytes[slot]) {
+            /* Snapshotted first, and only the snapshot is used after that.
+             * This read w->width five times and w->height four - to compare,
+             * to bounds-check, to measure the buffer against, and to store -
+             * so a client changing them in between had a size checked that was
+             * not the size stored. That is the resize path, which is to say
+             * it is every frame of a window being dragged by its corner. */
+            const unsigned width = w->width, height = w->height;
+            const unsigned stride = w->stride;
+            /* And only while the client's generation is the one we have
+             * mapped. A client replacing its buffer writes the new stride, the
+             * new width and the new height first and publishes the generation
+             * last - on purpose, so the server can never see a new generation
+             * described by an old size. The gap that leaves is the other way
+             * round: a new size describing a segment this server has not got
+             * yet. Adopting it there is bounded by the check below, so it
+             * cannot read off the end, but it would draw one frame of the old
+             * buffer at the next one's stride, which is a frame of bands. */
+            if (gen == g_pixel_gen[slot] &&
+                (width != g_width[slot] || height != g_height[slot] ||
+                 stride != g_stride[slot]) &&
+                width != 0 && height != 0 &&
+                width <= g_fb.width && height <= g_fb.height) {
+                const unsigned long need = buffer_needs(stride, width, height);
+                if (need != 0 && need <= g_pixel_bytes[slot]) {
                     damage_window(slot);
-                    g_width[slot] = w->width;
-                    g_height[slot] = w->height;
+                    g_width[slot] = width;
+                    g_height[slot] = height;
+                    g_stride[slot] = stride;
                     blur_cache_drop(slot);
                     damage_window(slot);
                 }

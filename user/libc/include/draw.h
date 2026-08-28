@@ -24,6 +24,18 @@
 struct surface {
     uint32_t* pixels;
     int       w, h;
+    /* How far apart the rows of `pixels` are, when that is not `w`.
+     *
+     * A window's buffer is allocated with room to spare so a resize can change
+     * what is shown without allocating anything, which puts its rows
+     * round_up(width) apart - essentially never the width itself. Drawing into
+     * such a buffer at its width writes each row a little further along than
+     * the one before, and whatever reads it at the real stride gets the image
+     * sheared into bands, worse the further down it goes.
+     *
+     * Zero means "the same as w", which is what a plain `{pixels, w, h}`
+     * gives and is right for every buffer with no slack in it. */
+    int       stride;
     /* What may be written to. A compositor repaints one damage rectangle at a
      * time and anything drawn outside it corrupts the screen, so the clip
      * belongs on the surface rather than in every caller. A zero width means

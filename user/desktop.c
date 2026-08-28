@@ -464,14 +464,15 @@ static void sheet_paint(void)
     /* The toolkit draws wherever it was last pointed, so the sheet is painted
      * and then the pointer is put back: everything else in this file assumes
      * the desktop's own buffer. */
-    wg_target(g_sheet_px, g_sheet_w, g_sheet_h);
+    wg_target_strided(g_sheet_px, g_sheet_w, g_sheet_h,
+                      win_stride(g_sheet));
     wg_theme();
     wg_glass_clear();
     const struct ui_rect all = { 0, 0, (int)g_sheet_w, (int)g_sheet_h };
     ui_layout(g_sheet_root, all);
     ui_draw(g_sheet_root);
     win_present(g_sheet);
-    wg_target(g_px, g_w, g_h);
+    wg_target_strided(g_px, g_w, g_h, win_stride(g_window_id));
 }
 
 static void sheet_close(void)
@@ -590,7 +591,10 @@ int main(void)
     g_px = win_map(id);
     if (g_px == 0)
         return 1;
-    wg_target(g_px, g_w, g_h);
+    /* The desktop's own rows are as far apart as it is wide only because it
+     * is the width of the screen and that happens to be a multiple of 256.
+     * Its sheets are not, and neither is a screen of another size. */
+    wg_target_strided(g_px, g_w, g_h, win_stride(id));
 
     home_desktop(g_dir, sizeof(g_dir));
     places_load();

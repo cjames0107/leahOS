@@ -10,6 +10,9 @@
 
 static uint32_t* g_px;
 static unsigned  g_w, g_h;
+/* How far apart the rows of g_px are. The same as g_w for a buffer with no
+ * slack, which is every buffer but a window's own. */
+static unsigned  g_pitch;
 static unsigned char g_font[256 * 16];
 static int g_have_font;
 
@@ -43,9 +46,16 @@ unsigned wg_scale(void)       { return g_scale; }
 
 void wg_target(uint32_t* pixels, unsigned width, unsigned height)
 {
+    wg_target_strided(pixels, width, height, width);
+}
+
+void wg_target_strided(uint32_t* pixels, unsigned width, unsigned height,
+                       unsigned stride)
+{
     g_px = pixels;
     g_w = width;
     g_h = height;
+    g_pitch = stride >= width ? stride : width;
     /* A new target is a new window: whatever was clipped belonged to the old
      * one. */
     wg_clip_none();
@@ -128,6 +138,7 @@ static struct surface canvas(void)
     s.pixels = g_px;
     s.w = (int)g_w;
     s.h = (int)g_h;
+    s.stride = (int)g_pitch;
     s.cx = g_cx;
     s.cy = g_cy;
     s.cw = g_cw;
@@ -150,7 +161,7 @@ void wg_plot(int x, int y, uint32_t colour)
     if (g_px == 0 || x < 0 || y < 0 ||
         (unsigned)x >= g_w || (unsigned)y >= g_h || clipped_out(x, y))
         return;
-    g_px[(unsigned)y * g_w + (unsigned)x] = 0xFF000000u | colour;
+    g_px[(unsigned)y * g_pitch + (unsigned)x] = 0xFF000000u | colour;
 }
 
 /* An icon: 32x32 pixels with one bit of alpha, drawn straight over whatever is
@@ -181,7 +192,7 @@ void wg_icon_scaled(int x, int y, const uint32_t* px, int sw, int sh,
                  * "no alpha here"; since the server started reading that byte
                  * it means "not there at all", and every icon in the system
                  * turned into an empty square. */
-                g_px[(unsigned)py * g_w + (unsigned)pxx] =
+                g_px[(unsigned)py * g_pitch + (unsigned)pxx] =
                     0xFF000000u | (s & 0x00FFFFFFu);
         }
     }
@@ -209,7 +220,7 @@ void wg_fill(int x, int y, int w, int h, uint32_t colour)
     const uint32_t solid = 0xFF000000u | colour;
     for (int row = y0; row < y1; ++row)
         for (int col = x0; col < x1; ++col)
-            g_px[(unsigned)row * g_w + (unsigned)col] = solid;
+            g_px[(unsigned)row * g_pitch + (unsigned)col] = solid;
 }
 
 /* --- the RGB picker -------------------------------------------------------
@@ -703,7 +714,7 @@ static void blend_px(int x, int y, uint32_t over)
     const unsigned ca = (over >> 24) & 0xFF;
     if (ca == 0)
         return;
-    const unsigned long at = (unsigned long)y * g_w + (unsigned)x;
+    const unsigned long at = (unsigned long)y * g_pitch + (unsigned)x;
     const uint32_t under = g_px[at];
     const unsigned ua = (under >> 24) & 0xFF;
     if (ca == 255 || ua == 0) {
@@ -818,8 +829,15 @@ void wg_glass_clear(void)
      * clear, the one wash the server applies is the only one, and the two are
      * identical because they are literally the same paint. */
     const uint32_t c = glass_on() ? 0x00000000u : wg_base_colour();
-    for (unsigned i = 0; i < g_w * g_h; ++i)
-        g_px[i] = c;
+    /* Row by row, because the rows may be further apart than they are wide and
+     * running straight through would clear the slack as well - which is not
+     * wrong, but is a quarter more work on every window and clears memory
+     * nothing will read. */
+    for (unsigned y = 0; y < g_h; ++y) {
+        uint32_t* row = &g_px[(unsigned long)y * g_pitch];
+        for (unsigned x = 0; x < g_w; ++x)
+            row[x] = c;
+    }
 }
 
 

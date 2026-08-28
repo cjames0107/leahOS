@@ -274,6 +274,15 @@ uint32_t* win_map(int id)
     return g_pixels[id];        /* mapped by win_create; this is just the handle */
 }
 
+unsigned win_stride(int id)
+{
+    struct ws_window* w = ws_slot(id);
+    if (w == 0)
+        return 0;
+    const unsigned s = w->stride;
+    return s != 0 ? s : w->width;
+}
+
 void win_present(int id)
 {
     struct ws_window* w = ws_slot(id);

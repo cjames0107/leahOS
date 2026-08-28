@@ -63,6 +63,20 @@ void wg_clip_none(void);
 
 void wg_target(uint32_t* pixels, unsigned width, unsigned height);
 
+/* The same, for a buffer whose rows are further apart than they are wide.
+ *
+ * A window's own buffer is one: it is allocated with room to spare so that a
+ * resize can change what is shown without allocating anything, which puts its
+ * rows round_up(width) apart. A client drawing straight into it - rather than
+ * into a buffer of its own that the framework copies across - has to say so,
+ * or it writes each row a little further along than the last and the server,
+ * which reads at the real stride, shows the window sheared into bands.
+ *
+ * `width` still says how wide the drawing is, so nothing lands in the slack.
+ * Use win_stride() for the last argument. */
+void wg_target_strided(uint32_t* pixels, unsigned width, unsigned height,
+                       unsigned stride);
+
 /* Pick up the desktop's theme, so a client's selection highlight and body
  * colour match every other client's. Safe to call every frame - it only reads
  * the shared block, and does nothing when there is no window server. The

@@ -24,6 +24,19 @@ int win_create(int x, int y, unsigned width, unsigned height, const char* title)
  * replaced, so call it again rather than holding the old pointer. */
 uint32_t* win_map(int id);
 
+/* How far apart the rows of that buffer are, in pixels.
+ *
+ * Not the window's width. The buffer is allocated with room to spare so that a
+ * resize can change what is shown without allocating anything, so its rows are
+ * round_up(width) apart - which for a window 300 wide is 512. A client drawing
+ * into the buffer itself has to step by this, or every row lands further along
+ * than the one before and the server draws the window in bands.
+ *
+ * Clients built on <app.h> never need it: they draw into a private buffer and
+ * the framework copies it across a row at a time. This is for the few that
+ * draw into the window's own pixels. */
+unsigned win_stride(int id);
+
 /* The window's current content size. */
 void win_size(int id, unsigned* width, unsigned* height);
 
