@@ -10,6 +10,7 @@
  */
 
 #include <app.h>
+#include <prefs.h>
 #include <stdio.h>
 #include <time.h>
 #include <ui.h>
@@ -24,13 +25,46 @@ static char g_time_text[32];
 static char g_date_text[48];
 static char g_up_text[48];
 
+/* Whether to show a twelve or a twenty-four hour clock.
+ *
+ * Re-read from the file rather than remembered, because Settings writes it
+ * while this is running and a clock that needed restarting to change format
+ * would make the setting look broken. Once every few seconds, not every tick:
+ * this runs twice a second and the answer changes about never. */
+static int wants_24_hour(void)
+{
+    static int answer = 1;
+    static unsigned long asked;
+    const unsigned long now = uptime_ms();
+    if (asked == 0 || now - asked > 3000) {
+        asked = now;
+        prefs_scope(PREFS_DESKTOP);
+        prefs_load();
+        answer = prefs_get_u32("clock.24hour", 1) != 0;
+        /* And back to this application's own, which is the scope app_run
+         * chose and the one it saves this window's geometry into. Leaving the
+         * desktop's selected would have put the clock's window position in
+         * the file that describes the desktop. */
+        prefs_scope("Clock");
+        prefs_load();
+    }
+    return answer;
+}
+
 static void refresh(void)
 {
     const time_t now = time(0);
     struct tm t;
     if (localtime_r(&now, &t) != 0) {
-        snprintf(g_time_text, sizeof(g_time_text), "%02d:%02d:%02d",
-                 t.tm_hour, t.tm_min, t.tm_sec);
+        if (wants_24_hour()) {
+            snprintf(g_time_text, sizeof(g_time_text), "%02d:%02d:%02d",
+                     t.tm_hour, t.tm_min, t.tm_sec);
+        } else {
+            int h = t.tm_hour % 12;
+            if (h == 0) h = 12;         /* midnight and noon are twelve */
+            snprintf(g_time_text, sizeof(g_time_text), "%d:%02d:%02d %s",
+                     h, t.tm_min, t.tm_sec, t.tm_hour < 12 ? "am" : "pm");
+        }
         static const char* const kMonths[12] = {
             "January", "February", "March", "April", "May", "June", "July",
             "August", "September", "October", "November", "December"

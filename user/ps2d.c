@@ -19,11 +19,13 @@
 #include <display.h>
 #include <driver.h>
 #include <ipc.h>
+#include <shm.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/syscall.h>
 #include <thread.h>
 #include <unistd.h>
+#include <wproto.h>
 
 #define DATA_PORT    0x60
 #define STATUS_PORT  0x64
@@ -242,6 +244,51 @@ static void handle_scancode(unsigned char scancode)
 
 static int g_mx, g_my;
 static int g_max_x = 1023, g_max_y = 767;   /* until the framebuffer says */
+
+/* How far the pointer moves for how far the mouse does.
+ *
+ * It has to be applied here, where the counts are accumulated, and not by
+ * whoever reads the position: the accumulator is what stops at the edge of the
+ * screen, so a reader scaling the position afterwards would find the pointer
+ * pinned in a corner while the mouse was still being pushed.
+ *
+ * The number lives in the window server's control block with the rest of the
+ * desktop's preferences. This driver starts before that block exists, so it is
+ * looked for again every so often rather than once - and until it is found, or
+ * if there is no window server at all, one count is one pixel. */
+static struct ws_shared* g_desktop;
+static int g_desktop_tries;
+
+static int pointer_speed(void)
+{
+    if (g_desktop == 0 && ++g_desktop_tries % 64 == 0) {
+        const int id = shm_open(WS_CONTROL_KEY, 0, 0);
+        if (id >= 0)
+            g_desktop = (struct ws_shared*)shm_map(id);
+    }
+    if (g_desktop == 0 || g_desktop->magic != WS_MAGIC)
+        return 100;
+    const unsigned pc = g_desktop->input.pointer_speed;
+    if (pc < 25)  return 25;            /* below this it will not cross the
+                                         * screen in one sweep */
+    if (pc > 400) return 400;
+    return (int)pc;
+}
+
+/* A count scaled, with the remainder kept.
+ *
+ * Rounding each packet on its own throws away most of a slow movement: at half
+ * speed every single-count packet scales to zero and the pointer does not move
+ * at all until the mouse is jerked. The leftover is carried into the next
+ * packet instead, so a slow drag arrives a pixel at a time rather than not at
+ * all. */
+static int scaled(int count, int percent, int* carry)
+{
+    const int total = count * percent + *carry;
+    const int whole = total / 100;
+    *carry = total - whole * 100;
+    return whole;
+}
 /* Four bytes when the mouse has a wheel, three when it has not.
  *
  * A plain PS/2 mouse sends three and knows nothing about a fourth. The
@@ -279,6 +326,12 @@ static void handle_mouse_byte(unsigned char byte)
     if (flags & 0x10) dx |= ~0xFF;
     if (flags & 0x20) dy |= ~0xFF;
 
+    {
+        static int carry_x, carry_y;
+        const int speed = pointer_speed();
+        dx = scaled(dx, speed, &carry_x);
+        dy = scaled(dy, speed, &carry_y);
+    }
     g_mx += dx;
     g_my -= dy;                     /* the mouse calls up positive; screens do not */
 

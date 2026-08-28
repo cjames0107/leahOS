@@ -296,6 +296,21 @@ struct ui_view* ui_spacer(struct ui_view* parent)
     return v;
 }
 
+void ui_sidebar_headings(struct ui_view* v, int (*fn)(void*, int))
+{
+    if (v != 0)
+        v->branch_of = fn;
+}
+
+/* Whether row `i` of this view is a heading rather than a choice. Only a
+ * sidebar has them; asking anything else is always no, which is what lets the
+ * list code below be shared. */
+static int is_heading(const struct ui_view* v, int i)
+{
+    return v->kind == UI_SIDEBAR && v->branch_of != 0 &&
+           v->branch_of(v->user, i) != 0;
+}
+
 void ui_measure(struct ui_view* v,
                 int (*fn)(struct ui_view* v, int width, void* user))
 {
@@ -1562,7 +1577,11 @@ int ui_event(struct ui_view* root, const struct win_event* e)
              * whatever row happens to be beside it. */
         } else if (v->kind == UI_LIST || v->kind == UI_SIDEBAR) {
             const int row = v->scroll + (e->y - v->frame.y) / v->row_h;
-            if (row >= 0 && row < v->rows) {
+            /* A heading is not a choice, so a press on one is not a change of
+             * choice. Ignored rather than nudged to the nearest row: a press
+             * that selects something the pointer was not on is worse than one
+             * that does nothing. */
+            if (row >= 0 && row < v->rows && !is_heading(v, row)) {
                 v->selected = row;
                 if (v->action) v->action(v, v->user);
             }
@@ -1945,9 +1964,15 @@ int ui_event(struct ui_view* root, const struct win_event* e)
                 if (v->action) v->action(v, v->user);
                 return 1;
             } else return 0;
+            /* Past a heading rather than onto it, in whichever direction
+             * the key was going. A heading cannot be chosen, so stopping on
+             * one would make the arrow key appear to do nothing. */
+            const int step = to > v->selected ? 1 : -1;
+            while (to >= 0 && to < v->rows && is_heading(v, to))
+                to += step;
             if (to < 0) to = 0;
             if (to >= v->rows) to = v->rows - 1;
-            if (to != v->selected) {
+            if (to != v->selected && !is_heading(v, to)) {
                 v->selected = to;
                 list_show(v, to);
                 if (v->action) v->action(v, v->user);
@@ -2115,6 +2140,14 @@ static void draw_list(struct ui_view* v)
         if (row == v->selected)
             wg_row_select(v->frame.x + 4, y, w - 8, v->row_h - 2);
         const char* text = v->row_text != 0 ? v->row_text(v->user, row) : "";
+        if (is_heading(v, row)) {
+            /* A label for what follows, not a row you can land on: dim, and
+             * indented less than the choices under it so the indent itself
+             * says which is which. */
+            wg_text_clipped(v->frame.x + 8, y + 6, text != 0 ? text : "",
+                            WG_DIM, w - 16);
+            continue;
+        }
         wg_text_clipped(v->frame.x + 12, y + 4, text != 0 ? text : "",
                         wg_ink_colour(), w - 20);
     }
@@ -2434,8 +2467,15 @@ void ui_draw(struct ui_view* v)
     }
 
     case UI_STEPPER: {
-        char num[16];
-        snprintf(num, sizeof(num), "%d", v->value);
+        /* Its own number, unless the caller has written what the number means.
+         * A stepper over a plain count says the count; one stepping through
+         * quarter-hours of a time zone would otherwise show "48", which is
+         * true of the control and says nothing about the setting. */
+        char num[UI_TEXT_MAX];
+        if (v->text[0] != '\0')
+            snprintf(num, sizeof(num), "%s", v->text);
+        else
+            snprintf(num, sizeof(num), "%d", v->value);
         const int third = f.w / 3;
         wg_button(f.x, f.y, third, f.h, "-", 0);
         wg_button(f.x + f.w - third, f.y, third, f.h, "+", 0);

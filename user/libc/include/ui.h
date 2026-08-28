@@ -242,6 +242,17 @@ struct ui_view* ui_list(struct ui_view* parent, ui_row_text rows, int count,
                         void* user);
 struct ui_view* ui_sidebar(struct ui_view* parent, ui_row_text rows, int count,
                            void* user);
+
+/* Which of a sidebar's rows are section headings rather than choices.
+ *
+ * A control panel with a dozen pages is a list nobody can scan; the same dozen
+ * under four headings is. The headings are rows like any other - so the
+ * application keeps one array and one set of indices, rather than a list of
+ * lists - and this says which of them are labels: drawn small and dim, not
+ * selectable, and stepped over by the arrow keys rather than settled on.
+ *
+ * `fn` returns non-zero for a heading. Pass 0 to go back to a plain list. */
+void ui_sidebar_headings(struct ui_view* v, int (*fn)(void*, int));
 struct ui_view* ui_slider(struct ui_view* parent, int value, int max);
 struct ui_view* ui_progress(struct ui_view* parent, int value, int max);
 struct ui_view* ui_spacer(struct ui_view* parent);
@@ -260,6 +271,12 @@ struct ui_view* ui_separator(struct ui_view* parent);
 struct ui_view* ui_group(struct ui_view* parent, const char* title,
                          int layout, int pad, int gap);
 struct ui_view* ui_toggle(struct ui_view* parent, const char* label, int on);
+/* A number with a - and a +, stepping from 0 to `max`.
+ *
+ * It shows its own value; ui_set_text puts something else in the middle for a
+ * stepper whose number is an index into something rather than a quantity - the
+ * offset of a time zone, say, where "48" is true of the control and tells the
+ * reader nothing. */
 struct ui_view* ui_stepper(struct ui_view* parent, int value, int max);
 struct ui_view* ui_image(struct ui_view* parent, const uint32_t* px, int size);
 

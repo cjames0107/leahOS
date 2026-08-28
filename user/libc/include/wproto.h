@@ -364,6 +364,35 @@ struct ws_theme {
      * thing worth turning off. Off is the default for that reason: the glass
      * is what the interface wants to be, not what it has to be. */
     volatile uint32_t blur;         /* 1 frosted, 0 opaque                    */
+
+    /* Whether a window casts a shadow.
+     *
+     * A shadow is a per-pixel blend over an area larger than the window it
+     * falls behind, so on a machine with no acceleration it is the second
+     * thing worth turning off after the glass. On by default, because a
+     * desktop without them is a set of rectangles with no order to them. */
+    volatile uint32_t shadows;
+};
+
+/* How the pointer and the keyboard behave. Here rather than in each driver
+ * because these are the user's answers, not the hardware's, and every one of
+ * them was a constant compiled into something before.
+ *
+ * The server owns the defaults and writes them at startup; anything that wants
+ * to change one writes it and the driver reads it next time round. */
+struct ws_input {
+    volatile uint32_t natural_scroll;   /* 1: the content follows the wheel  */
+    volatile uint32_t scroll_lines;     /* a notch is worth this many        */
+    volatile uint32_t pointer_speed;    /* percent; 100 is one count, one px */
+    /* What is deliberately not here: key repeat. A PS/2 keyboard repeats in
+     * hardware and the rate is set with one command, but under emulation the
+     * repeat comes from the host and that command is accepted and ignored - so
+     * the setting would do nothing on the only machine this runs on. Doing it
+     * in software instead would repeat twice on a real keyboard. Neither is a
+     * setting, so there is not one. */
+    /* How long the screen may sit untouched before it goes dark. Zero never
+     * blanks it. Any key or movement brings it back. */
+    volatile uint32_t blank_ms;
 };
 
 /* What was here: four backdrop patterns - a grid, dots, a weave and a two-tone
@@ -385,6 +414,7 @@ struct ws_shared {
      * only ever raised - by a client that ran out of slots and made another. */
     volatile uint32_t banks;
     struct ws_theme theme;
+    struct ws_input input;
     struct ws_drag  drag;
     struct ws_window windows[WS_BANK_WINDOWS];
 };

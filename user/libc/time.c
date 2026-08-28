@@ -139,10 +139,22 @@ long timezone_offset(void)
 {
     static int read_yet;
     static long offset;
+    static unsigned long read_at;
 
-    if (read_yet)
+    /* Remembered, but not for ever.
+     *
+     * It used to be read once and kept for the life of the process, which is
+     * right for a program that runs for a moment and wrong for the ones that
+     * do not: a clock on the desktop would have gone on showing the old zone
+     * until it was restarted, which makes the setting look broken rather than
+     * deferred. Re-read at most once a second, so `ls -l` over a thousand
+     * files still costs one open and not a thousand. */
+    const unsigned long now = uptime_ms();
+    if (read_yet && now - read_at < 1000)
         return offset;
     read_yet = 1;
+    read_at = now;
+    offset = 0;
 
     /* A signed number of minutes, on its own. Not a zone name: naming a zone
      * means carrying the table that says what the zone did in 1987, and this

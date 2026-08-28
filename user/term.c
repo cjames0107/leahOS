@@ -23,6 +23,7 @@
  */
 
 #include <display.h>
+#include <prefs.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,6 +97,10 @@ static unsigned char g_pen = ATTR_DEFAULT;
 static int  g_cols = 80, g_rows = 24;
 static long g_cur_line;         /* the line the cursor is on */
 static long g_first;            /* the oldest line still remembered */
+/* How many lines are kept. The ring is HISTORY_ROWS long and that is the most
+ * there can ever be; this is how much of it is used, so that somebody who
+ * wants a short history gets one rather than being told the size is fixed. */
+static long g_scrollback = HISTORY_ROWS;
 static long g_view;             /* the top line of the window */
 static int  g_follow = 1;       /* is the view pinned to the bottom? */
 static int  g_cur_c;
@@ -201,8 +206,8 @@ static void newline(void)
     clear_line(++g_cur_line);
     /* The oldest line falls off the back once the ring is full - which is the
      * only place history is ever lost, and the reason HISTORY_ROWS is large. */
-    if (line_count() > HISTORY_ROWS)
-        g_first = g_cur_line - HISTORY_ROWS + 1;
+    if (line_count() > g_scrollback)
+        g_first = g_cur_line - g_scrollback + 1;
     if (g_follow)
         g_view = last_view();
     else if (g_view < g_first)
@@ -720,15 +725,28 @@ static int start_shell(void)
          * believes TERM and sends escape codes would print them literally -
          * `clear` already does. */
         setenv("TERM", "leah", 1);
-        setenv("COLUMNS", "80", 1);
-        setenv("LINES", "24", 1);
+        /* The real numbers, not the ones this window happened to open at:
+         * they were literals, so a resized terminal told every program it ran
+         * that it was eighty by twenty-four whatever it actually was. */
+        char n[16];
+        snprintf(n, sizeof(n), "%d", g_cols);
+        setenv("COLUMNS", n, 1);
+        snprintf(n, sizeof(n), "%d", g_rows);
+        setenv("LINES", n, 1);
 
         close(to_shell[0]);
         close(to_shell[1]);
         close(from_shell[0]);
         close(from_shell[1]);
+        /* Whatever the session says the shell is, which is what makes the
+         * setting for it mean anything. Falls back to the one that is
+         * certainly there. */
+        const char* shell = getenv("SHELL");
+        if (shell == 0 || shell[0] == '\0')
+            shell = "/bin/sh";
         char* argv[] = { "sh", 0 };
-        execve("/bin/sh", argv, 0);
+        execve(shell, argv, 0);
+        execve("/bin/sh", argv, 0);     /* a shell that has gone missing */
         exit(127);
     }
 
@@ -862,6 +880,21 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    /* The terminal's own preferences, read before the window is asked for,
+     * because two of them are what size to ask for. app_run loads this same
+     * scope again, which costs one read and keeps the two in step. */
+    prefs_scope("Terminal");
+    prefs_load();
+    unsigned cols = prefs_get_u32("columns", 80);
+    unsigned rows = prefs_get_u32("rows", 24);
+    if (cols < 20)  cols = 20;
+    if (cols > (unsigned)MAX_COLS) cols = MAX_COLS;
+    if (rows < 4)   rows = 4;
+    if (rows > (unsigned)MAX_ROWS) rows = MAX_ROWS;
+    g_scrollback = (long)prefs_get_u32("scrollback", HISTORY_ROWS);
+    if (g_scrollback < 24) g_scrollback = 24;
+    if (g_scrollback > HISTORY_ROWS) g_scrollback = HISTORY_ROWS;
+
     struct ui_view* root = ui_box(0, UI_STACK_V, 0, 0);
     /* The history scrolls, and the scrolling is the library's. This window
      * drew a bar of its own, hit-tested it and dragged its thumb by hand, and
@@ -873,8 +906,8 @@ int main(int argc, char** argv)
     /* Eighty columns of text plus the bar, so the terminal is still the eighty
      * columns everything assumes and the scrollbar is not taken out of them. */
     g_app.title = "Terminal";
-    g_app.width = 80 * GLYPH_W + WG_SCROLL_W;
-    g_app.height = 24 * GLYPH_H;
+    g_app.width = (int)cols * GLYPH_W + WG_SCROLL_W;
+    g_app.height = (int)rows * GLYPH_H;
     /* Below this the shell's prompt has nowhere to go. */
     g_app.min_width = 20 * GLYPH_W + WG_SCROLL_W;
     g_app.min_height = 4 * GLYPH_H;

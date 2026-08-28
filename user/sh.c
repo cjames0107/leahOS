@@ -969,6 +969,27 @@ int main(int argc, char** argv)
         tcsetpgrp(0, g_shell_pgid);
     }
 
+    /* The user's own startup file, before the first prompt.
+     *
+     * This is where a PATH, a variable or an alias that should be there in
+     * every shell actually goes; without it there was nowhere to put one, and
+     * the environment a session had was whatever login compiled in. Only for
+     * an interactive shell: a script gets the environment it was given, and
+     * one that behaved differently because of a file in somebody's home
+     * directory would be a script that cannot be relied on.
+     *
+     * A missing file is the normal case and says nothing. */
+    {
+        const char* home = getenv("HOME");
+        if (home != 0 && home[0] != '\0') {
+            char profile[256];
+            snprintf(profile, sizeof(profile), "%s/.profile", home);
+            struct stat st;
+            if (stat(profile, &st) == 0)
+                run_script(profile, 0, 0);
+        }
+    }
+
     printf("leahOS shell - try: ls /, cat /usr/share/doc/readme.md, ls | wc\n");
     printf("builtins: cd exit export unset source help. `help` lists the rest.\n");
 

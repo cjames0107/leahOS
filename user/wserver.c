@@ -250,6 +250,19 @@ static struct rect g_clip;
 
 static int g_cursor_x, g_cursor_y;
 static int g_last_cursor_x = -1, g_last_cursor_y = -1;
+
+/* The screen going dark on its own.
+ *
+ * Nothing did this before, which on a machine left running means a framebuffer
+ * holding the same picture indefinitely. It is the compositor's job rather
+ * than a program of its own: this is the process that knows when the last
+ * thing happened and the only one that may write to the screen.
+ *
+ * Blanking is a fill and a flag, not a mode: while it is set nothing is
+ * composed, and the first key or movement clears it and damages everything,
+ * which repaints the desktop exactly as it was. */
+static unsigned long g_last_input_ms;
+static int           g_blanked;
 static int g_dragging = -1, g_drag_dx, g_drag_dy;
 /* The last move_request seen per window, so a bump is noticed once. */
 /* Resizing draws a rubber-band outline and commits on release, rather than
@@ -819,7 +832,7 @@ static void draw_window(int slot, int focused)
     const int clip_inside = g_clip.x >= w->x && g_clip.y >= w->y &&
                             g_clip.x + g_clip.w <= w->x + (int)fw &&
                             g_clip.y + g_clip.h <= w->y + (int)fh;
-    if (!clip_inside) {
+    if (!clip_inside && g_control->theme.shadows != 0) {
         struct shadow* shade = shadow_for((int)fw, (int)fh);
         if (shade != 0) {
             /* Only the margin. Everything the shadow puts inside the frame is
@@ -1730,6 +1743,20 @@ static void reconcile(void)
     }
 }
 
+/* Bring the screen back, if it had gone. Returns 1 when it did, which is the
+ * caller's signal that this input was the one that woke it and should not also
+ * be acted on - waking a screen with a keystroke should not also type it. */
+static int wake_screen(void)
+{
+    g_last_input_ms = uptime_ms();
+    if (!g_blanked)
+        return 0;
+    g_blanked = 0;
+    damage_all();
+    g_last_cursor_x = g_last_cursor_y = -1;
+    return 1;
+}
+
 static void handle_input(void)
 {
     struct input_state in;
@@ -1738,6 +1765,23 @@ static void handle_input(void)
 
     g_mods = (uint32_t)in.modifiers;
 
+    /* Anything at all counts as activity, and a modifier on its own is
+     * something: pressing shift to wake a screen is what a person does when
+     * they do not want to type into whatever has the keyboard. It produces no
+     * character, so the key test alone left the screen dark until a letter was
+     * pressed - which then went into the window underneath.
+     *
+     * The pointer is compared against where it was, because a mouse sitting
+     * still reports its position every time it is polled; the modifiers are
+     * compared for the same reason - they are a state, not an event. */
+    static uint32_t last_mods;
+    const int touched = in.key != 0 || in.buttons != 0 || in.wheel != 0 ||
+                        (uint32_t)in.modifiers != last_mods ||
+                        in.mouse_x != g_cursor_x || in.mouse_y != g_cursor_y;
+    last_mods = (uint32_t)in.modifiers;
+    if (touched && wake_screen())
+        return;                         /* that input was the wake-up */
+
     /* The wheel goes to the window under the pointer, not to the focused one:
      * scrolling is about what is being looked at, and having to click a window
      * before it will scroll is a thing people notice. */
@@ -1745,10 +1789,21 @@ static void handle_input(void)
         const int over = window_at(in.mouse_x, in.mouse_y);
         if (over >= 0) {
             struct ws_window* w = win(over);
+            /* How far a notch goes, and which way. Both were fixed: three
+             * lines, and the content moved the way the wheel turned. Natural
+             * scrolling is the other convention - the content follows the
+             * fingers - and which one is right is a matter of what a person is
+             * used to, which is the definition of a setting. */
+            int lines = (int)g_control->input.scroll_lines;
+            if (lines < 1) lines = 1;
+            if (lines > 10) lines = 10;
+            int notches = in.wheel * lines;
+            if (g_control->input.natural_scroll != 0)
+                notches = -notches;
             push_event(over, WIN_EVENT_SCROLL,
                        in.mouse_x - w->x - BORDER,
                        in.mouse_y - w->y - content_offset(over),
-                       (uint32_t)in.wheel, 0);
+                       (uint32_t)notches, 0);
         }
     }
     const int before_x = g_cursor_x, before_y = g_cursor_y;
@@ -2062,6 +2117,17 @@ int main(void)
     g_control->theme.text         = 0x18202B;
     g_control->theme.text_scale   = 1;
     g_control->theme.blur         = 0;
+    g_control->theme.shadows      = 1;
+
+    /* The pointer and the keyboard, as they behaved when these were constants
+     * rather than settings. A notch was three lines and the content went the
+     * way the wheel did; a count of the mouse was a pixel; a held key did not
+     * repeat, because nothing implemented it; the screen never went dark. Only
+     * the last two are a change of behaviour, and both are opt-in. */
+    g_control->input.natural_scroll = 0;
+    g_control->input.scroll_lines   = 3;
+    g_control->input.pointer_speed  = 100;
+    g_control->input.blank_ms       = 0;
 
     /* No wallpaper. The desktop is the dither above, which is what this
      * interface looked like - a photograph behind it belongs to a later era
@@ -2080,6 +2146,7 @@ int main(void)
     g_cursor_x = (int)g_fb.width / 2;
     g_cursor_y = (int)g_fb.height / 2;
     g_last_cursor_x = g_last_cursor_y = -1;
+    g_last_input_ms = uptime_ms();
     g_clip.x = 0; g_clip.y = 0;
     g_clip.w = (int)g_fb.width; g_clip.h = (int)g_fb.height;
     damage_all();               /* the desktop has to be painted once */
@@ -2107,6 +2174,27 @@ int main(void)
             empty_passes = 0;
         } else if (seen_any && ++empty_passes > 200) {
             break;                      /* every window has gone */
+        }
+
+        /* Long enough untouched, and the screen goes dark. Checked here rather
+         * than in handle_input because it is the passage of time that does it,
+         * and handle_input is only reached when something happened. */
+        const unsigned long blank_after = g_control->input.blank_ms;
+        if (!g_blanked && blank_after != 0 &&
+            uptime_ms() - g_last_input_ms > blank_after) {
+            g_blanked = 1;
+            for (unsigned long i = 0;
+                 i < (unsigned long)g_fb.width * g_fb.height; ++i)
+                g_back[i] = 0xFF000000u;
+            present_region(0, 0, g_fb.width, g_fb.height);
+            g_damage_count = 0;
+        }
+        if (g_blanked) {
+            /* Nothing is composed while it is dark, so a client repainting
+             * behind it costs the server nothing at all. */
+            g_damage_count = 0;
+            msleep(kIdleSleepMs);
+            continue;
         }
 
         const int cursor_moved = (g_cursor_x != g_last_cursor_x ||

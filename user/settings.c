@@ -21,35 +21,99 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
+#include <time.h>
 #include <shm.h>
 #include <unistd.h>
 #include <widget.h>
 #include <window.h>
 #include <wproto.h>
 
-#define PAGE_GENERAL 0
-#define PAGE_APPEAR  1
-#define PAGE_SOUND   2
-#define PAGE_NETWORK 3
-#define PAGE_USERS   4
-#define PAGE_ABOUT   5
-#define PAGES        6
+#define PAGE_GENERAL  0
+#define PAGE_APPEAR   1
+#define PAGE_SCREEN   2
+#define PAGE_SOUND    3
+#define PAGE_MOUSE    4
+#define PAGE_STORAGE  5
+#define PAGE_NETWORK  6
+#define PAGE_DATETIME 7
+#define PAGE_USERS    8
+#define PAGE_SHELL    9
+#define PAGE_TERMINAL 10
+#define PAGE_ABOUT    11
+#define PAGES         12
 
-#define SIDEBAR 118
+#define SIDEBAR 148
 #define ROW_H   22
 
 static int g_page = PAGE_GENERAL;
+
+/* The sidebar, as one list with headings in it.
+ *
+ * Twelve pages in a flat column is a list that has to be read rather than
+ * scanned, which is the point at which every control panel grows sections. The
+ * headings are rows like any other so that there is one array and one set of
+ * indices; ui_sidebar_headings is what says which of them are labels. A
+ * heading names no page, which is what -1 means. */
+struct entry { const char* label; int page; };
+
+static const struct entry kRows[] = {
+    { "Desktop",     -1 },
+    { "General",     PAGE_GENERAL },
+    { "Appearance",  PAGE_APPEAR },
+    { "Screen",      PAGE_SCREEN },
+    { "Hardware",    -1 },
+    { "Sound",       PAGE_SOUND },
+    { "Mouse",       PAGE_MOUSE },
+    { "Storage",     PAGE_STORAGE },
+    { "System",      -1 },
+    { "Network",     PAGE_NETWORK },
+    { "Date & Time", PAGE_DATETIME },
+    { "Users",       PAGE_USERS },
+    { "About",       PAGE_ABOUT },
+    { "UNIX",        -1 },
+    { "Shell",       PAGE_SHELL },
+    { "Terminal",    PAGE_TERMINAL },
+};
+#define ROWS ((int)(sizeof(kRows) / sizeof(kRows[0])))
+
+static const char* row_label(void* user, int i)
+{
+    (void)user;
+    return (i >= 0 && i < ROWS) ? kRows[i].label : "";
+}
+
+static int row_is_heading(void* user, int i)
+{
+    (void)user;
+    return (i >= 0 && i < ROWS) ? kRows[i].page < 0 : 0;
+}
+
+/* Which row shows the page now open, so the sidebar can be built with the
+ * right one already chosen. */
+static int row_of_page(int page)
+{
+    for (int i = 0; i < ROWS; ++i)
+        if (kRows[i].page == page)
+            return i;
+    return 1;
+}
+
+static const char* page_title(int page)
+{
+    for (int i = 0; i < ROWS; ++i)
+        if (kRows[i].page == page)
+            return kRows[i].label;
+    return "";
+}
 
 /* The output device, asked about once, and the volume to come back to when
  * mute is switched off. */
 static struct audio_info g_audio;
 static int g_vol_before_mute = 70;
 static char g_note[128] = "";
-
-static const char* kPages[PAGES] = {
-    "General", "Appearance", "Sound", "Network", "Users", "About"
-};
 
 /* --- the desktop's appearance ---------------------------------------------
  *
@@ -93,12 +157,36 @@ static const struct preset kPresets[] = {
 
 /* Written through to the user's file as well as to the running desktop, so a
  * choice survives the session that made it. */
+/* The desktop's preferences rather than this application's.
+ *
+ * app_run picks a scope named after the window, which is where this program's
+ * own geometry belongs - and it does so after main has run, so by the time
+ * anything here writes a setting the scope has moved. Every write about the
+ * desktop has to say which file it means and put the scope back after.
+ *
+ * Without that the theme was written into ~/.config/Settings and read back at
+ * the next launch from ~/.config/desktop, so nothing chosen here had ever
+ * survived a restart - the page said it would, which is worse than not
+ * offering it. */
+static void desktop_prefs(void)
+{
+    prefs_scope(PREFS_DESKTOP);
+    prefs_load();
+}
+
+static void own_prefs(void)
+{
+    prefs_scope("Settings");
+    prefs_load();
+}
+
 static void theme_changed(void)
 {
     if (g_ws == 0)
         return;
     __atomic_add_fetch(&g_ws->theme.generation, 1, __ATOMIC_RELEASE);
 
+    desktop_prefs();
     prefs_set_u32("theme.desktop", g_ws->theme.desktop);
     prefs_set_u32("theme.face", g_ws->theme.face);
     prefs_set_u32("theme.title", g_ws->theme.title_active);
@@ -112,6 +200,7 @@ static void theme_changed(void)
     prefs_set_str("theme.wallpaper", (const char*)g_ws->theme.wallpaper);
     if (prefs_save() != 0)
         snprintf(g_note, sizeof(g_note), "changed, but could not be saved");
+    own_prefs();
 }
 
 /* Put back what this user chose last time. Done once, at startup, because the
@@ -163,6 +252,41 @@ static void apply_saved_theme(void)
 
 
 
+/* --- the pointer, the wheel and the screen ---------------------------------
+ *
+ * These live in the same control block as the theme, for the same reason: they
+ * are the desktop's, not this application's, and the processes that act on
+ * them - the compositor and the mouse driver - find them there. Every one of
+ * them was a constant compiled into one of those two before.
+ *
+ * Saved and restored like the theme, because the control block is built fresh
+ * every time the server starts and has no idea whose desktop it is. */
+static void input_changed(void)
+{
+    if (g_ws == 0)
+        return;
+    desktop_prefs();
+    prefs_set_u32("input.natural_scroll", g_ws->input.natural_scroll);
+    prefs_set_u32("input.scroll_lines", g_ws->input.scroll_lines);
+    prefs_set_u32("input.pointer_speed", g_ws->input.pointer_speed);
+    prefs_set_u32("input.blank_ms", g_ws->input.blank_ms);
+    prefs_set_u32("theme.shadows", g_ws->theme.shadows);
+    if (prefs_save() != 0)
+        snprintf(g_note, sizeof(g_note), "changed, but could not be saved");
+    own_prefs();
+}
+
+static void apply_saved_input(void)
+{
+    if (g_ws == 0)
+        return;
+    g_ws->input.natural_scroll = prefs_get_u32("input.natural_scroll", 0);
+    g_ws->input.scroll_lines   = prefs_get_u32("input.scroll_lines", 3);
+    g_ws->input.pointer_speed  = prefs_get_u32("input.pointer_speed", 100);
+    g_ws->input.blank_ms       = prefs_get_u32("input.blank_ms", 0);
+    g_ws->theme.shadows        = prefs_get_u32("theme.shadows", 1);
+}
+
 static void apply_preset(int i)
 {
     g_mode = i;
@@ -177,7 +301,11 @@ static void apply_preset(int i)
     g_ws->theme.selection    = p->selection;
     g_ws->theme.body         = p->body;
     g_ws->theme.text         = p->text;
-    g_ws->theme.wallpaper[0] = '\0';
+    /* The wallpaper is not part of the preset. It used to be cleared here, so
+     * choosing Dark threw away the picture and the only way back was to pick
+     * it again from the sheet - a light switch that also emptied the room.
+     * What a preset decides is the colours; the picture has its own two
+     * buttons a few rows down. */
     theme_changed();
     snprintf(g_note, sizeof(g_note), "%s", p->name);
 }
@@ -317,18 +445,15 @@ static struct app g_app;
 static struct ui_view* g_note_label;
 static int g_rebuild;               /* a page change, applied after the walk */
 
-static const char* page_name(void* user, int row)
-{
-    (void)user;
-    return (row >= 0 && row < PAGES) ? kPages[row] : "";
-}
-
 static void on_page(struct ui_view* v, void* user)
 {
     (void)user;
-    if (v->selected < 0 || v->selected >= PAGES || v->selected == g_page)
+    if (v->selected < 0 || v->selected >= ROWS)
         return;
-    g_page = v->selected;
+    const int page = kRows[v->selected].page;
+    if (page < 0 || page == g_page)
+        return;
+    g_page = page;
     g_note[0] = '\0';
     /* Not here: this runs inside the walk over the tree that is about to be
      * freed. */
@@ -430,6 +555,16 @@ static void on_backdrop(struct ui_view* v, void* user)
     ui_set_text(g_note_label, g_note);
 }
 
+static void on_shadows(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (g_ws == 0) return;
+    g_ws->theme.shadows = (uint32_t)(v->on != 0);
+    __atomic_add_fetch(&g_ws->theme.generation, 1, __ATOMIC_RELEASE);
+    input_changed();
+    ui_set_text(g_note_label, g_note);
+}
+
 static void on_text_size(struct ui_view* v, void* user)
 {
     (void)user;
@@ -471,6 +606,15 @@ static void build_appearance(struct ui_view* page)
     ui_grow(seg, 0);
     ui_on(seg, on_backdrop, 0);
 
+    /* Both of these buy their looks with the compositor's time, which on a
+     * machine with no acceleration is the whole budget - so they are together,
+     * and both can be turned off. */
+    r = row(t, "Window Shadows");
+    struct ui_view* sh = ui_toggle(r, "", g_ws != 0 && g_ws->theme.shadows != 0);
+    ui_size(sh, 52, 24);
+    ui_grow(sh, 0);
+    ui_on(sh, on_shadows, 0);
+
     struct ui_view* d = ui_group(page, "Desktop", UI_STACK_V, 12, 4);
     ui_fit(d);
 
@@ -487,8 +631,593 @@ static void build_appearance(struct ui_view* page)
     ui_grow(ui_size(ui_button(r, "Remove", on_clear_paper, 0), 84, 24), 0);
 
     ui_grow(ui_label(page,
-                     "saved to ~/.leahrc and restored when settings next starts"),
+                     "saved to ~/.config/desktop and restored at the next login"),
             0);
+    ui_spacer(page);
+}
+
+/* --- screen ---------------------------------------------------------------
+ *
+ * The one thing on this page did not exist at all: a machine left alone kept
+ * the same picture on the framebuffer indefinitely. The compositor blanks it
+ * now, because it is the process that knows when the last thing happened and
+ * the only one allowed to write to the screen. */
+
+static const unsigned kBlank[] = { 0, 60000, 300000, 900000 };
+#define BLANKS ((int)(sizeof(kBlank) / sizeof(kBlank[0])))
+
+static const char* blank_name(void* user, int i)
+{
+    (void)user;
+    static const char* const kNames[BLANKS] = {
+        "Never", "1 min", "5 min", "15 min"
+    };
+    return (i >= 0 && i < BLANKS) ? kNames[i] : "";
+}
+
+static void on_blank(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (g_ws == 0 || v->on < 0 || v->on >= BLANKS)
+        return;
+    g_ws->input.blank_ms = kBlank[v->on];
+    input_changed();
+    ui_set_text(g_note_label, g_note);
+}
+
+static void build_screen(struct ui_view* page)
+{
+    struct ui_view* g = ui_group(page, "Turn the Screen Off", UI_STACK_V, 12, 4);
+    ui_fit(g);
+
+    struct ui_view* r = row(g, "After");
+    struct ui_view* seg = ui_segmented(r, blank_name, BLANKS, 0);
+    int at = 0;
+    for (int i = 0; i < BLANKS; ++i)
+        if (g_ws != 0 && g_ws->input.blank_ms == kBlank[i])
+            at = i;
+    seg->on = at;
+    ui_size(seg, 240, 24);
+    ui_grow(seg, 0);
+    ui_on(seg, on_blank, 0);
+
+    ui_grow(ui_label(page, "a key or a movement of the mouse brings it back"), 0);
+    ui_spacer(page);
+}
+
+/* --- mouse ----------------------------------------------------------------- */
+
+static struct ui_view* g_speed_text;
+static struct ui_view* g_lines_text;
+
+static void show_pointer(void)
+{
+    char t[24];
+    if (g_speed_text != 0 && g_ws != 0) {
+        snprintf(t, sizeof(t), "%u%%", g_ws->input.pointer_speed);
+        ui_set_text(g_speed_text, t);
+    }
+    if (g_lines_text != 0 && g_ws != 0) {
+        const unsigned n = g_ws->input.scroll_lines;
+        snprintf(t, sizeof(t), "%u line%s", n, n == 1 ? "" : "s");
+        ui_set_text(g_lines_text, t);
+    }
+}
+
+static void on_speed(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (g_ws == 0)
+        return;
+    /* The slider runs 0 to 100 and the speed 25 to 400, because a pointer at a
+     * quarter speed is slow and one at four times it is the fastest that is
+     * still controllable. */
+    g_ws->input.pointer_speed = 25u + (unsigned)v->value * 375u / 100u;
+    input_changed();
+    show_pointer();
+}
+
+static void on_lines(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (g_ws == 0)
+        return;
+    g_ws->input.scroll_lines = (unsigned)(v->value + 1);
+    input_changed();
+    show_pointer();
+}
+
+static void on_natural(struct ui_view* v, void* user)
+{
+    (void)user;
+    if (g_ws == 0)
+        return;
+    g_ws->input.natural_scroll = (unsigned)(v->on != 0);
+    input_changed();
+    ui_set_text(g_note_label, g_note);
+}
+
+static void build_mouse(struct ui_view* page)
+{
+    struct ui_view* g = ui_group(page, "Pointer", UI_STACK_V, 12, 4);
+    ui_fit(g);
+
+    struct ui_view* r = row(g, "Tracking Speed");
+    const unsigned pc = g_ws != 0 ? g_ws->input.pointer_speed : 100;
+    int at = (int)((pc > 25 ? pc - 25 : 0) * 100 / 375);
+    if (at > 100) at = 100;
+    struct ui_view* sl = ui_slider(r, at, 100);
+    ui_size(sl, 180, WG_SLIDER_H);
+    ui_grow(sl, 0);
+    ui_on(sl, on_speed, 0);
+    g_speed_text = ui_grow(ui_size(ui_label(r, ""), 54, 0), 0);
+
+    struct ui_view* w = ui_group(page, "Wheel", UI_STACK_V, 12, 4);
+    ui_fit(w);
+
+    r = row(w, "Scroll by");
+    const unsigned lines = g_ws != 0 ? g_ws->input.scroll_lines : 3;
+    sl = ui_slider(r, (int)(lines > 0 ? lines - 1 : 2), 9);
+    ui_size(sl, 180, WG_SLIDER_H);
+    ui_grow(sl, 0);
+    ui_on(sl, on_lines, 0);
+    g_lines_text = ui_grow(ui_size(ui_label(r, ""), 54, 0), 0);
+
+    r = row(w, "Natural Scrolling");
+    struct ui_view* t = ui_toggle(r, "", g_ws != 0 &&
+                                  g_ws->input.natural_scroll != 0);
+    ui_size(t, 52, 24);
+    ui_grow(t, 0);
+    ui_on(t, on_natural, 0);
+
+    ui_grow(ui_label(page, "natural scrolling moves the content with the wheel,"
+                           " not against it"), 0);
+    show_pointer();
+    ui_spacer(page);
+}
+
+/* --- storage ---------------------------------------------------------------
+ *
+ * What is mounted and how full it is. Read-only, because there is nothing here
+ * to set - but "how much room is left" is the question a control panel is
+ * asked most often, and answering it needed df and a terminal. */
+
+static void human(unsigned long long bytes, char* out, unsigned long max)
+{
+    if (bytes >= (1ull << 30))
+        snprintf(out, max, "%llu.%llu GB", bytes >> 30,
+                 ((bytes >> 20) % 1024) * 10 / 1024);
+    else if (bytes >= (1ull << 20))
+        snprintf(out, max, "%llu MB", bytes >> 20);
+    else
+        snprintf(out, max, "%llu KB", bytes >> 10);
+}
+
+static void build_storage(struct ui_view* page)
+{
+    FILE* in = fopen("/proc/mounts", "r");
+    if (in == 0) {
+        ui_grow(ui_label(page, "/proc/mounts is not there"), 0);
+        ui_spacer(page);
+        return;
+    }
+    char line[256];
+    int shown = 0;
+    while (fgets(line, sizeof(line), in) != 0) {
+        char what[64], at[64], kind[32], how[16];
+        if (sscanf(line, "%63s %63s %31s %15s", what, at, kind, how) != 4)
+            continue;
+
+        struct statfs fs;
+        if (statfs(at, &fs) != 0 || fs.f_blocks == 0)
+            continue;                   /* nothing to measure: procfs and such */
+
+        const unsigned long long total =
+            (unsigned long long)fs.f_blocks * fs.f_bsize;
+        const unsigned long long free_b =
+            (unsigned long long)fs.f_bfree * fs.f_bsize;
+        const unsigned long long used = total - free_b;
+
+        char title[96], sizes[96], a[24], b[24];
+        snprintf(title, sizeof(title), "%s on %s", what, at);
+        struct ui_view* g = ui_group(page, title, UI_STACK_V, 12, 4);
+        ui_fit(g);
+
+        human(used, a, sizeof(a));
+        human(total, b, sizeof(b));
+        snprintf(sizes, sizeof(sizes), "%s of %s used (%s)", a, b, kind);
+        kv(g, "Capacity", sizes);
+
+        /* The bar spans the group rather than sitting at the end of a row:
+         * it is the same fact as the line above it, drawn, and a capacity bar
+         * that stops a third of the way across reads as a third of a disk. */
+        struct ui_view* bar = ui_progress(g, (int)(used / 1024),
+                                          (int)(total / 1024));
+        ui_size(bar, 0, 10);
+        ui_grow(bar, 1);
+        ++shown;
+    }
+    fclose(in);
+    if (shown == 0)
+        ui_grow(ui_label(page, "nothing is mounted that can be measured"), 0);
+    ui_spacer(page);
+}
+
+/* --- date and time ---------------------------------------------------------
+ *
+ * The offset is a signed number of minutes in /etc/timezone, which libc has
+ * always read and nothing has ever written. Not a zone name: naming a zone
+ * means carrying the table that says what the zone did in 1987. */
+
+static struct ui_view* g_now_label;
+static struct ui_view* g_tz_stepper;
+static char g_now_text[64];
+static int  g_tz_minutes;
+
+/* The offset written out, in the control that sets it. */
+static void show_tz(void)
+{
+    if (g_tz_stepper == 0)
+        return;
+    char t[24];
+    const int m = g_tz_minutes < 0 ? -g_tz_minutes : g_tz_minutes;
+    snprintf(t, sizeof(t), "UTC%s%02d:%02d",
+             g_tz_minutes < 0 ? "-" : "+", m / 60, m % 60);
+    ui_set_text(g_tz_stepper, t);
+}
+
+static void write_timezone(void)
+{
+    char text[16];
+    const int m = g_tz_minutes;
+    snprintf(text, sizeof(text), "%s%d\n", m < 0 ? "-" : "+", m < 0 ? -m : m);
+    const int fd = open("/etc/timezone", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd < 0) {
+        snprintf(g_note, sizeof(g_note), "/etc/timezone is not writable");
+        return;
+    }
+    write(fd, text, strlen(text));
+    close(fd);
+    snprintf(g_note, sizeof(g_note), "the zone is now UTC%s%02d:%02d",
+             m < 0 ? "-" : "+", (m < 0 ? -m : m) / 60, (m < 0 ? -m : m) % 60);
+}
+
+static int clock_24(void)
+{
+    desktop_prefs();
+    const int on = prefs_get_u32("clock.24hour", 1) != 0;
+    own_prefs();
+    return on;
+}
+
+static void show_now(void)
+{
+    const time_t now = time(0);
+    struct tm t;
+    if (localtime_r(&now, &t) == 0) {
+        snprintf(g_now_text, sizeof(g_now_text), "unknown");
+    } else if (clock_24()) {
+        snprintf(g_now_text, sizeof(g_now_text), "%02d:%02d:%02d",
+                 t.tm_hour, t.tm_min, t.tm_sec);
+    } else {
+        int h = t.tm_hour % 12;
+        if (h == 0) h = 12;
+        snprintf(g_now_text, sizeof(g_now_text), "%d:%02d:%02d %s",
+                 h, t.tm_min, t.tm_sec, t.tm_hour < 12 ? "am" : "pm");
+    }
+    if (g_now_label != 0)
+        ui_set_text(g_now_label, g_now_text);
+}
+
+static void on_tz(struct ui_view* v, void* user)
+{
+    (void)user;
+    /* The stepper counts quarter hours from -12:00, which is every offset any
+     * zone actually uses and none of the ones in between. */
+    g_tz_minutes = (v->value * 15) - 12 * 60;
+    show_tz();
+    write_timezone();
+    show_now();
+    ui_set_text(g_note_label, g_note);
+}
+
+static void on_clock_format(struct ui_view* v, void* user)
+{
+    (void)user;
+    desktop_prefs();
+    prefs_set_u32("clock.24hour", (unsigned)(v->on == 0));
+    prefs_save();
+    own_prefs();
+    show_now();
+    ui_set_text(g_note_label, "the clock picks this up within a few seconds");
+}
+
+static const char* hour_name(void* user, int i)
+{
+    (void)user;
+    return i == 0 ? "24-hour" : "12-hour";
+}
+
+static void build_datetime(struct ui_view* page)
+{
+    char line[64];
+
+    struct ui_view* c = ui_group(page, "Clock", UI_STACK_V, 12, 4);
+    ui_fit(c);
+    struct ui_view* r = row(c, "Time");
+    show_now();
+    g_now_label = ui_grow(ui_label(r, g_now_text), 0);
+
+    r = row(c, "Format");
+    struct ui_view* seg = ui_segmented(r, hour_name, 2, 0);
+    seg->on = clock_24() ? 0 : 1;
+    ui_size(seg, 160, 24);
+    ui_grow(seg, 0);
+    ui_on(seg, on_clock_format, 0);
+
+    struct ui_view* z = ui_group(page, "Time Zone", UI_STACK_V, 12, 4);
+    ui_fit(z);
+
+    g_tz_minutes = (int)(timezone_offset() / 60);
+    r = row(z, "Offset from UTC");
+    /* -12:00 to +14:00 in quarter hours: 105 steps, which covers every offset
+     * any zone actually uses and none of the ones in between. */
+    g_tz_stepper = ui_stepper(r, (g_tz_minutes + 12 * 60) / 15, 104);
+    ui_size(g_tz_stepper, 150, 24);
+    ui_grow(g_tz_stepper, 0);
+    ui_on(g_tz_stepper, on_tz, 0);
+    show_tz();
+    (void)line;
+
+    ui_grow(ui_label(page, "written to /etc/timezone; every program reads it"), 0);
+    ui_spacer(page);
+}
+
+/* --- the shell -------------------------------------------------------------
+ *
+ * These are the environment, and the environment's home on a UNIX is a file
+ * the shell reads at startup, not a preferences database. So this page edits
+ * ~/.profile - which sh now sources for an interactive shell, and which did
+ * not exist before, because there was nowhere to put a PATH: login compiled
+ * one in and nothing could change it afterwards.
+ *
+ * The two lines this writes are replaced in place and everything else in the
+ * file is kept, for the same reason prefs keeps keys it does not know: a
+ * person's own additions are not this program's to discard.
+ */
+
+static struct ui_view* g_path_field;
+static struct ui_view* g_shell_field;
+
+static void profile_path(char* out, unsigned long max)
+{
+    const char* home = getenv("HOME");
+    snprintf(out, max, "%s/.profile", home != 0 && home[0] != '\0' ? home : "/root");
+}
+
+/* The value of `export NAME=` in the profile, or what the environment says,
+ * or the fallback - in that order, because the file is what will be in force
+ * next time and the environment is only what is in force now. */
+static void profile_get(const char* name, char* out, unsigned long max,
+                        const char* fallback)
+{
+    const char* env = getenv(name);
+    snprintf(out, max, "%s", env != 0 && env[0] != '\0' ? env : fallback);
+
+    char path[256];
+    profile_path(path, sizeof(path));
+    FILE* in = fopen(path, "r");
+    if (in == 0)
+        return;
+    char line[512], want[64];
+    snprintf(want, sizeof(want), "export %s=", name);
+    const unsigned long n = strlen(want);
+    while (fgets(line, sizeof(line), in) != 0) {
+        if (strncmp(line, want, n) != 0)
+            continue;
+        unsigned long len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+        snprintf(out, max, "%s", &line[n]);
+    }
+    fclose(in);
+}
+
+/* Rewrite the file with these two lines set, keeping every other line. */
+static int profile_put(const char* path_value, const char* shell_value)
+{
+    char path[256];
+    profile_path(path, sizeof(path));
+
+    /* Read it whole first: the file is being replaced, so it cannot be read
+     * and written at the same time. */
+    char kept[4096];
+    unsigned long keep_n = 0;
+    FILE* in = fopen(path, "r");
+    if (in != 0) {
+        char line[512];
+        while (fgets(line, sizeof(line), in) != 0) {
+            if (strncmp(line, "export PATH=", 12) == 0 ||
+                strncmp(line, "export SHELL=", 13) == 0)
+                continue;               /* these two are ours to rewrite */
+            const unsigned long len = strlen(line);
+            if (keep_n + len + 1 >= sizeof(kept))
+                break;
+            memcpy(&kept[keep_n], line, len);
+            keep_n += len;
+        }
+        fclose(in);
+    }
+    kept[keep_n] = '\0';
+
+    FILE* out = fopen(path, "w");
+    if (out == 0)
+        return -1;
+    fputs("# Read by sh at the start of every interactive shell.\n", out);
+    if (keep_n > 0)
+        fputs(kept, out);
+    fprintf(out, "export PATH=%s\n", path_value);
+    fprintf(out, "export SHELL=%s\n", shell_value);
+    fclose(out);
+    return 0;
+}
+
+static void on_shell_save(struct ui_view* v, void* user)
+{
+    (void)v; (void)user;
+    const char* p = g_path_field != 0 ? g_path_field->text : "";
+    const char* sh = g_shell_field != 0 ? g_shell_field->text : "";
+    if (p[0] == '\0' || sh[0] == '\0') {
+        snprintf(g_note, sizeof(g_note), "neither of these may be empty");
+        ui_set_text(g_note_label, g_note);
+        return;
+    }
+    struct stat st;
+    if (stat(sh, &st) != 0) {
+        snprintf(g_note, sizeof(g_note), "%s is not there", sh);
+        ui_set_text(g_note_label, g_note);
+        return;
+    }
+    if (profile_put(p, sh) != 0)
+        snprintf(g_note, sizeof(g_note), "~/.profile could not be written");
+    else
+        snprintf(g_note, sizeof(g_note),
+                 "saved - every shell started from now on will use it");
+    ui_set_text(g_note_label, g_note);
+}
+
+static void build_shell(struct ui_view* page)
+{
+    char value[512];
+
+    struct ui_view* g = ui_group(page, "Environment", UI_STACK_V, 12, 4);
+    ui_fit(g);
+
+    struct ui_view* r = row(g, "PATH");
+    profile_get("PATH", value, sizeof(value),
+                "/usr/local/bin:/bin:/usr/bin");
+    g_path_field = ui_grow(ui_size(ui_field(r, value), 340, 24), 0);
+
+    r = row(g, "Shell");
+    profile_get("SHELL", value, sizeof(value), "/bin/sh");
+    g_shell_field = ui_grow(ui_size(ui_field(r, value), 340, 24), 0);
+
+    r = row(g, "");
+    ui_grow(ui_size(ui_button(r, "Save", on_shell_save, 0), 90, 24), 0);
+
+    struct ui_view* w = ui_group(page, "Where This Goes", UI_STACK_V, 12, 2);
+    ui_fit(w);
+    char path[256];
+    profile_path(path, sizeof(path));
+    kv(w, "File", path);
+    kv(w, "Read by", "sh, at the start of every interactive shell");
+
+    ui_grow(ui_label(page, "a terminal opened after saving picks both up"), 0);
+    ui_spacer(page);
+}
+
+/* --- terminal --------------------------------------------------------------
+ *
+ * Written into the Terminal's own preferences rather than the desktop's,
+ * because they are one application's. Its window opens at the size named here
+ * and keeps this many lines of history. */
+
+/* The steppers themselves carry the value, rather than a label beside them:
+ * the number a stepper counts is an index here - eighty columns is the
+ * fifteenth step - and showing both put "80" and "15" on the same row. */
+static struct ui_view* g_cols_step;
+static struct ui_view* g_rows_step;
+static struct ui_view* g_back_step;
+static unsigned g_t_cols, g_t_rows, g_t_back;
+
+static void term_save(void)
+{
+    prefs_scope("Terminal");
+    prefs_load();
+    prefs_set_u32("columns", g_t_cols);
+    prefs_set_u32("rows", g_t_rows);
+    prefs_set_u32("scrollback", g_t_back);
+    const int failed = prefs_save() != 0;
+    own_prefs();
+    snprintf(g_note, sizeof(g_note), failed
+             ? "could not be saved"
+             : "the next terminal window opens at this size");
+    ui_set_text(g_note_label, g_note);
+}
+
+static void show_term(void)
+{
+    char t[24];
+    if (g_cols_step != 0) {
+        snprintf(t, sizeof(t), "%u", g_t_cols);
+        ui_set_text(g_cols_step, t);
+    }
+    if (g_rows_step != 0) {
+        snprintf(t, sizeof(t), "%u", g_t_rows);
+        ui_set_text(g_rows_step, t);
+    }
+    if (g_back_step != 0) {
+        snprintf(t, sizeof(t), "%u lines", g_t_back);
+        ui_set_text(g_back_step, t);
+    }
+}
+
+static void on_cols(struct ui_view* v, void* user)
+{
+    (void)user;
+    g_t_cols = 20u + (unsigned)v->value * 4u;   /* 20 to 200, four at a time */
+    show_term();
+    term_save();
+}
+
+static void on_rows(struct ui_view* v, void* user)
+{
+    (void)user;
+    g_t_rows = 4u + (unsigned)v->value * 2u;    /* 4 to 100, two at a time */
+    show_term();
+    term_save();
+}
+
+static void on_back(struct ui_view* v, void* user)
+{
+    (void)user;
+    g_t_back = 128u + (unsigned)v->value * 128u;
+    show_term();
+    term_save();
+}
+
+static void build_terminal(struct ui_view* page)
+{
+    prefs_scope("Terminal");
+    prefs_load();
+    g_t_cols = prefs_get_u32("columns", 80);
+    g_t_rows = prefs_get_u32("rows", 24);
+    g_t_back = prefs_get_u32("scrollback", 1024);
+    own_prefs();
+
+    struct ui_view* g = ui_group(page, "New Windows", UI_STACK_V, 12, 4);
+    ui_fit(g);
+
+    struct ui_view* r = row(g, "Columns");
+    g_cols_step = ui_grow(ui_size(ui_stepper(r, (int)((g_t_cols - 20) / 4), 45),
+                                  126, 24), 0);
+    ui_on(g_cols_step, on_cols, 0);
+
+    r = row(g, "Rows");
+    g_rows_step = ui_grow(ui_size(ui_stepper(r, (int)((g_t_rows - 4) / 2), 48),
+                                  126, 24), 0);
+    ui_on(g_rows_step, on_rows, 0);
+
+    struct ui_view* h = ui_group(page, "History", UI_STACK_V, 12, 4);
+    ui_fit(h);
+
+    r = row(h, "Scrollback");
+    g_back_step = ui_grow(ui_size(ui_stepper(r, (int)(g_t_back / 128) - 1, 7),
+                                  150, 24), 0);
+    ui_on(g_back_step, on_back, 0);
+
+    show_term();
+    ui_grow(ui_label(page, "1024 lines is the most the ring can hold"), 0);
     ui_spacer(page);
 }
 
@@ -743,6 +1472,14 @@ static void build_about(struct ui_view* page)
 
 /* --- the window ------------------------------------------------------------ */
 
+/* How tall the page is, for the scroll view that holds it. A box knows this
+ * about itself; it just has to be asked at the moment the width is settled. */
+static int measure_page(struct ui_view* v, int width, void* user)
+{
+    (void)width; (void)user;
+    return ui_natural_h(v);
+}
+
 static void build(void)
 {
     ui_reset();
@@ -750,23 +1487,34 @@ static void build(void)
 
     struct ui_view* root = ui_box(0, UI_STACK_H, 0, 0);
 
-    struct ui_view* side = ui_sidebar(root, page_name, PAGES, 0);
-    side->selected = g_page;
+    struct ui_view* side = ui_sidebar(root, row_label, ROWS, 0);
+    ui_sidebar_headings(side, row_is_heading);
+    side->selected = row_of_page(g_page);
     ui_size(side, SIDEBAR, 0);
     ui_grow(side, 0);
     ui_on(side, on_page, 0);
 
-    struct ui_view* page = ui_box(root, UI_STACK_V, 14, 10);
-    ui_grow(page, 1);
-    ui_grow(ui_size(ui_label(page, kPages[g_page]), 0, 22), 0);
+    /* The page scrolls. Storage is as tall as the machine has filesystems and
+     * Users grows with the account list, so a page that is taller than the
+     * window is not an unusual case to be designed around afterwards. */
+    struct ui_view* pane = ui_grow(ui_scroll(root), 1);
+    struct ui_view* page = ui_box(pane, UI_STACK_V, 14, 10);
+    ui_measure(page, measure_page);
+    ui_grow(ui_size(ui_label(page, page_title(g_page)), 0, 22), 0);
 
     switch (g_page) {
-    case PAGE_GENERAL: build_general(page);    break;
-    case PAGE_APPEAR:  build_appearance(page); break;
-    case PAGE_SOUND:   build_sound(page);      break;
-    case PAGE_NETWORK: build_network(page);    break;
-    case PAGE_USERS:   build_users(page);      break;
-    default:           build_about(page);      break;
+    case PAGE_GENERAL:  build_general(page);    break;
+    case PAGE_APPEAR:   build_appearance(page); break;
+    case PAGE_SCREEN:   build_screen(page);     break;
+    case PAGE_SOUND:    build_sound(page);      break;
+    case PAGE_MOUSE:    build_mouse(page);      break;
+    case PAGE_STORAGE:  build_storage(page);    break;
+    case PAGE_NETWORK:  build_network(page);    break;
+    case PAGE_DATETIME: build_datetime(page);   break;
+    case PAGE_USERS:    build_users(page);      break;
+    case PAGE_SHELL:    build_shell(page);      break;
+    case PAGE_TERMINAL: build_terminal(page);   break;
+    default:            build_about(page);      break;
     }
 
     g_note_label = ui_grow(ui_size(ui_label(page, g_note), 0, 18), 0);
@@ -799,12 +1547,15 @@ int main(int argc, char** argv)
     const int cid = shm_open(WS_CONTROL_KEY, 0, 0);
     if (cid >= 0)
         g_ws = (struct ws_shared*)shm_map(cid);
-    apply_saved_theme();
+    apply_saved_theme();        /* leaves the desktop scope loaded */
+    apply_saved_input();
     apply_saved_audio();
 
     g_app.title = "Settings";
-    g_app.width = 660; g_app.height = 400;
-    g_app.min_width = 620; g_app.min_height = 360;
+    /* Tall enough for the sidebar's sixteen rows without scrolling it, and
+     * wide enough for a PATH to be read in the field that holds it. */
+    g_app.width = 720; g_app.height = 460;
+    g_app.min_width = 660; g_app.min_height = 380;
     g_app.sidebar = SIDEBAR;
     g_app.event = on_event;
     g_app.sheet_done = on_sheet;
