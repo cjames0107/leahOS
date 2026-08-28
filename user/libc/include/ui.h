@@ -217,6 +217,7 @@ struct ui_view {
     ui_action action;
     void*     user;
     void (*draw)(struct ui_view* v, void* user);   /* UI_CUSTOM */
+    int  (*measure)(struct ui_view* v, int width, void* user);
 
     struct ui_view* child;
     struct ui_view* next;
@@ -298,6 +299,21 @@ struct ui_view* ui_text_area(struct ui_view* parent, char* buffer, int cap);
 /* A window onto a child that does not fit. The child is the one view added to
  * it; anything taller than the frame scrolls. */
 struct ui_view* ui_scroll(struct ui_view* parent);
+
+/* How tall the content is, asked of the view rather than stored on it.
+ *
+ * A custom view inside a scroll is the case a fixed want_h cannot express: a
+ * listing's height is its row count times a row, and an icon grid's is the
+ * number of rows the icons wrap into - which is not known until the width is,
+ * and the width is not known until the bar has taken its share. So the
+ * question is asked during layout, with the width as the answer's argument,
+ * and the answer is the document's height in pixels.
+ *
+ * Without this the height had to be computed by the application before layout,
+ * from the width the last layout used - one frame stale, which is a scrollbar
+ * that reports the wrong length for the first frame after every resize. */
+void ui_measure(struct ui_view* v,
+                int (*fn)(struct ui_view* v, int width, void* user));
 
 /* Two children with a divider between them. The first two views added are the
  * panes; `at` is where the divider starts. */

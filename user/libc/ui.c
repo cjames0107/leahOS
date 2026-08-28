@@ -296,6 +296,13 @@ struct ui_view* ui_spacer(struct ui_view* parent)
     return v;
 }
 
+void ui_measure(struct ui_view* v,
+                int (*fn)(struct ui_view* v, int width, void* user))
+{
+    if (v != 0)
+        v->measure = fn;
+}
+
 struct ui_view* ui_custom(struct ui_view* parent,
                           void (*draw)(struct ui_view*, void*), void* user)
 {
@@ -943,6 +950,20 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
          * coordinates and does not need to know it is being scrolled. */
         struct ui_view* c = v->child;
         if (c != 0) {
+            /* The width the child gets, once the bar has taken its share.
+             * content_w_of asks the same question every other scrolling view
+             * asks, so a scroll view and a list reserve the same amount. Room
+             * for the bar is taken out of the width before the child is laid
+             * out, so its contents stop short of it instead of being drawn
+             * underneath it.
+             *
+             * Width first, because a child that measures itself is asked in
+             * terms of it: how many rows an icon grid wraps into is a question
+             * about the width. */
+            int w = content_w_of(v);
+            if (w < 0) w = 0;
+            if (c->measure != 0)
+                c->want_h = c->measure(c, w, c->user);
             const int tall = c->want_h > into.h ? c->want_h : into.h;
             /* How far it can go, clamped here because this is the one place
              * that knows both numbers. A scroll left past the end of shorter
@@ -950,15 +971,7 @@ void ui_layout(struct ui_view* v, struct ui_rect into)
             v->max = tall > into.h ? tall - into.h : 0;
             if (v->scroll > v->max) v->scroll = v->max;
             if (v->scroll < 0) v->scroll = 0;
-            /* Room for the bar taken out of the width before the child is laid
-             * out, so its contents stop short of it instead of being drawn
-             * underneath it. */
-            /* The width the child gets, once the bar has taken its share.
-             * content_w_of asks the same question every other scrolling view
-             * asks, so a scroll view and a list reserve the same amount. */
             v->rows = tall;
-            int w = content_w_of(v);
-            if (w < 0) w = 0;
             struct ui_rect r = { into.x, into.y - v->scroll, w, tall };
             ui_layout(c, r);
         }
@@ -1321,11 +1334,20 @@ static int bar_press(struct ui_view* v, const struct win_event* e)
     int page, span;
     scroll_extent(v, &page, &span);
     const int y = v->frame.y + UI_BAR_GAP, h = v->frame.h - UI_BAR_GAP * 2;
-    if (wg_scroll_on_thumb_v(e->y, y, h, v->scroll, page, span))
+    if (wg_scroll_on_thumb_v(e->y, y, h, v->scroll, page, span)) {
         g_scrolling = v;
-    else
+    } else {
         v->scroll = wg_scroll_hit_v(e->x, e->y, bar_x_of(v), y, h,
                                     v->scroll, page, span);
+        /* A scroll view's offset is where its children are, so moving it means
+         * laying them out again. Every other way of moving one does this; a
+         * press on the track did not, and the bar jumped to the new position
+         * while the content stayed exactly where it was. It went unnoticed
+         * because a list's scroll is a row number read back at drawing time,
+         * and a list is what this was written against. */
+        if (v->kind == UI_SCROLL)
+            ui_layout(v, v->frame);
+    }
     return 1;
 }
 

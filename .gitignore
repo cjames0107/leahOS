@@ -11,3 +11,7 @@ build/
 .claude/settings.local.json
 build/faulted-*/
 __pycache__/
+
+# Screenshots the VM probes take, which land beside the probes themselves.
+tools/vm/*.png
+tools/vm/*.ppm

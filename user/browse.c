@@ -77,7 +77,6 @@ static int g_selected = -1;
  * genuinely different questions - opening uses the first, copying the second. */
 static char g_marked[MAX_ENTRIES];
 static int  g_band;             /* a rubber band is being dragged */
-static int  g_bar_drag;         /* the scrollbar's thumb is being dragged */
 /* Where a range selection counts from. Shift extends from the last plain click
  * rather than from the last thing touched, so shift-clicking twice re-ranges
  * from the same place instead of creeping. */
@@ -103,14 +102,22 @@ static int  g_window_id = -1;
 
 static int being_dragged(int i);
 static int g_view = VIEW_ICON;
-/* Measured in pixels down the content, not in items.
+/* The listing lives in a scroll view now, so where it is scrolled to is the
+ * scroll view's own field rather than a number kept here.
  *
- * It used to count items, which in the icon view meant a step of one moved
- * every icon one place around the grid: the first one vanished and the rest
- * reflowed, so it looked like the listing was filing out rather than scrolling
- * past. A pixel offset scrolls the grid as a grid, and lets it stop between
- * rows instead of jumping a whole one at a time. */
-static int g_scroll;
+ * It was pixels down the content, which was already right - it used to count
+ * items, and a step of one then moved every icon one place around the grid:
+ * the first vanished and the rest reflowed, so the listing looked like it was
+ * filing out rather than scrolling past. What is gone with it is this
+ * window's copy of the bar: drawing it, hit-testing it, dragging its thumb,
+ * and the wheel it never had at all. */
+static struct ui_view* g_v_scroll;
+static struct ui_view* g_v_content;     /* the listing itself, inside it */
+static struct ui_view* g_v_head;        /* the list view's column headings */
+static struct app g_app;
+
+static void relayout(void);
+static void scroll_to(int px);
 static char g_status[128] = "";
 
 /* Tree view: a flat list of visible rows, rebuilt whenever something is
@@ -248,7 +255,8 @@ static void read_dir(void)
         g_count = 0;
     g_selected = -1;
     memset(g_marked, 0, sizeof(g_marked));
-    g_scroll = 0;
+    relayout();
+    scroll_to(0);
 }
 
 static int is_expanded(const char* path)
@@ -585,39 +593,97 @@ static int content_left(void) { return SIDEBAR_W; }
 
 static int content_top(void)  { return TOOLBAR_H + PATH_H; }
 static int content_h(void)    { return (int)g_h - content_top() - STATUS_H; }
-static int bar_x(void)        { return (int)g_w - 4 - WG_SCROLL_W; }
 
-static int icon_cols(void)
+/* How many icons fit across a given width. Asked in terms of a width rather
+ * than reading the window's, because the answer is wanted during layout - once
+ * the sidebar and the scrollbar have taken their share and before the height
+ * that follows from it is known. */
+static int icon_cols_for(int w)
 {
-    const int c = ((int)g_w - content_left() - 8 - WG_SCROLL_W) / CELL_W;
+    const int c = (w - 8) / CELL_W;
     return c > 0 ? c : 1;
 }
 
-/* The whole content's height in pixels - what the bar's span is measured in
- * now that scrolling is smooth. */
-static int content_span(void)
+static int icon_cols(void)
 {
+    return icon_cols_for(g_v_content != 0 && g_v_content->frame.w > 0
+                         ? g_v_content->frame.w
+                         : (int)g_w - content_left() - WG_SCROLL_W);
+}
+
+/* The window onto the listing, in the listing's own coordinates: what the
+ * first and last visible pixel of the document are. Used to skip the rows that
+ * cannot be seen - the clip would hide them anyway, but a folder of ten
+ * thousand files should not draw ten thousand rows to show forty. */
+static int seen_from(void) { return g_v_scroll != 0 ? g_v_scroll->scroll : 0; }
+static int seen_h(void)
+{
+    return g_v_scroll != 0 ? g_v_scroll->frame.h : content_h();
+}
+
+/* How tall the whole listing is, for the width it is being given. The scroll
+ * view asks this during layout; it is the one thing it cannot work out for
+ * itself about a view that draws its own content. */
+static int measure_content(struct ui_view* v, int width, void* user)
+{
+    (void)v; (void)user;
     int h;
     if (g_searching)
         h = 2 + g_results_n * ROW_H;
-    else if (g_view == VIEW_ICON)
-        h = ((g_count + icon_cols() - 1) / icon_cols()) * CELL_H + 12;
-    else if (g_view == VIEW_LIST)
-        h = ROW_H + 2 + g_count * ROW_H;
+    else if (g_view == VIEW_ICON) {
+        const int cols = icon_cols_for(width);
+        h = ((g_count + cols - 1) / cols) * CELL_H + 12;
+    } else if (g_view == VIEW_LIST)
+        h = g_count * ROW_H + 2;
     else
         h = 2 + g_row_count * ROW_H;
     return h > 0 ? h : 1;
 }
 
-
-static void reveal_selected(void);
+/* The listing changed shape, so the document's height did. Laying out again is
+ * what tells the scroll view its new limit and the bar its new length. */
+static void relayout(void)
+{
+    app_relayout(&g_app);
+}
 
 static void scroll_to(int px)
 {
-    const int most = content_span() - content_h();
-    if (px > most) px = most;
+    if (g_v_scroll == 0)
+        return;
+    if (px > g_v_scroll->max) px = g_v_scroll->max;
     if (px < 0) px = 0;
-    g_scroll = px;
+    g_v_scroll->scroll = px;
+    /* The child is positioned from the offset, so it is laid out again at
+     * once: its frame is what the next click is hit-tested against. */
+    ui_layout(g_v_scroll, g_v_scroll->frame);
+}
+
+/* The column headings belong to the list view alone: they are what the rows
+ * underneath them are columns of, and there are no columns in an icon grid, a
+ * tree, or a list of search results. */
+static void sync_head(void)
+{
+    if (g_v_head == 0)
+        return;
+    if (g_view == VIEW_LIST && !g_searching)
+        g_v_head->flags &= ~UI_HIDDEN;
+    else
+        g_v_head->flags |= UI_HIDDEN;
+}
+
+static void rebuild_tree(void);
+
+/* Showing the listing a different way changes how tall it is and what is at
+ * the top of it, so the layout and the scroll are both put back. */
+static void set_view(int which)
+{
+    g_view = which;
+    if (which == VIEW_TREE)
+        rebuild_tree();
+    sync_head();
+    relayout();
+    scroll_to(0);
 }
 
 /* Bring the selection into view after the keyboard moves it. */
@@ -627,20 +693,21 @@ static void reveal_selected(void)
         return;
     int top, bottom;
     if (g_view == VIEW_ICON) {
-        const int row = g_selected / icon_cols();
-        top = row * CELL_H;
+        /* The same places the drawing uses, so revealing a row puts it where
+         * it will actually appear rather than six pixels off. */
+        top = 6 + (g_selected / icon_cols()) * CELL_H;
         bottom = top + CELL_H;
     } else if (g_view == VIEW_LIST) {
-        top = ROW_H + 2 + g_selected * ROW_H;
+        top = 2 + g_selected * ROW_H;
         bottom = top + ROW_H;
     } else {
         top = 2 + g_selected * ROW_H;
         bottom = top + ROW_H;
     }
-    if (top < g_scroll)
+    if (top < seen_from())
         scroll_to(top);
-    else if (bottom > g_scroll + content_h())
-        scroll_to(bottom - content_h());
+    else if (bottom > seen_from() + seen_h())
+        scroll_to(bottom - seen_h());
 }
 
 
@@ -675,11 +742,9 @@ static void arrow_glyph(const struct box* b, int dir, int enabled)
  * search box are gone with them.
  */
 
-static struct app g_app;
 static struct ui_view* g_v_nav;
 static struct ui_view* g_v_search;
 static struct ui_view* g_v_menu;
-static struct ui_view* g_v_content;
 
 static void draw_nav(struct ui_view* v, void* user)
 {
@@ -715,26 +780,27 @@ static void draw_path(struct ui_view* v, void* user)
                     g_status[0] != '\0' ? WG_DIM : WG_INK, f.w - 20);
 }
 
-static void draw_icons(void)
+/* The three listings draw at the document's coordinates rather than the
+ * window's: `f` is the whole listing, already shifted by the scroll, so a row
+ * is at its own place in the document and nothing here subtracts an offset.
+ * The scroll view clips what falls outside itself. */
+static void draw_icons(struct ui_view* v)
 {
-    const int top = content_top();
+    const struct ui_rect f = v->frame;
     const int cols = icon_cols();
+    const int from = seen_from(), to = seen_from() + seen_h();
 
-    /* Whole rows are laid out as always; the offset just slides them, so a
-     * partly-visible row at either edge is drawn and clipped rather than
-     * skipped. */
-    const int first = g_scroll / CELL_H;
-    const int shift = g_scroll % CELL_H;
-    for (int i = first * cols; i < g_count; ++i) {
+    /* Whole rows as always, so a partly-visible one at either edge is drawn
+     * and clipped rather than skipped. */
+    const int first = (from > 6 ? (from - 6) / CELL_H : 0) * cols;
+    for (int i = first; i < g_count; ++i) {
+        const int dy = 6 + (i / cols) * CELL_H;
+        if (dy >= to)
+            break;
         if (being_dragged(i))
             continue;               /* it is in the air, not in the folder */
-        const int slot = i - first * cols;
-        const int cx = content_left() + 8 + (slot % cols) * CELL_W;
-        const int cy = top + 6 + (slot / cols) * CELL_H - shift;
-        if (cy >= top + content_h())
-            break;
-        if (cy + CELL_H < top)
-            continue;
+        const int cx = f.x + 8 + (i % cols) * CELL_W;
+        const int cy = f.y + dy;
         if (i == g_selected || g_marked[i])
             wg_row_select(cx - 2, cy - 2, CELL_W - 4, CELL_H - 6);
         /* A bundle is drawn as the application it is, not as the directory it
@@ -744,31 +810,40 @@ static void draw_icons(void)
     }
 }
 
-static void draw_list(void)
+/* The column headings, which are not part of the document: they stay put while
+ * the rows go past under them, so they are a view of their own above the
+ * scroll rather than the first thing inside it. */
+static void draw_head(struct ui_view* v, void* user)
 {
-    const int top = content_top();
-    /* Every x here is measured from the content's left edge rather than from
+    (void)user;
+    const struct ui_rect f = v->frame;
+    wg_text(f.x + 10, f.y + 2, "Name", WG_DIM);
+    wg_text(f.x + 300, f.y + 2, "Size", WG_DIM);
+    wg_text(f.x + 400, f.y + 2, "Kind", WG_DIM);
+    wg_fill(f.x + 8, f.y + ROW_H, f.w - 16, 1, WG_DIM);
+}
+
+static void draw_list(struct ui_view* v)
+{
+    const struct ui_rect f = v->frame;
+    /* Every x is measured from the listing's own left edge rather than from
      * the window's. They were window coordinates, so a row began at x=8 -
      * eight pixels into a sidebar a hundred and forty wide - and the sidebar
      * was only drawn afterwards, on top. With the glass on, the sidebar is
      * translucent and the rows showed straight through it. */
-    const int L = content_left();
-    wg_text(L + 10, top + 2, "Name", WG_DIM);
-    wg_text(L + 300, top + 2, "Size", WG_DIM);
-    wg_text(L + 400, top + 2, "Kind", WG_DIM);
-    wg_fill(L + 8, top + ROW_H, (int)g_w - L - 16, 1, WG_DIM);
+    const int L = f.x;
+    const int from = seen_from(), to = seen_from() + seen_h();
 
-    const int first = (g_scroll > ROW_H + 2) ? (g_scroll - ROW_H - 2) / ROW_H : 0;
+    const int first = from > 2 ? (from - 2) / ROW_H : 0;
     for (int i = first; i < g_count; ++i) {
+        const int dy = 2 + i * ROW_H;
+        if (dy >= to)
+            break;
         if (being_dragged(i))
             continue;
-        const int y = top + ROW_H + 2 + i * ROW_H - g_scroll;
-        if (y >= top + content_h())
-            break;
-        if (y + ROW_H < top + ROW_H)
-            continue;               /* under the column headings */
+        const int y = f.y + dy;
         if (i == g_selected || g_marked[i])
-            wg_row_select(L + 8, y, (int)g_w - L - 16, ROW_H);
+            wg_row_select(L + 8, y, f.w - 16, ROW_H);
         const int dir = (g_entries[i].d_type == S_IFDIR) &&
                         !bundle_is_app(g_entries[i].d_name);
         entry_icon(L + 11, y + 1, i, 16);
@@ -788,21 +863,21 @@ static void draw_list(void)
     }
 }
 
-static void draw_tree(void)
+static void draw_tree(struct ui_view* v)
 {
-    const int top = content_top();
-    const int L = content_left();       /* as in draw_list, and for the same reason */
-    const int first = g_scroll / ROW_H;
+    const struct ui_rect f = v->frame;
+    const int L = f.x;                  /* as in draw_list, for the same reason */
+    const int from = seen_from(), to = seen_from() + seen_h();
+    const int first = from > 2 ? (from - 2) / ROW_H : 0;
     for (int i = first; i < g_row_count; ++i) {
-        const int y = top + 2 + i * ROW_H - g_scroll;
-        if (y >= top + content_h())
+        const int dy = 2 + i * ROW_H;
+        if (dy >= to)
             break;
-        if (y + ROW_H < top)
-            continue;
+        const int y = f.y + dy;
         const struct row* r = &g_rows[i];
         const int x = L + 10 + r->depth * 16;
         if (i == g_selected)
-            wg_row_select(L + 8, y, (int)g_w - L - 16, ROW_H);
+            wg_row_select(L + 8, y, f.w - 16, ROW_H);
         if (r->is_dir) {
             /* A twisty: a box with a minus when open, a plus when shut. */
             wg_fill(x, y + 4, 9, 9, WG_PAPER);
@@ -813,35 +888,35 @@ static void draw_tree(void)
         }
         wg_text_clipped(x + 14, y + 1, r->name,
                         r->is_dir ? WG_ACCENT : WG_INK,
-                        (int)g_w - x - 30);
+                        L + f.w - x - 22);
     }
 }
 
 /* Results are shown as paths rather than as names, because the answer to
  * "where is my file" is the path - a list of bare names would make you open
  * each one to find out which is which. */
-static void draw_results(void)
+static void draw_results(struct ui_view* v)
 {
-    const int top = content_top();
-    const int L = content_left();
-    const int first = g_scroll / ROW_H;
+    const struct ui_rect f = v->frame;
+    const int L = f.x;
+    const int from = seen_from(), to = seen_from() + seen_h();
+    const int first = from > 2 ? (from - 2) / ROW_H : 0;
     for (int i = first; i < g_results_n; ++i) {
-        const int y = top + 2 + i * ROW_H - g_scroll;
-        if (y >= top + content_h())
+        const int dy = 2 + i * ROW_H;
+        if (dy >= to)
             break;
-        if (y + ROW_H < top)
-            continue;
+        const int y = f.y + dy;
         const char* path = g_index[g_results[i]];
         if (i == g_selected)
-            wg_row_select(L + 8, y, (int)g_w - L - 16, ROW_H);
+            wg_row_select(L + 8, y, f.w - 16, ROW_H);
         /* The name in ink and the folder it is in dimmed after it: two facts
          * at different weights rather than one long line at one weight. */
         const char* name = leaf_of(path);
         wg_text_clipped(L + 12, y + 1, name, wg_ink_colour(), 220);
-        wg_text_clipped(L + 240, y + 1, path, WG_DIM, (int)g_w - L - 256);
+        wg_text_clipped(L + 240, y + 1, path, WG_DIM, f.w - 256);
     }
     if (g_results_n == 0)
-        wg_text(L + 12, top + 8, "nothing matched", WG_DIM);
+        wg_text(L + 12, f.y + 8, "nothing matched", WG_DIM);
 }
 
 /* The window's background. The components are drawn over it by the framework,
@@ -857,34 +932,33 @@ static void draw_background(struct app* a)
     g_h  = a->h;
     wg_theme();                 /* whatever settings last chose */
     wg_glass_clear();
+    /* The listing sits in its own well, the way a document area does - four
+     * pixels in from the window's edge, so it gets the small corner that goes
+     * with that. Drawn here rather than by the listing, because the listing is
+     * now the scrolling part and the well is the part that stays. */
+    wg_container(content_left() + 4, content_top(),
+                 (int)g_w - content_left() - 8, content_h(), 4);
 }
 
 static void draw_content(struct ui_view* v, void* user)
 {
-    (void)v; (void)user;
-    /* The listing sits in its own well, the way a document area does - four
-     * pixels in from the window's edge, so it gets the small corner that goes
-     * with that. */
-    wg_container(content_left() + 4, content_top(),
-                 (int)g_w - content_left() - 8, content_h(), 4);
-
-    if (g_searching)              draw_results();
-    else if (g_view == VIEW_ICON) draw_icons();
-    else if (g_view == VIEW_LIST) draw_list();
-    else                          draw_tree();
+    (void)user;
+    if (g_searching)              draw_results(v);
+    else if (g_view == VIEW_ICON) draw_icons(v);
+    else if (g_view == VIEW_LIST) draw_list(v);
+    else                          draw_tree(v);
 
     if (g_band) {
         const int x0 = g_band_x < g_band_x2 ? g_band_x : g_band_x2;
         const int x1 = g_band_x < g_band_x2 ? g_band_x2 : g_band_x;
         const int y0 = g_band_y < g_band_y2 ? g_band_y : g_band_y2;
         const int y1 = g_band_y < g_band_y2 ? g_band_y2 : g_band_y;
+        /* Window coordinates, because that is where the pointer drew it -
+         * and it is inside the scroll view's clip, which is what keeps it
+         * from being scribbled across the toolbar. */
         for (int x = x0; x <= x1; ++x) { wg_plot(x, y0, WG_INK); wg_plot(x, y1, WG_INK); }
         for (int y = y0; y <= y1; ++y) { wg_plot(x0, y, WG_INK); wg_plot(x1, y, WG_INK); }
     }
-
-    /* A vertical bar, since a directory rarely fits. */
-    wg_scrollbar_v(bar_x(), content_top(), content_h(),
-                   g_scroll, content_h(), content_span());
 }
 
 static void draw_side(struct ui_view* v, void* user)
@@ -1176,17 +1250,17 @@ static void go_up(void)
  * to start where the thing was and land where it went. */
 static void cell_at(int i, int* out_x, int* out_y)
 {
-    const int top = content_top();
+    /* The listing's frame is the document, already shifted by the scroll, so
+     * an item's place in the document is its place on the screen. */
+    const struct ui_rect f = g_v_content != 0 ? g_v_content->frame
+                                              : (struct ui_rect){ 0, 0, 0, 0 };
     if (g_view == VIEW_ICON) {
         const int cols = icon_cols();
         *out_x = 8 + (i % cols) * CELL_W;
-        *out_y = top + 6 + (i / cols) * CELL_H - g_scroll;
-    } else if (g_view == VIEW_LIST) {
-        *out_x = 8;
-        *out_y = top + ROW_H + 2 + i * ROW_H - g_scroll;
+        *out_y = f.y + 6 + (i / cols) * CELL_H;
     } else {
         *out_x = 8;
-        *out_y = top + 2 + i * ROW_H - g_scroll;
+        *out_y = f.y + 2 + i * ROW_H;
     }
 }
 
@@ -1209,30 +1283,36 @@ static int being_dragged(int i)
     return strcmp(full, win_drag_path()) == 0;
 }
 
+/* Which item is under a point given in the window's coordinates.
+ *
+ * The listing's frame is the document, so subtracting its origin turns a place
+ * on the screen into a place in the listing - the one conversion, and the
+ * inverse of cell_at. It is bounded by the scroll view rather than by the
+ * document, because the document is taller than what can be seen and a press
+ * below the last visible row is not a press on a row scrolled past. */
 static int hit_test(int x, int y)
 {
-    const int top = content_top();
-    if (y < top || y >= top + content_h())
+    if (g_v_scroll == 0 || g_v_content == 0)
         return -1;
-    /* A press in the sidebar is the sidebar's, in every view. Rows are drawn
-     * from the content's left edge, so they are hit from there too. */
-    if (x < content_left())
+    const struct ui_rect w = g_v_scroll->frame;
+    if (y < w.y || y >= w.y + w.h || x < w.x || x >= w.x + w.w)
         return -1;
-    if (g_view == VIEW_ICON) {
+
+    const struct ui_rect f = g_v_content->frame;
+    const int dy = y - f.y, dx = x - f.x;
+    if (g_view == VIEW_ICON && !g_searching) {
         const int cols = icon_cols();
-        const int col = (x - content_left() - 8) / CELL_W;
-        const int rowi = (y - top - 6 + g_scroll) / CELL_H;
-        if (col >= cols || rowi < 0)
+        const int col = (dx - 8) / CELL_W;
+        const int rowi = (dy - 6) / CELL_H;
+        if (dx < 8 || col >= cols || col < 0 || rowi < 0)
             return -1;
         const int i = rowi * cols + col;
         return i < g_count ? i : -1;
     }
-    if (g_view == VIEW_LIST) {
-        const int i = (y - top - ROW_H - 2 + g_scroll) / ROW_H;
-        return (i >= 0 && i < g_count) ? i : -1;
-    }
-    const int i = (y - top - 2 + g_scroll) / ROW_H;
-    return (i >= 0 && i < g_row_count) ? i : -1;
+    const int i = (dy - 2) / ROW_H;
+    const int limit = g_searching ? g_results_n
+                    : (g_view == VIEW_TREE ? g_row_count : g_count);
+    return (dy >= 2 && i >= 0 && i < limit) ? i : -1;
 }
 
 
@@ -1449,14 +1529,17 @@ static int name_contains(const char* path, const char* needle)
 static void search_run(void)
 {
     g_results_n = 0;
-    g_scroll = 0;
     g_selected = -1;
     if (g_query[0] == '\0') {
         g_searching = 0;
+        sync_head();
+        relayout();
+        scroll_to(0);
         return;
     }
     index_build(0);             /* built once, then reused */
     g_searching = 1;
+    sync_head();
     for (int i = 0; i < g_index_n && g_results_n < INDEX_MAX; ++i) {
         if (!name_contains(g_index[i], g_query))
             continue;
@@ -1469,6 +1552,8 @@ static void search_run(void)
     }
     snprintf(g_status, sizeof(g_status), "%d result%s for \"%s\"",
              g_results_n, g_results_n == 1 ? "" : "s", g_query);
+    relayout();
+    scroll_to(0);
 }
 
 /* Detach whatever volume we are looking at, if it is one. */
@@ -1497,9 +1582,9 @@ static void menu_action(int menu, int item)
 {
     char full[512];
     if (menu == M_VIEW) {
-        if (item == 0)      { g_view = VIEW_ICON; g_scroll = 0; }
-        else if (item == 1) { g_view = VIEW_LIST; g_scroll = 0; }
-        else if (item == 2) { g_view = VIEW_TREE; g_scroll = 0; rebuild_tree(); }
+        if (item == 0)      set_view(VIEW_ICON);
+        else if (item == 1) set_view(VIEW_LIST);
+        else if (item == 2) set_view(VIEW_TREE);
         else if (item == 4) { read_dir(); if (g_view == VIEW_TREE) rebuild_tree(); }
         else if (item == 5) index_build(1);
         return;
@@ -1854,22 +1939,12 @@ static int on_event(struct app* a, const struct win_event* e)
             g_pin_out = 0;
             if (row >= 0) {
                 goto_path(g_place[row].path, 1);
-                g_scroll = 0;
                 g_selected = -1;
                 g_searching = 0;
+                sync_head();
+                relayout();
+                scroll_to(0);
             }
-        } else if (e->x >= bar_x() && e->y >= content_top() &&
-                   e->y < content_top() + content_h()) {
-            /* The bar was drawn but never listened to, which made it
-             * look broken rather than absent. */
-            if (wg_scroll_on_thumb_v(e->y, content_top(), content_h(),
-                                     g_scroll, content_h(),
-                                     content_span()))
-                g_bar_drag = 1;
-            else
-                scroll_to(wg_scroll_hit_v(e->x, e->y, bar_x(),
-                    content_top(), content_h(), g_scroll,
-                    content_h(), content_span()));
         } else if (e->button == 1 && e->y >= content_top() &&
                    hit_test(e->x, e->y) < 0) {
             /* A press on empty space starts a rubber band rather than
@@ -1956,9 +2031,6 @@ static int on_event(struct app* a, const struct win_event* e)
                            ox + cx, oy + cy);
             g_press_item = -1;
         }
-    } else if (e->type == WIN_EVENT_MOUSE_MOVE && g_bar_drag) {
-        scroll_to(wg_scroll_drag_v(e->y, content_top(), content_h(),
-                                   content_h(), content_span()));
     } else if (e->type == WIN_EVENT_MOUSE_MOVE && g_band) {
         g_band_x2 = e->x;
         g_band_y2 = e->y;
@@ -2037,7 +2109,6 @@ static int on_event(struct app* a, const struct win_event* e)
         g_pin_drag = -1;
         g_pin_out = 0;
         g_band = 0;
-        g_bar_drag = 0;
         g_press_item = -1;
     } else if (e->type == WIN_EVENT_KEY) {
         /* The search field is a component and takes its own keys.
@@ -2051,6 +2122,9 @@ static int on_event(struct app* a, const struct win_event* e)
                 g_query[0] = '\0';
                 g_searching = 0;
                 g_status[0] = '\0';
+                sync_head();
+                relayout();
+                scroll_to(0);
                 return 1;
             }
             return 0;
@@ -2076,9 +2150,9 @@ static int on_event(struct app* a, const struct win_event* e)
                 select_at(to, 0);
             reveal_selected();
         } else if (e->key == WIN_KEY_RIGHT) {
-            scroll_to(g_scroll + content_h());      /* a page */
+            scroll_to(seen_from() + seen_h());      /* a page */
         } else if (e->key == WIN_KEY_LEFT) {
-            scroll_to(g_scroll - content_h());
+            scroll_to(seen_from() - seen_h());
         } else if (e->key == 1) {    /* ctrl+a */
             select_all();
         } else if (e->key == 3) {    /* ctrl+c */
@@ -2099,11 +2173,11 @@ static int on_event(struct app* a, const struct win_event* e)
         else if (e->key == 'u')
             go_up();
         else if (e->key == 'i')
-            { g_view = VIEW_ICON; g_scroll = 0; }
+            set_view(VIEW_ICON);
         else if (e->key == 'l')
-            { g_view = VIEW_LIST; g_scroll = 0; }
+            set_view(VIEW_LIST);
         else if (e->key == 't')
-            { g_view = VIEW_TREE; g_scroll = 0; rebuild_tree(); }
+            set_view(VIEW_TREE);
     }
     return 1;
 }
@@ -2154,7 +2228,19 @@ int main(int argc, char** argv)
                                           g_menu_counts, 0), 146, 24), 0);
     ui_on(g_v_menu, on_menubar, 0);
 
-    g_v_content = ui_grow(ui_custom(right, draw_content, 0), 1);
+    /* The column headings stay where they are while the rows go past under
+     * them, so they are a view above the scroll rather than the first thing
+     * inside it. Hidden except in the list view, and a hidden view takes up no
+     * room, so the other views get the whole area. */
+    g_v_head = ui_grow(ui_size(ui_custom(right, draw_head, 0), 0, ROW_H + 2), 0);
+    g_v_head->flags |= UI_HIDDEN;
+
+    /* The listing scrolls, and the scrolling is the library's: the bar, its
+     * thumb, the wheel, and the page keys. This window drew a bar of its own
+     * and listened to it, and had no wheel at all. */
+    g_v_scroll = ui_grow(ui_scroll(right), 1);
+    g_v_content = ui_custom(g_v_scroll, draw_content, 0);
+    ui_measure(g_v_content, measure_content);
 
     /* Where we start is somewhere we have been, so back can come home to it. */
     remember_place(g_path);

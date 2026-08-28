@@ -100,8 +100,17 @@ static long g_view;             /* the top line of the window */
 static int  g_follow = 1;       /* is the view pinned to the bottom? */
 static int  g_cur_c;
 static volatile int g_dirty = 1;
-static int g_dragging;      /* is the scrollbar thumb being held? */
 static struct app g_app;
+
+/* The text is a scroll view's content now, so the bar, its thumb, the track
+ * and the wheel are the library's. What stays here is the position, because a
+ * terminal's position is a line and not a pixel offset: lines fall off the
+ * back of the ring as the shell writes, so the same line sits at a different
+ * offset a moment later, and it is the line that "scrolled back to here"
+ * means. The two are put in step by push_scroll and pull_scroll below. */
+static struct ui_view* g_v_scroll;
+static struct ui_view* g_v_text;
+static int g_pushed = -1;       /* the offset push_scroll last wrote */
 
 /* Take the framework's buffer and size. */
 static void adopt_window(void)
@@ -435,10 +444,10 @@ static void term_putc(char ch)
 
 /* --- drawing ------------------------------------------------------------- */
 
-static void draw_glyph(int col, int row, char ch, uint32_t fg, uint32_t bg)
+static void draw_glyph(int x0, int y0, char ch, uint32_t fg, uint32_t bg)
 {
-    const int x0 = col * GLYPH_W, y0 = row * GLYPH_H;
-    if (x0 + GLYPH_W > (int)g_win_w || y0 + GLYPH_H > (int)g_win_h)
+    if (x0 < 0 || y0 < 0 ||
+        x0 + GLYPH_W > (int)g_win_w || y0 + GLYPH_H > (int)g_win_h)
         return;
     const unsigned char* glyph = &g_font[(unsigned char)ch * 16];
     for (int r = 0; r < GLYPH_H; ++r) {
@@ -456,21 +465,42 @@ static int text_width(void)
     return w < GLYPH_W ? GLYPH_W : w;
 }
 
+/* How tall the whole history is. The scroll view asks during layout, and it is
+ * the one thing it cannot work out about a view that draws its own content. */
+static int measure_text(struct ui_view* v, int width, void* user)
+{
+    (void)v; (void)width; (void)user;
+    mutex_lock(&g_lock);
+    const long lines = line_count();
+    mutex_unlock(&g_lock);
+    return (int)lines * GLYPH_H;
+}
+
+static void push_scroll(void);
+static void pull_scroll(void);
+
 static void repaint(struct ui_view* view, void* user)
 {
-    (void)view; (void)user;
+    (void)user;
     /* The window's pixels and size, taken every time rather than remembered.
      * The old main assigned these once after win_map and again on every
      * resize; the framework owns the buffer now, and a terminal holding a
      * stale pointer writes its glyphs into a mapping nobody is showing - or
      * past the end of the one that is, which is what it did. */
     adopt_window();
+    /* The frame is the whole history, shifted by the scroll, so line `a` is at
+     * a fixed place in it and the rows that are on screen are the ones the
+     * shift brought there. Only those are drawn: the clip would hide the rest,
+     * but a history of five thousand lines should not draw five thousand rows
+     * to show twenty-four. */
+    const struct ui_rect f = view->frame;
     mutex_lock(&g_lock);
+    const int left = f.x, top = f.y + (int)(g_view - g_first) * GLYPH_H;
     for (int r = 0; r < g_rows; ++r) {
         const char* row = row_of(g_view + r);
         const unsigned char* attr = attr_of(g_view + r);
         for (int c = 0; c < g_cols; ++c)
-            draw_glyph(c, r, row[c],
+            draw_glyph(left + c * GLYPH_W, top + r * GLYPH_H, row[c],
                        kPalette[ATTR_FG(attr[c])],
                        ATTR_BG(attr[c]) == 0 ? BG
                                              : 0xFF000000u | kPalette[ATTR_BG(attr[c])]);
@@ -481,8 +511,8 @@ static void repaint(struct ui_view* view, void* user)
      * scrolled back is exactly the case where it is not. */
     const long cur_row = g_cur_line - g_view;
     if (cur_row >= 0 && cur_row < g_rows)
-        draw_glyph(g_cur_c, (int)cur_row, row_of(g_cur_line)[g_cur_c],
-                   BG, CURSOR);
+        draw_glyph(left + g_cur_c * GLYPH_W, top + (int)cur_row * GLYPH_H,
+                   row_of(g_cur_line)[g_cur_c], BG, CURSOR);
 
     /* Whatever the glyphs did not cover: the strip left of the bar when the
      * width is not a whole number of characters, and the one below the last
@@ -503,10 +533,47 @@ static void repaint(struct ui_view* view, void* user)
                     r[xx] = bg;
         }
     }
-
-    wg_scrollbar_v((int)g_win_w - WG_SCROLL_W, 0, (int)g_win_h,
-                   (int)(g_view - g_first), g_rows, (int)line_count());
     mutex_unlock(&g_lock);
+}
+
+/* Put the scroll view where the terminal is looking.
+ *
+ * The lock is taken for the two numbers and let go before the layout: laying
+ * out asks the content how tall it is, and that asks for the lock too. Holding
+ * it across the call would be a deadlock against ourselves. */
+static void push_scroll(void)
+{
+    if (g_v_scroll == 0)
+        return;
+    mutex_lock(&g_lock);
+    const int want = (int)(g_view - g_first) * GLYPH_H;
+    mutex_unlock(&g_lock);
+    if (want == g_v_scroll->scroll && want == g_pushed)
+        return;
+    g_v_scroll->scroll = want;
+    /* The child is positioned from the offset, so it is laid out again at once
+     * rather than a frame later. */
+    ui_layout(g_v_scroll, g_v_scroll->frame);
+    g_pushed = g_v_scroll->scroll;      /* it may have been clamped */
+}
+
+/* And take back a move the library made - a wheel notch, a drag of the thumb,
+ * a press on the track. Only when the offset is not the one push_scroll left
+ * there, so that nothing else is mistaken for a move. */
+static void pull_scroll(void)
+{
+    if (g_v_scroll == 0 || g_v_scroll->scroll == g_pushed)
+        return;
+    mutex_lock(&g_lock);
+    /* Down to a whole line: a character grid means nothing between two rows,
+     * and push_scroll puts the offset back on the boundary next tick. */
+    long line = g_first + g_v_scroll->scroll / GLYPH_H;
+    if (line < g_first)     line = g_first;
+    if (line > last_view()) line = last_view();
+    g_view = line;
+    g_follow = g_view == last_view();
+    mutex_unlock(&g_lock);
+    g_pushed = g_v_scroll->scroll;
 }
 
 /* Put the view back at the bottom, which is where typing belongs: a key
@@ -697,6 +764,11 @@ static int on_tick(struct app* a)
     if (!g_dirty)
         return 0;
     g_dirty = 0;
+    /* The history grew, so the document did: laying out again is what tells
+     * the bar its new length, and putting the offset back is what keeps the
+     * text where the terminal is looking while it does. */
+    app_relayout(a);
+    push_scroll();
     return 1;
 }
 
@@ -709,45 +781,13 @@ static int on_event(struct app* a, const struct win_event* event)
         return 1;
     }
 
-    /* The scrollbar. The position is this program's, as the widget expects:
-     * the bar is told where the view is and asked where a click wants it, and
-     * nothing about the history belongs to it. */
-    if (event->type == WIN_EVENT_MOUSE_UP) {
-        g_dragging = 0;
+    /* The bar, the thumb, the track and the wheel have already been dealt
+     * with by the components; what is left is to notice that they moved. */
+    if (event->type == WIN_EVENT_SCROLL || event->type == WIN_EVENT_MOUSE_DOWN ||
+        event->type == WIN_EVENT_MOUSE_MOVE || event->type == WIN_EVENT_MOUSE_UP) {
+        pull_scroll();
+        g_dirty = 1;
         return 0;
-    }
-    if (event->type == WIN_EVENT_MOUSE_MOVE) {
-        if (!g_dragging)
-            return 0;
-        mutex_lock(&g_lock);
-        g_view = g_first + wg_scroll_drag_v(event->y, 0, (int)g_win_h, g_rows,
-                                            (int)line_count());
-        if (g_view < g_first)      g_view = g_first;
-        if (g_view > last_view())  g_view = last_view();
-        g_follow = g_view == last_view();
-        mutex_unlock(&g_lock);
-        return 1;
-    }
-    if (event->type == WIN_EVENT_MOUSE_DOWN) {
-        const int bar_x = (int)g_win_w - WG_SCROLL_W;
-        if (event->x < bar_x)
-            return 0;               /* a click in the text, not the bar */
-        mutex_lock(&g_lock);
-        const int first = (int)(g_view - g_first);
-        const int span  = (int)line_count();
-        if (wg_scroll_on_thumb_v(event->y, 0, (int)g_win_h, first, g_rows,
-                                 span)) {
-            g_dragging = 1;
-        } else {
-            g_view = g_first + wg_scroll_hit_v(event->x, event->y, bar_x, 0,
-                                               (int)g_win_h, first, g_rows,
-                                               span);
-            if (g_view < g_first)     g_view = g_first;
-            if (g_view > last_view()) g_view = last_view();
-            g_follow = g_view == last_view();
-        }
-        mutex_unlock(&g_lock);
-        return 1;
     }
     if (event->type != WIN_EVENT_KEY)
         return 0;
@@ -823,7 +863,12 @@ int main(int argc, char** argv)
     }
 
     struct ui_view* root = ui_box(0, UI_STACK_V, 0, 0);
-    ui_custom(root, repaint, 0);
+    /* The history scrolls, and the scrolling is the library's. This window
+     * drew a bar of its own, hit-tested it and dragged its thumb by hand, and
+     * had no wheel at all - there was nothing here listening for one. */
+    g_v_scroll = ui_grow(ui_scroll(root), 1);
+    g_v_text = ui_custom(g_v_scroll, repaint, 0);
+    ui_measure(g_v_text, measure_text);
 
     /* Eighty columns of text plus the bar, so the terminal is still the eighty
      * columns everything assumes and the scrollbar is not taken out of them. */
