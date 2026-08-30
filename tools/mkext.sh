@@ -62,7 +62,7 @@ trap 'rm -rf "$STAGING"' EXIT
 # nothing to put in it yet, because an empty /srv is a place for the next
 # person to put something and a missing one is a decision they have to make
 # again. The exceptions are noted where they are made.
-mkdir -p "$STAGING/bin" "$STAGING/sbin" "$STAGING/etc" "$STAGING/dev" \
+mkdir -p "$STAGING/bin" "$STAGING/sbin" "$STAGING/etc" "$STAGING/dev" "$STAGING/dev/pts" \
          "$STAGING/boot" "$STAGING/lib" "$STAGING/media" "$STAGING/mnt" \
          "$STAGING/Applications" "$STAGING/opt" "$STAGING/srv" "$STAGING/run" "$STAGING/tmp" \
          "$STAGING/proc" "$STAGING/sys" \

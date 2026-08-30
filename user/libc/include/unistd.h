@@ -86,6 +86,28 @@ void   tty_set(int fd);
  * both run by a process with a terminal, and only the first should page. */
 int    isatty(int fd);
 
+/* --- pseudo-terminals -------------------------------------------------------
+ *
+ * A pty is a pair: a master, which a terminal program holds, and a slave,
+ * which is an ordinary terminal to whatever is run on it. What is typed into
+ * the master arrives at the slave through the line discipline - lines
+ * assembled, keys echoed back, the interrupt keys turned into signals to the
+ * foreground process group - and what the program prints comes back the other
+ * way untouched.
+ *
+ * This is what lets a program be run under a terminal without knowing it is:
+ * isatty says yes because the descriptor is one, not because anybody said so.
+ */
+int  pty_open(int* index);          /* the master, and which pair it is */
+int  pty_slave(int index);          /* the other end of that pair */
+void ptsname(int index, char* out, int max);
+
+/* How big the terminal says it is. Asking the descriptor is the answer that
+ * stays true: COLUMNS and LINES in the environment are a copy taken when the
+ * program started and are wrong the moment a window is resized. */
+int  tty_size(int fd, unsigned* rows, unsigned* columns);
+int  tty_set_size(int fd, unsigned rows, unsigned columns);
+
 /* The terminal's control block - where the foreground process group lives, for
  * want of a tty driver to keep it in. A terminal calls tty_control_create
  * before starting its shell; everything below inherits the key. */

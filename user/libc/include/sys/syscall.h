@@ -82,6 +82,9 @@
 #define SYS_openfifo    90
 #define SYS_klog        91
 #define SYS_power       92
+#define SYS_ptyopen     93
+#define SYS_ptyslave    94
+#define SYS_ttyctl      95
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

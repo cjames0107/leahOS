@@ -3,6 +3,7 @@
 #include <leah/file.hpp>
 #include <leah/heap.hpp>
 #include <leah/keyboard.hpp>
+#include <leah/pty.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/string.hpp>
 
@@ -229,6 +230,12 @@ u32 readiness(int fd)
         return keyboard::has_input() ? kPollIn : 0;
     case Kind::ConsoleOut:
         return kPollOut;            // the console never makes anyone wait
+    case Kind::PtyMaster:
+    case Kind::PtySlave:
+        /* Always writable: a terminal's output buffer drops rather than
+         * blocks, so nothing ever waits to write to one. */
+        return kPollOut |
+               (pty::readable(d.pipe, d.kind == Kind::PtyMaster) ? kPollIn : 0);
     case Kind::Pipe: {
         const Pipe* p = static_cast<const Pipe*>(d.pipe);
         if (p == nullptr)
@@ -272,9 +279,35 @@ i64 close(int fd)
     Descriptor& d = table().fds[fd];
     if (d.kind == Kind::Pipe)
         release_pipe(d);
+    else if (d.kind == Kind::PtyMaster || d.kind == Kind::PtySlave)
+        pty::close(d.pipe, d.kind == Kind::PtyMaster);
     d.kind = Kind::None;
     d.pipe = nullptr;
     return 0;
+}
+
+bool pty_of(int fd, void** out_object, bool* out_master)
+{
+    if (!valid_fd(fd))
+        return false;
+    const Descriptor& d = table().fds[fd];
+    if (d.kind != Kind::PtyMaster && d.kind != Kind::PtySlave)
+        return false;
+    if (out_object != nullptr) *out_object = d.pipe;
+    if (out_master != nullptr) *out_master = (d.kind == Kind::PtyMaster);
+    return true;
+}
+
+i64 adopt_pty(void* object, bool master)
+{
+    const int fd = alloc_fd();
+    if (fd < 0)
+        return -1;
+    Descriptor& d = table().fds[fd];
+    d.kind  = master ? Kind::PtyMaster : Kind::PtySlave;
+    d.flags = kRead | kWrite;
+    d.pipe  = object;
+    return fd;
 }
 
 i64 read(int fd, void* buffer, usize count)
@@ -292,6 +325,11 @@ i64 read(int fd, void* buffer, usize count)
         if ((d.flags & kRead) == 0)
             return -1;
         return pipe_read(static_cast<Pipe*>(d.pipe), buffer, count);
+
+    case Kind::PtyMaster:
+    case Kind::PtySlave:
+        return pty::read(d.pipe, d.kind == Kind::PtyMaster, buffer, count);
+
     default:
         return -1;
     }
@@ -315,6 +353,11 @@ i64 write(int fd, const void* buffer, usize count)
         if ((d.flags & kWrite) == 0)
             return -1;
         return pipe_write(static_cast<Pipe*>(d.pipe), buffer, count);
+
+    case Kind::PtyMaster:
+    case Kind::PtySlave:
+        return pty::write(d.pipe, d.kind == Kind::PtyMaster, buffer, count);
+
     default:
         return -1;
     }
@@ -439,6 +482,13 @@ void inherit(Table& child)
 {
     for (int fd = 0; fd < kMaxFds; ++fd) {
         Descriptor& d = child.fds[fd];
+        if (d.kind == Kind::PtyMaster || d.kind == Kind::PtySlave) {
+            /* Both ends are counted, for the same reason a pipe's are: a fork
+             * leaves two processes holding this end, and the far end must not
+             * see it close until both have let go. */
+            pty::reopen(d.pipe, d.kind == Kind::PtyMaster);
+            continue;
+        }
         if (d.kind != Kind::Pipe)
             continue;
         auto* p = static_cast<Pipe*>(d.pipe);
@@ -454,6 +504,9 @@ void close_all(Table& t)
     for (int fd = 0; fd < kMaxFds; ++fd) {
         if (t.fds[fd].kind == Kind::Pipe)
             release_pipe(t.fds[fd]);
+        else if (t.fds[fd].kind == Kind::PtyMaster ||
+                 t.fds[fd].kind == Kind::PtySlave)
+            pty::close(t.fds[fd].pipe, t.fds[fd].kind == Kind::PtyMaster);
         t.fds[fd].kind = Kind::None;
     }
 }

@@ -29,13 +29,24 @@ enum class Kind : u8 {
     ConsoleIn,      // fd 0: the keyboard
     ConsoleOut,     // fd 1, 2: the console
     Pipe,
+    PtyMaster,      // the terminal program's end of a pseudo-terminal
+    PtySlave,       // what the program running under it has as its terminal
 };
 
 struct Descriptor {
     Kind  kind;
     u32   flags;
-    void* pipe;     // the shared pipe object, for Kind::Pipe
+    void* pipe;     // the shared pipe or pty object, for those kinds
 };
+
+// Take a descriptor for one end of a pty. Here rather than in pty.cpp because
+// the descriptor table is this module's, and a second module reaching into it
+// is how two allocators for one table come about.
+i64 adopt_pty(void* object, bool master);
+
+// The pty a descriptor refers to, if it is one. False when it is not, which is
+// what makes tcsetpgrp on a pipe an error rather than a guess.
+bool pty_of(int fd, void** out_object, bool* out_master);
 
 // A process's file table and its current directory, carried in its task.
 struct Table {

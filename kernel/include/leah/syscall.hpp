@@ -114,6 +114,9 @@ enum Number : u64 {
     OpenFifo    = 90,  // one end of a named pipe, by the inode that names it
     KLog        = 91,  // the kernel's own messages, read back from a ring
     Power       = 92,  // stop the machine, or start it again
+    PtyOpen     = 93,  // a fresh pseudo-terminal pair; returns the master
+    PtySlave    = 94,  // the far end of one that exists
+    TtyCtl      = 95,  // the foreground group, the line modes, the size
 };
 
 // What Power is being asked to do. Mirrored in user/libc/include/proc.h.

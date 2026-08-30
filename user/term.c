@@ -126,34 +126,23 @@ static void adopt_window(void)
     if (g_app.h != 0) g_win_h = g_app.h;
 }
 
-/* The line being typed, assembled here rather than in the shell: a pipe has no
- * line discipline, so nothing between the keyboard and the shell would
- * otherwise know that backspace means anything. */
-static char g_line[512];
-static unsigned g_line_len;
 static volatile int g_shell_done;
 
-static int g_from_shell;        /* read end of the shell's output */
-static int g_to_shell;          /* write end of the shell's input */
+/* The terminal's end of the pseudo-terminal. Everything the shell and its jobs
+ * print comes out of it, and so does the echo of what was typed - the line
+ * discipline is in the kernel and this is where its answer arrives. */
+static int g_master = -1;
 static int g_shell_pid;
 
-/* --- the keys that are not text -------------------------------------------
+/* What used to be here: the keys that are not text.
  *
- * Ctrl-C and its two neighbours do not go down the pipe. They are signals, and
- * they go to whichever process group the shell has told us is in front - not to
- * the shell, which is usually sitting in wait() and is not the thing the person
- * wants to interrupt.
- *
- * A real UNIX does this in the tty driver, on the keyboard interrupt. There is
- * no tty driver here: this program *is* the terminal, so this is where it goes.
+ * Ctrl-C and its two neighbours were caught in this program, echoed by it, and
+ * turned into a signal to whichever group the shell had said was in front -
+ * because a pipe has no line discipline and there was no terminal driver to do
+ * it. There is one now, and it is where a real UNIX has always kept it: in the
+ * driver, next to the process groups and the signals. This program writes the
+ * byte and the kernel decides it is a signal.
  */
-struct control_key { char ch; int signo; const char* echo; };
-
-static const struct control_key kControlKeys[] = {
-    { 0x03, SIGINT,  "^C" },
-    { 0x1A, SIGTSTP, "^Z" },
-    { 0x1C, SIGQUIT, "^\\" },
-};
 
 /* --- the grid ------------------------------------------------------------ */
 
@@ -625,7 +614,7 @@ static void reader_thread(void* arg)
     (void)arg;
     char buffer[256];
     for (;;) {
-        const int n = (int)read(g_from_shell, buffer, sizeof(buffer));
+        const int n = (int)read(g_master, buffer, sizeof(buffer));
         if (n <= 0)
             break;                      /* the shell closed its end, or exited */
         mutex_lock(&g_lock);
@@ -638,127 +627,73 @@ static void reader_thread(void* arg)
     g_dirty = 1;
 }
 
-/* The line settings, as the program at the other end last left them. Read on
- * every key rather than cached, because it is another process that changes
- * them and it does not tell anybody when it does. */
-static unsigned line_flags(void)
-{
-    struct termios t;
-    if (tcgetattr(0, &t) != 0)
-        return ISIG | ICANON | ECHO;    /* no control block: behave normally */
-    return t.c_lflag;
-}
-
-/* Send one to the foreground job, and say so on the screen. True if the key
- * was one of these and has been dealt with. */
-static int control_key(char ch)
-{
-    if ((line_flags() & ISIG) == 0)
-        return 0;                       /* raw mode: it is just a byte */
-
-    for (unsigned i = 0; i < sizeof(kControlKeys) / sizeof(kControlKeys[0]); ++i) {
-        if (kControlKeys[i].ch != ch)
-            continue;
-
-        /* Echoed whether or not anything is listening, because a person who
-         * pressed Ctrl-C wants to see that they did - and if the job has
-         * already finished, seeing nothing at all reads as a stuck terminal. */
-        mutex_lock(&g_lock);
-        follow_bottom();
-        for (const char* e = kControlKeys[i].echo; *e != '\0'; ++e)
-            term_putc(*e);
-        term_putc('\n');
-        mutex_unlock(&g_lock);
-        g_dirty = 1;
-
-        const int fg = (int)tcgetpgrp(0);
-        /* Nothing in front means the shell itself is what is running, and it
-         * is the shell's own group that should hear about it. */
-        kill(-(fg > 0 ? fg : g_shell_pid), kControlKeys[i].signo);
-        return 1;
-    }
-    return 0;
-}
-
 static int start_shell(void)
 {
-    int to_shell[2], from_shell[2];
-    if (pipe(to_shell) < 0)
+    /* A pseudo-terminal, not a pair of pipes.
+     *
+     * The difference is what the shell is holding: a pipe is something to read
+     * from, and a terminal is something that assembles lines, echoes them,
+     * knows which process group is in front and turns Ctrl-C into a signal to
+     * it. All of that used to be done here, by this program, because there was
+     * no terminal driver to do it. Now there is, so what is left on this side
+     * is drawing.
+     */
+    int index = -1;
+    g_master = pty_open(&index);
+    if (g_master < 0)
         return -1;
-    if (pipe(from_shell) < 0) {
-        close(to_shell[0]);
-        close(to_shell[1]);
-        return -1;
-    }
-
-    /* Made before the fork, so the shell inherits the key rather than having
-     * to be told it afterwards - by which time it may already have started
-     * something. */
-    tty_control_create();
+    tty_set_size(g_master, (unsigned)g_rows, (unsigned)g_cols);
 
     const int pid = fork();
     if (pid < 0)
         return -1;
     if (pid == 0) {
-        /* The pipes become the shell's console. It reads lines this process
-         * assembled and writes output this process renders; it has no idea it
-         * is not talking to a terminal. */
-        dup2(to_shell[0], 0);
-        dup2(from_shell[1], 1);
-        dup2(from_shell[1], 2);
-
-        /* A second descriptor onto the same input, marked as the controlling
-         * terminal. Standard input is not enough: the shell redirects it for
-         * every pipeline, and `something | less` is exactly the case where a
-         * program needs the keyboard while its standard input is a pipe from
-         * another program. This one is not redirected, is inherited by
-         * everything the shell starts, and is what /dev/tty opens. */
-        tty_set(dup(0));
-
-        /* Its own session, with this terminal. The shell is the session
-         * leader; every job it starts is a group within that session, and
-         * tcsetpgrp names which of them is in front. */
+        /* Its own session first, so that the terminal opened next becomes this
+         * session's controlling one and every job started under it inherits
+         * the arrangement. */
         setsid();
 
+        const int slave = pty_slave(index);
+        if (slave < 0)
+            exit(127);
+        dup2(slave, 0);
+        dup2(slave, 1);
+        dup2(slave, 2);
+        /* A descriptor onto the terminal that is not standard input, because
+         * standard input is redirected for every pipeline - `something | less`
+         * is exactly the case where a program needs the keyboard while its
+         * standard input comes from another program. This is what /dev/tty
+         * opens, and it is inherited by everything the shell starts. */
+        tty_set(dup(slave));
+        /* The shell is the session leader and starts in front of itself. */
+        tcsetpgrp(slave, getpgrp());
+
         /* What this terminal can do, for anything that asks. Modest and
-         * honest: no colour, no cursor addressing, 80 by 24. A program that
-         * believes TERM and sends escape codes would print them literally -
-         * `clear` already does. */
+         * honest: no colour, no cursor addressing. A program that believes
+         * TERM and sends escape codes would print them literally - `clear`
+         * already does. */
         setenv("TERM", "leah", 1);
-        /* The real numbers, not the ones this window happened to open at:
-         * they were literals, so a resized terminal told every program it ran
-         * that it was eighty by twenty-four whatever it actually was. */
         char n[16];
         snprintf(n, sizeof(n), "%d", g_cols);
         setenv("COLUMNS", n, 1);
         snprintf(n, sizeof(n), "%d", g_rows);
         setenv("LINES", n, 1);
 
-        close(to_shell[0]);
-        close(to_shell[1]);
-        close(from_shell[0]);
-        close(from_shell[1]);
-        /* Whatever the session says the shell is, which is what makes the
-         * setting for it mean anything. Falls back to the one that is
-         * certainly there. */
+        close(g_master);
         const char* shell = getenv("SHELL");
         if (shell == 0 || shell[0] == '\0')
             shell = "/bin/sh";
         char* argv[] = { "sh", 0 };
-        execve(shell, argv, 0);
-        execve("/bin/sh", argv, 0);     /* a shell that has gone missing */
+        execve(shell, argv, environ);
+        execve("/bin/sh", argv, environ);     /* a shell that has gone missing */
         exit(127);
     }
 
-    /* The parent keeps only the ends it uses. Closing the others matters: the
-     * reader sees end-of-file when the last writer goes, and if this process
-     * held the write end open it would never see the shell exit. */
-    close(to_shell[0]);
-    close(from_shell[1]);
-    g_to_shell = to_shell[1];
-    g_from_shell = from_shell[0];
+    /* The parent keeps the master and nothing else. There is no far end to
+     * close here: the slave belongs to the child, and this process never had
+     * one. */
     g_shell_pid = pid;
-    return pid;
+    return 0;
 }
 
 /* --- the interface ---------------------------------------------------------
@@ -816,60 +751,21 @@ static int on_event(struct app* a, const struct win_event* event)
             follow_bottom();
             mutex_unlock(&g_lock);
 
+            /* Straight down the pty, one byte, and nothing else.
+             *
+             * Everything that used to be here - assembling a line, echoing it,
+             * taking a character back on a backspace, turning Ctrl-C into a
+             * signal to the foreground group, and asking a page of shared
+             * memory which mode we were in - is the line discipline, and the
+             * line discipline is the terminal driver's. It is in the kernel
+             * now, where the process groups and the signals already were.
+             *
+             * The echo comes back the other way and is drawn by the reader
+             * thread like any other output, which is why nothing is drawn
+             * here: what appears on the screen is what the terminal was told,
+             * not what this program guessed it would be told. */
             const char ch = (char)event->key;
-
-            /* Before the line editor, because these are not text and must not
-             * be assembled into a line: Ctrl-C during a half-typed command
-             * interrupts the job and throws the half away, which is what
-             * every terminal does and what a person expects. */
-            if (control_key(ch)) {
-                g_line_len = 0;
-                return 1;
-            }
-
-            /* Raw mode: the byte goes down as it is, with no line to wait for
-             * and nothing shown unless the program at the other end decides to
-             * show it. This is what an editor asks for, and the whole reason
-             * termios exists. */
-            const unsigned flags = line_flags();
-            if ((flags & ICANON) == 0) {
-                if ((flags & ECHO) != 0) {
-                    mutex_lock(&g_lock);
-                    follow_bottom();
-                    term_putc(ch);
-                    mutex_unlock(&g_lock);
-                    g_dirty = 1;
-                }
-                write(g_to_shell, &ch, 1);
-                g_line_len = 0;
-                return 1;
-            }
-
-            if (ch == '\n' || ch == '\r') {
-                mutex_lock(&g_lock);
-                term_putc('\n');
-                mutex_unlock(&g_lock);
-                g_line[g_line_len] = '\n';
-                write(g_to_shell, g_line, g_line_len + 1);
-                g_line_len = 0;
-                g_dirty = 1;
-            } else if (ch == '\b' || ch == 0x7F) {
-                if (g_line_len > 0) {
-                    --g_line_len;
-                    mutex_lock(&g_lock);
-                    term_putc('\b');
-                    mutex_unlock(&g_lock);
-                    g_dirty = 1;
-                }
-            } else if ((unsigned char)ch >= 32 && g_line_len + 1 < sizeof(g_line)) {
-                g_line[g_line_len++] = ch;
-                if ((flags & ECHO) != 0) {
-                    mutex_lock(&g_lock);
-                    term_putc(ch);
-                    mutex_unlock(&g_lock);
-                    g_dirty = 1;
-                }
-            }
+            write(g_master, &ch, 1);
     return 1;
 }
 

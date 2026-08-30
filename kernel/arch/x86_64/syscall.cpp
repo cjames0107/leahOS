@@ -11,6 +11,7 @@
 #include <leah/framebuffer.hpp>
 #include <leah/mouse.hpp>
 #include <leah/percpu.hpp>
+#include <leah/pty.hpp>
 #include <leah/keyboard.hpp>
 #include <leah/ipc.hpp>
 #include <leah/fpu.hpp>
@@ -1296,6 +1297,36 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         // measuring how long the machine has been up actually wants.
         frame->rax = timer::uptime_ms();
         break;
+
+    case PtyOpen: {
+        int index = -1;
+        const i64 fd = pty::open_pair(&index);
+        if (fd >= 0 && frame->rdi != 0 && user_range_ok(frame->rdi, sizeof(u32)))
+            *reinterpret_cast<u32*>(frame->rdi) = static_cast<u32>(index);
+        frame->rax = static_cast<u64>(fd);
+        break;
+    }
+
+    case PtySlave:
+        frame->rax = static_cast<u64>(
+            pty::open_slave(static_cast<int>(frame->rdi)));
+        break;
+
+    case TtyCtl: {
+        /* The descriptor says which terminal, which is the whole difference
+         * between this and the page of shared memory it replaces: a process
+         * asks about the terminal it actually has rather than about the one
+         * terminal there used to be. */
+        void* object = nullptr;
+        bool master = false;
+        if (!files::pty_of(static_cast<int>(frame->rdi), &object, &master)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = static_cast<u64>(
+            pty::control(object, static_cast<int>(frame->rsi), frame->rdx));
+        break;
+    }
 
     case Power: {
         // Stopping the machine is root's alone: any process being able to end

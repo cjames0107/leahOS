@@ -43,6 +43,11 @@
  * copy does not remember where it came from. */
 #define PATH_ZONEINFO   "/usr/share/zoneinfo"
 
+/* Where the slave end of a pseudo-terminal is found. The entries are not on
+ * any disk - they name kernel objects - but the path is the one every UNIX
+ * uses, so a program that builds it by hand is still right. */
+#define PATH_PTS        "/dev/pts"
+
 /* Read-only data shared between programs. */
 #define PATH_SHARE      "/usr/share"
 #define PATH_ICONS      "/usr/share/icons"

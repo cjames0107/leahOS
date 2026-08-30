@@ -191,6 +191,17 @@ static int parse_factor(struct scan* s)
     if (word[0] == '-' && word[1] != '\0' && word[2] == '\0' &&
         s->at + 1 < s->argc) {
         const char* arg = s->argv[s->at + 1];
+        /* -t asks whether a descriptor is a terminal, which is neither a file
+         * nor a string question: its argument is a number. `test -t 0` is how
+         * a program decides whether anybody is watching, and it is the reason
+         * `ls` colours its output for a person and not for a pipe. */
+        if (word[1] == 't') {
+            long fd = 0;
+            s->at += 2;
+            if (!number(arg, &fd))
+                return FALSE_;
+            return isatty((int)fd) ? TRUE_ : FALSE_;
+        }
         if (word[1] == 'z' || word[1] == 'n') {
             s->at += 2;
             const int empty = arg[0] == '\0';

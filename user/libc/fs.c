@@ -34,6 +34,8 @@
 #include <ipc.h>
 #include <poll.h>
 #include <shm.h>
+#include <paths.h>
+#include <stdio.h>
 #include <termios.h>
 #include <string.h>
 #include <stdint.h>
@@ -59,6 +61,11 @@
  *   The entries exist on disk too, as empty files, so that ls /dev shows them
  *   and a path that names one is not a lie. Opening one never reaches them. */
 #define K_DEVICE 3
+/*   K_PTY - one end of a pseudo-terminal. A kernel object like a pipe, and
+ *   read and written exactly like one; the separate kind is so that isatty can
+ *   say yes without being told, and so that the calls that ask a terminal
+ *   about itself know which terminal to ask. */
+#define K_PTY    4
 
 #define DEV_NULL    1
 #define DEV_ZERO    2
@@ -556,11 +563,19 @@ static void share_position(struct entry* e)
 /* How many of our entries name the same kernel object. dup2 copies an entry
  * rather than asking the kernel for a second number, so the kernel's own
  * descriptor must not be closed until the last of ours goes. */
+/* Whether this kind is a descriptor the kernel is holding for us. Both the
+ * console-and-pipes kind and a pty end are; they differ only in what isatty
+ * says about them and in which calls will answer questions about them. */
+static int kernel_backed(unsigned char kind)
+{
+    return kind == K_KERNEL || kind == K_PTY;
+}
+
 static int kernel_refs(int kfd)
 {
     int fd, n = 0;
     for (fd = 0; fd < FD_MAX; ++fd)
-        if (g_fds[fd].kind == K_KERNEL && g_fds[fd].kfd == kfd)
+        if (kernel_backed(g_fds[fd].kind) && g_fds[fd].kfd == kfd)
             ++n;
     return n;
 }
@@ -682,6 +697,7 @@ int poll(struct pollfd* fds, unsigned long count, int timeout_ms)
             continue;
         }
         switch (g_fds[fds[i].fd].kind) {
+        case K_PTY:
         case K_KERNEL:
             down[n].fd = g_fds[fds[i].fd].kfd;
             down[n].events = fds[i].events;
@@ -732,13 +748,100 @@ int poll(struct pollfd* fds, unsigned long count, int timeout_ms)
 int isatty(int fd)
 {
     start();
-    if (!valid(fd) || g_tty < 0 || !valid(g_tty))
+    if (!valid(fd))
         return 0;
-    /* The same kernel object, whatever numbers the two go by here: a terminal
-     * that has been dup'd is still the terminal. */
+    /* A pty end is a terminal because of what it is, which is the whole point
+     * of having them: nothing has to be told, and a program handed one as its
+     * standard input finds out by asking. */
+    if (g_fds[fd].kind == K_PTY)
+        return 1;
+    if (g_tty < 0 || !valid(g_tty))
+        return 0;
+    /* The older arrangement, kept for the console: the terminal is whichever
+     * descriptor was named as one, and a dup of it is still it. */
     return g_fds[fd].kind == K_KERNEL &&
            g_fds[g_tty].kind == K_KERNEL &&
            g_fds[fd].kfd == g_fds[g_tty].kfd;
+}
+
+/* --- pseudo-terminals -------------------------------------------------------
+ *
+ * The pair is a kernel object; these are the two ends of it and the calls that
+ * ask one about itself. Everything else - read, write, close, dup, fork - is
+ * whatever a kernel descriptor already does, which is the reason for making it
+ * one. */
+int pty_open(int* index)
+{
+    unsigned which = 0;
+    start();
+    const long kfd = __syscall(SYS_ptyopen, (long)&which, 0, 0, 0, 0);
+    if (kfd < 0)
+        return -1;
+    const int fd = alloc_fd();
+    if (fd < 0)
+        return -1;
+    g_fds[fd].kind = K_PTY;
+    g_fds[fd].kfd  = (int)kfd;
+    if (index != 0)
+        *index = (int)which;
+    return fd;
+}
+
+int pty_slave(int index)
+{
+    start();
+    const long kfd = __syscall(SYS_ptyslave, (long)index, 0, 0, 0, 0);
+    if (kfd < 0)
+        return -1;
+    const int fd = alloc_fd();
+    if (fd < 0)
+        return -1;
+    g_fds[fd].kind = K_PTY;
+    g_fds[fd].kfd  = (int)kfd;
+    return fd;
+}
+
+void ptsname(int index, char* out, int max)
+{
+    snprintf(out, (unsigned long)max, "%s/%d", PATH_PTS, index);
+}
+
+/* Ask the terminal behind `fd` about itself. Returns -1 when it is not one,
+ * which is what makes tcsetpgrp on a pipe an error rather than a guess.
+ *
+ * The operation numbers are the kernel's; see <leah/pty.hpp>. */
+#define TTY_GET_PGRP  0
+#define TTY_SET_PGRP  1
+#define TTY_GET_FLAGS 2
+#define TTY_SET_FLAGS 3
+#define TTY_GET_SIZE  4
+#define TTY_SET_SIZE  5
+
+static long tty_ctl(int fd, int op, long argument)
+{
+    if (!valid(fd) || g_fds[fd].kind != K_PTY)
+        return -1;
+    return __syscall(SYS_ttyctl, g_fds[fd].kfd, op, argument, 0, 0);
+}
+
+/* How big the terminal says it is, in rows and columns. A program that draws
+ * on one needs to know, and asking the descriptor is how - the environment's
+ * COLUMNS and LINES are a copy that goes stale the moment a window is
+ * resized. */
+int tty_size(int fd, unsigned* rows, unsigned* columns)
+{
+    const long packed = tty_ctl(fd, TTY_GET_SIZE, 0);
+    if (packed < 0)
+        return -1;
+    if (rows != 0)    *rows = (unsigned)(packed >> 16) & 0xFFFFu;
+    if (columns != 0) *columns = (unsigned)packed & 0xFFFFu;
+    return 0;
+}
+
+int tty_set_size(int fd, unsigned rows, unsigned columns)
+{
+    return (int)tty_ctl(fd, TTY_SET_SIZE,
+                        (long)(((rows & 0xFFFFu) << 16) | (columns & 0xFFFFu)));
 }
 
 unsigned tty_control_key(void)
@@ -766,11 +869,27 @@ unsigned tty_control_create(void)
     return g_tty_key;
 }
 
+/* The four calls below ask a terminal about itself. When the descriptor is a
+ * pty they ask that pty, which is the whole point of having them: a process
+ * asks about the terminal it actually holds. When it is not - the console,
+ * which is not a pty - they fall back to the page of shared memory that was
+ * the only answer before, so a machine with no window server still works. */
 int tcgetattr(int fd, struct termios* out)
 {
     struct tty_control* c;
-    (void)fd;
     start();
+    {
+        const long flags = tty_ctl(fd, TTY_GET_FLAGS, 0);
+        if (flags >= 0) {
+            memset(out, 0, sizeof(*out));
+            out->c_lflag = (unsigned)flags;
+            out->c_cc[VINTR]  = 0x03;
+            out->c_cc[VQUIT]  = 0x1C;
+            out->c_cc[VERASE] = 0x08;
+            out->c_cc[VSUSP]  = 0x1A;
+            return 0;
+        }
+    }
     c = tty_control();
     if (c == 0) {
         errno = ENOTTY;
@@ -785,9 +904,10 @@ int tcgetattr(int fd, struct termios* out)
 int tcsetattr(int fd, int when, const struct termios* in)
 {
     struct tty_control* c;
-    (void)fd;
     (void)when;     /* nothing is buffered on this side to drain or flush */
     start();
+    if (tty_ctl(fd, TTY_SET_FLAGS, (long)in->c_lflag) >= 0)
+        return 0;
     c = tty_control();
     if (c == 0) {
         errno = ENOTTY;
@@ -810,8 +930,12 @@ void cfmakeraw(struct termios* t)
 pid_t tcgetpgrp(int fd)
 {
     struct tty_control* c;
-    (void)fd;       /* there is only ever the one terminal per process here */
     start();
+    {
+        const long pgrp = tty_ctl(fd, TTY_GET_PGRP, 0);
+        if (pgrp >= 0)
+            return (pid_t)pgrp;
+    }
     c = tty_control();
     if (c == 0) {
         errno = ENOTTY;
@@ -823,8 +947,9 @@ pid_t tcgetpgrp(int fd)
 int tcsetpgrp(int fd, pid_t pgid)
 {
     struct tty_control* c;
-    (void)fd;
     start();
+    if (tty_ctl(fd, TTY_SET_PGRP, (long)pgid) >= 0)
+        return 0;
     c = tty_control();
     if (c == 0) {
         errno = ENOTTY;
@@ -843,6 +968,29 @@ int open(const char* path, int flags)
 
     start();
     __fd_resolve(path, resolved);
+
+    /* /dev/pts/N is not on any disk: it names one end of a kernel object, and
+     * the number in the path is which. Recognised here for the same reason
+     * /dev/null is - path resolution and the descriptor table are both this
+     * library's, and a filesystem server has nothing to say about either. */
+    {
+        const unsigned long n = strlen(PATH_PTS);
+        if (strncmp(resolved, PATH_PTS, n) == 0 && resolved[n] == '/' &&
+            resolved[n + 1] != '\0') {
+            int index = 0;
+            const char* d = &resolved[n + 1];
+            for (; *d >= '0' && *d <= '9'; ++d)
+                index = index * 10 + (*d - '0');
+            if (*d != '\0') {
+                errno = ENOENT;
+                return -1;
+            }
+            fd = pty_slave(index);
+            if (fd < 0)
+                errno = ENOENT;
+            return fd;
+        }
+    }
 
     exists = vfs_call(VFS_STAT, resolved, 0, 0, &a) == 0 && a.word[0] >= 0;
     if (exists) {
@@ -963,7 +1111,7 @@ int close(int fd)
     start();
     if (!valid(fd))
         return -1;
-    if (g_fds[fd].kind == K_KERNEL && kernel_refs(g_fds[fd].kfd) == 1 &&
+    if (kernel_backed(g_fds[fd].kind) && kernel_refs(g_fds[fd].kfd) == 1 &&
         g_fds[fd].kfd > 2)
         __syscall(SYS_close, g_fds[fd].kfd, 0, 0, 0, 0);
     g_fds[fd].kind   = K_NONE;
@@ -982,7 +1130,7 @@ long read(int fd, void* buffer, unsigned long count)
     if (!valid(fd))
         return -1;
     e = &g_fds[fd];
-    if (e->kind == K_KERNEL)
+    if (kernel_backed(e->kind))
         return from_kernel(__syscall(SYS_read, e->kfd, (long)buffer,
                                      (long)count, 0, 0));
     if (e->kind == K_DEVICE) {
@@ -1040,7 +1188,7 @@ long write(int fd, const void* buffer, unsigned long count)
     if (!valid(fd))
         return -1;
     e = &g_fds[fd];
-    if (e->kind == K_KERNEL)
+    if (kernel_backed(e->kind))
         return from_kernel(__syscall(SYS_write, e->kfd, (long)buffer,
                                      (long)count, 0, 0));
     if (e->kind == K_DEVICE) {
