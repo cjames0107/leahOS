@@ -38,6 +38,11 @@
  * /opt is still created, still empty, and still means what it always did. */
 #define PATH_APPS       "/Applications"
 
+/* The compiled time zones, in the format libc reads. /etc/localtime is a copy
+ * of one of these; /etc/timezone holds the name it was copied from, because a
+ * copy does not remember where it came from. */
+#define PATH_ZONEINFO   "/usr/share/zoneinfo"
+
 /* Read-only data shared between programs. */
 #define PATH_SHARE      "/usr/share"
 #define PATH_ICONS      "/usr/share/icons"

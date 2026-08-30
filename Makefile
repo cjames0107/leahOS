@@ -403,6 +403,7 @@ check: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	@python3 tools/vm/converted.py
 	@python3 tools/vm/scrolled.py
 	@python3 tools/vm/stride.py
+	@python3 tools/vm/zones.py
 	@python3 tools/vm/settingspages.py
 	@python3 tools/vm/settingseffect.py
 	@python3 tools/vm/shellprobe.py

@@ -43,7 +43,14 @@ int main(int argc, char** argv)
          * and one taken elsewhere can be compared. */
         const long off = utc ? 0 : timezone_offset();
         strftime(line, sizeof(line), "%a %e %b %Y %H:%M:%S", &t);
-        if (off == 0) {
+        /* What the zone calls itself, when it says: "CDT" rather than
+         * "UTC-05:00" is the same fact told the way people tell it. A zone
+         * that has no name for itself - a bare numeric offset - falls back to
+         * the number, which is all there is to say about it. */
+        char zone[16];
+        if (!utc && timezone_name(now, zone, sizeof(zone)) == 0) {
+            printf("%s %s\n", line, zone);
+        } else if (off == 0) {
             printf("%s UTC\n", line);
         } else {
             const long m = off < 0 ? -off / 60 : off / 60;

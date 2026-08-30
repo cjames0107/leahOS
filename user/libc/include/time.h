@@ -63,6 +63,12 @@ time_t timegm(struct tm* broken);
  * /etc/timezone, which holds a signed number of minutes and nothing else. */
 long timezone_offset(void);
 
+/* What the zone calls itself at that instant - "GMT", "BST", "CDT". Returns
+ * 0 and fills `out`, or -1 when the zone file does not say, which is the case
+ * for a plain numeric offset. The instant matters: the same zone is EST in
+ * January and EDT in July, and that is the whole point of having zones. */
+int timezone_name(time_t when, char* out, int max);
+
 /* Formatting. A subset of strftime's conversions, and it says which:
  *
  *     %Y %m %d   year, month, day, zero-padded

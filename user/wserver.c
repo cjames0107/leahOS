@@ -576,9 +576,32 @@ static int is_sheet(int slot)
     return (win(slot)->flags & WS_FLAG_SHEET) != 0;
 }
 
+/* A window the server puts no frame around.
+ *
+ * The desktop below everything and the chrome above it: in both, every pixel
+ * inside the window is the client's own and there is nothing of the server's
+ * around it. No border to step over, no title strip to leave room for, no
+ * controls, no shadow and no rounded corners - a dock that had a close box in
+ * the corner and a hairline round it would be a window pretending to be a
+ * dock. Whatever shape it has, it draws itself.
+ *
+ * This is the one place that decides it, because "is there a frame here" is
+ * asked by the geometry, the drawing and the hit-testing, and three answers
+ * that drift apart is a window whose pixels are not where its clicks are. */
+static int is_chromeless(int slot)
+{
+    return is_desktop(slot) || is_overlay(slot);
+}
+
+/* How far the client's pixels start in from the frame's left edge. */
+static int content_inset(int slot)
+{
+    return is_chromeless(slot) ? 0 : BORDER;
+}
+
 static unsigned frame_width(int slot)
 {
-    return is_desktop(slot) ? g_width[slot] : g_width[slot] + BORDER * 2;
+    return is_chromeless(slot) ? g_width[slot] : g_width[slot] + BORDER * 2;
 }
 /* Whether this window's own pixels cover the title strip. When they do, the
  * client's buffer is TITLE_HEIGHT taller and everything that measured from
@@ -595,13 +618,15 @@ static int client_title(int slot)
 /* Where the client's pixels begin, relative to the frame's top. */
 static int content_offset(int slot)
 {
+    if (is_chromeless(slot))
+        return 0;
     return (client_title(slot) || is_sheet(slot)) ? BORDER
                                                   : BORDER + TITLE_HEIGHT;
 }
 
 static unsigned frame_height(int slot)
 {
-    if (is_desktop(slot))
+    if (is_chromeless(slot))
         return g_height[slot];
     /* A sheet is its content and a border, and nothing else - no title to
      * leave room for and no grip, because it cannot be resized. */
@@ -885,6 +910,15 @@ static void draw_window(int slot, int focused)
 
     const uint32_t* px = g_pixels[slot];
 
+    /* Chrome draws none of itself. The bar, the dock and the panels they open
+     * own every pixel inside them, so there is no frame to build: no shadow -
+     * a full-width bar that is mostly transparent would cast one right across
+     * the top of the screen - no panel behind it, no hairline round it, no
+     * title strip and no controls. Straight to the client's pixels, blended,
+     * which is the only part of a frame an overlay wants. */
+    if (is_overlay(slot))
+        goto contents;
+
     /* Everything from here to `contents` draws the frame: the panel behind the
      * window, the hairline round it, the title bar and the controls. None of
      * that changes when a client repaints, and a client repainting damages
@@ -1080,7 +1114,7 @@ contents:
      * and leave the shadow showing through a notch. */
     if (px == 0)
         return;
-    const int content_x = w->x + BORDER;
+    const int content_x = w->x + content_inset(slot);
     const int content_y = w->y + content_offset(slot);
     const int x0 = imax(content_x, g_clip.x), y0 = imax(content_y, g_clip.y);
     const int x1 = imin(content_x + (int)g_width[slot], g_clip.x + g_clip.w);
@@ -1090,7 +1124,12 @@ contents:
 
     /* Only the last few rows can meet a corner; everything above them is a
      * straight copy and stays as fast as it was. */
-    const int curved_from = w->y + (int)fh - CORNER - BORDER;
+    /* Only the last few rows can meet a corner - and an overlay has none, so
+     * its last rows are copied like the rest rather than blended against a
+     * curve the server did not draw. */
+    const int curved_from = is_overlay(slot)
+                          ? w->y + (int)fh + 1
+                          : w->y + (int)fh - CORNER - BORDER;
 
     /* A window that carries alpha is blended onto what is already there, which
      * is the blurred backdrop and the wash over it. That is what lets the glass
@@ -1790,15 +1829,14 @@ static void reconcile(void)
             if (present != g_mapped_gen[slot] && !now_hidden) {
                 g_mapped_gen[slot] = present;
                 w->drawn = present;
-                /* A desktop has no frame, so its pixels start at its own
-                 * corner rather than inside a border and a title bar. Adding
-                 * that offset unconditionally damaged a rectangle shifted
-                 * twenty-nine pixels down the screen: the top twenty-nine rows
-                 * were never damaged, never composed and never presented, and
-                 * kept whatever was on the framebuffer before the desktop
-                 * started - which is the white strip that has been along the
-                 * top of the screen this whole time. */
-                const int cx = is_desktop(slot) ? w->x : w->x + BORDER;
+                /* A window with no frame has its pixels at its own corner
+                 * rather than inside a border and a title bar, and both the
+                 * inset and the offset say so - see is_chromeless. Adding the
+                 * frame unconditionally damaged a rectangle twenty-nine pixels
+                 * down the screen: the top rows were never composed and kept
+                 * whatever the framebuffer held before the desktop started,
+                 * which was a white strip across the top for a long time. */
+                const int cx = w->x + content_inset(slot);
                 /* content_offset, not BORDER + TITLE_HEIGHT: a window that
                  * draws its own title strip has its pixels start at the top of
                  * the frame, and adding the title bar's height to that damaged
@@ -1806,8 +1844,7 @@ static void reconcile(void)
                  * such a window - the strip with its controls in it - were
                  * never repainted when the client presented, so a search field
                  * showed the caret it had when the window opened. */
-                const int cy = is_desktop(slot) ? w->y
-                                                : w->y + content_offset(slot);
+                const int cy = w->y + content_offset(slot);
                 damage_rect(cx, cy, (int)g_width[slot], (int)g_height[slot]);
             }
         }
@@ -1924,9 +1961,8 @@ static void handle_input(void)
         const int slot = window_at(x, y);
         if (slot >= 0) {
             struct ws_window* w = win(slot);
-            const int ox = is_desktop(slot) ? w->x : w->x + BORDER;
-            const int oy = is_desktop(slot) ? w->y
-                                            : w->y + content_offset(slot);
+            const int ox = w->x + content_inset(slot);
+            const int oy = w->y + content_offset(slot);
             push_event(slot, WIN_EVENT_MOUSE_DOWN, x - ox, y - oy, 2, 0);
         }
     }
@@ -1960,20 +1996,22 @@ static void handle_input(void)
 
             int cx, cy;
             close_box(w, &cx, &cy);
-            /* None of the chrome exists on a sheet, so none of it can be hit:
-             * every press inside one is the client's. */
-            const int sheet = is_sheet(slot);
-            const int on_close = !sheet && x >= cx && y >= cy &&
+            /* None of the chrome exists on a sheet or on the bar and the
+             * dock, so none of it can be hit: every press inside one of those
+             * is the client's. Without this a press near the top-left corner
+             * of the dock closed it. */
+            const int bare = is_sheet(slot) || is_chromeless(slot);
+            const int on_close = !bare && x >= cx && y >= cy &&
                                  x < cx + CLOSE_SIZE && y < cy + CLOSE_SIZE;
             /* Not a title press when the client owns those pixels: it gets
              * the event, and hands the drag back with win_move_begin if it
              * turns out not to have been one of its controls. */
-            const int on_title = !sheet && !client_title(slot) &&
+            const int on_title = !bare && !client_title(slot) &&
                                  y < w->y + BORDER + TITLE_HEIGHT;
 
             int gx, gy;
             grow_box(slot, &gx, &gy);
-            const int on_grip = !sheet && x >= gx && y >= gy &&
+            const int on_grip = !bare && x >= gx && y >= gy &&
                                 x < gx + GRIP_REACH && y < gy + GRIP_REACH;
 
             if (is_desktop(slot)) {
@@ -1996,7 +2034,7 @@ static void handle_input(void)
                 g_drag_dy = y - w->y;
             } else {
                 push_event(slot, WIN_EVENT_MOUSE_DOWN,
-                           x - (w->x + BORDER),
+                           x - (w->x + content_inset(slot)),
                            y - (w->y + content_offset(slot)), 1, 0);
                 g_mouse_grab = slot;
             }
@@ -2009,7 +2047,7 @@ static void handle_input(void)
     if (g_mouse_grab >= 0 && (x != before_x || y != before_y)) {
         struct ws_window* w = win(g_mouse_grab);
         push_event(g_mouse_grab, WIN_EVENT_MOUSE_MOVE,
-                   x - (w->x + BORDER),
+                   x - (w->x + content_inset(g_mouse_grab)),
                    y - (w->y + content_offset(g_mouse_grab)), 1, 0);
     }
 
@@ -2031,9 +2069,8 @@ static void handle_input(void)
             const int onto = window_at(x, y);
             if (onto >= 0) {
                 struct ws_window* w = win(onto);
-                const int ox = is_desktop(onto) ? w->x : w->x + BORDER;
-                const int oy = is_desktop(onto) ? w->y
-                                                : w->y + BORDER + TITLE_HEIGHT;
+                const int ox = w->x + content_inset(onto);
+                const int oy = w->y + content_offset(onto);
                 push_event(onto, WIN_EVENT_DROP, x - ox, y - oy, 1, 0);
             } else {
                 /* Dropped on nothing. Send it home rather than leaving the
@@ -2051,8 +2088,8 @@ static void handle_input(void)
         if (slot >= 0) {
             struct ws_window* w = win(slot);
             push_event(slot, WIN_EVENT_MOUSE_UP,
-                       x - (w->x + BORDER),
-                       y - (w->y + BORDER + TITLE_HEIGHT), 1, 0);
+                       x - (w->x + content_inset(slot)),
+                       y - (w->y + content_offset(slot)), 1, 0);
         }
     }
 

@@ -199,6 +199,44 @@ if [ -d docs/man ]; then
     cp docs/man/*.1 "$STAGING/usr/share/man/"
 fi
 
+# The time zones. Compiled zone files - the TZif format libc reads - taken from
+# whatever the host has, because the rules are data about what governments did
+# and there is nothing to be gained by typing them out again. A subset rather
+# than the whole database: the full set is nearly two thousand files, most of
+# them links or places nobody here is, and this is the list somebody would
+# actually pick from. UTC first, because it is the one that is always right.
+#
+# A zone that the host does not have is skipped rather than failing the build:
+# this is a nicety, and an image without New York is still an image.
+ZONES="UTC \
+       America/New_York America/Chicago America/Denver America/Los_Angeles \
+       America/Anchorage America/Sao_Paulo America/Mexico_City \
+       Europe/London Europe/Dublin Europe/Lisbon Europe/Paris Europe/Berlin \
+       Europe/Madrid Europe/Rome Europe/Amsterdam Europe/Stockholm \
+       Europe/Warsaw Europe/Athens Europe/Helsinki Europe/Moscow \
+       Africa/Cairo Africa/Lagos Africa/Johannesburg Africa/Nairobi \
+       Asia/Jerusalem Asia/Dubai Asia/Karachi Asia/Kolkata Asia/Dhaka \
+       Asia/Bangkok Asia/Shanghai Asia/Hong_Kong Asia/Singapore \
+       Asia/Tokyo Asia/Seoul \
+       Australia/Perth Australia/Adelaide Australia/Sydney \
+       Pacific/Auckland Pacific/Honolulu"
+ZONEDIR="${ZONEDIR:-/usr/share/zoneinfo}"
+if [ -d "$ZONEDIR" ]; then
+    mkdir -p "$STAGING/usr/share/zoneinfo"
+    for zone in $ZONES; do
+        [ -f "$ZONEDIR/$zone" ] || continue
+        mkdir -p "$STAGING/usr/share/zoneinfo/$(dirname "$zone")"
+        cp "$ZONEDIR/$zone" "$STAGING/usr/share/zoneinfo/$zone"
+    done
+    # The zone this image starts in, and the name of it. /etc/localtime is the
+    # file libc reads; /etc/timezone is the name, which is what a person and a
+    # settings panel want to see. Debian keeps both for the same reason.
+    if [ -f "$ZONEDIR/UTC" ]; then
+        cp "$ZONEDIR/UTC" "$STAGING/etc/localtime"
+        printf 'UTC\n' > "$STAGING/etc/timezone"
+    fi
+fi
+
 # The font. One file, already stripped by tools/mkfont.py to the tables a
 # rasteriser reads - the four megabytes it arrives as are variable-axis deltas
 # and layout tables that nothing here consults.

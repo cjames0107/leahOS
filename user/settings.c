@@ -11,6 +11,7 @@
  */
 
 #include <app.h>
+#include <cli.h>
 #include <ui.h>
 #include <paths.h>
 #include <display.h>
@@ -850,36 +851,111 @@ static void build_storage(struct ui_view* page)
  * means carrying the table that says what the zone did in 1987. */
 
 static struct ui_view* g_now_label;
-static struct ui_view* g_tz_stepper;
 static char g_now_text[64];
-static int  g_tz_minutes;
 
-/* The offset written out, in the control that sets it. */
-static void show_tz(void)
+/* The zones installed on this machine, as "Region/City".
+ *
+ * Read from the filesystem rather than compiled in, so that adding a zone to
+ * the image is adding a file and nothing else. One level of subdirectory,
+ * which is how the database is laid out, plus the plain files at the top -
+ * which is where UTC lives. */
+#define ZONES_MAX 64
+
+static char g_zone[ZONES_MAX][40];
+static int  g_zone_n;
+static char g_zone_now[40] = "UTC";
+
+static const char* zone_name(void* user, int i)
 {
-    if (g_tz_stepper == 0)
-        return;
-    char t[24];
-    const int m = g_tz_minutes < 0 ? -g_tz_minutes : g_tz_minutes;
-    snprintf(t, sizeof(t), "UTC%s%02d:%02d",
-             g_tz_minutes < 0 ? "-" : "+", m / 60, m % 60);
-    ui_set_text(g_tz_stepper, t);
+    (void)user;
+    return (i >= 0 && i < g_zone_n) ? g_zone[i] : "";
 }
 
-static void write_timezone(void)
+static void add_zone(const char* region, const char* city)
 {
-    char text[16];
-    const int m = g_tz_minutes;
-    snprintf(text, sizeof(text), "%s%d\n", m < 0 ? "-" : "+", m < 0 ? -m : m);
-    const int fd = open("/etc/timezone", O_WRONLY | O_CREAT | O_TRUNC);
-    if (fd < 0) {
-        snprintf(g_note, sizeof(g_note), "/etc/timezone is not writable");
+    if (g_zone_n >= ZONES_MAX)
+        return;
+    if (region == 0)
+        snprintf(g_zone[g_zone_n], sizeof(g_zone[0]), "%s", city);
+    else
+        snprintf(g_zone[g_zone_n], sizeof(g_zone[0]), "%s/%s", region, city);
+    ++g_zone_n;
+}
+
+static void scan_zones(void)
+{
+    if (g_zone_n > 0)
+        return;
+    struct dirent top[64];
+    const int n = getdents(PATH_ZONEINFO, top, 64);
+    for (int i = 0; i < n && g_zone_n < ZONES_MAX; ++i) {
+        if (top[i].d_name[0] == '.')
+            continue;
+        if (top[i].d_type != S_IFDIR) {
+            add_zone(0, top[i].d_name);
+            continue;
+        }
+        char path[192];
+        snprintf(path, sizeof(path), "%s/%s", PATH_ZONEINFO, top[i].d_name);
+        struct dirent city[64];
+        const int m = getdents(path, city, 64);
+        for (int k = 0; k < m && g_zone_n < ZONES_MAX; ++k) {
+            if (city[k].d_name[0] == '.' || city[k].d_type == S_IFDIR)
+                continue;
+            add_zone(top[i].d_name, city[k].d_name);
+        }
+    }
+
+    /* Which one is in force, by name. The name is in /etc/timezone because
+     * /etc/localtime is a copy rather than a link and a copy does not remember
+     * where it came from. */
+    const int fd = open("/etc/timezone", O_RDONLY);
+    if (fd >= 0) {
+        char text[40];
+        const long got = read(fd, text, sizeof(text) - 1);
+        close(fd);
+        if (got > 0) {
+            text[got] = '\0';
+            for (long i = 0; i < got; ++i)
+                if (text[i] == '\n' || text[i] == '\r') { text[i] = '\0'; break; }
+            if (text[0] != '\0')
+                snprintf(g_zone_now, sizeof(g_zone_now), "%s", text);
+        }
+    }
+}
+
+static int zone_index(void)
+{
+    for (int i = 0; i < g_zone_n; ++i)
+        if (strcmp(g_zone[i], g_zone_now) == 0)
+            return i;
+    return -1;
+}
+
+/* Put a zone in force: copy its file to /etc/localtime, which is what libc
+ * reads, and write its name to /etc/timezone, which is what a person reads.
+ * Both, because a copy does not remember where it came from. */
+static void set_zone(const char* name)
+{
+    char from[192];
+    snprintf(from, sizeof(from), "%s/%s", PATH_ZONEINFO, name);
+
+    static char file[16384];
+    const long n = cli_read_file(from, file, sizeof(file));
+    if (n < 0) {
+        snprintf(g_note, sizeof(g_note), "%s could not be read", name);
         return;
     }
-    write(fd, text, strlen(text));
-    close(fd);
-    snprintf(g_note, sizeof(g_note), "the zone is now UTC%s%02d:%02d",
-             m < 0 ? "-" : "+", (m < 0 ? -m : m) / 60, (m < 0 ? -m : m) % 60);
+    if (cli_write_file("/etc/localtime", file, (unsigned long)n) != 0) {
+        snprintf(g_note, sizeof(g_note), "/etc/localtime is not writable");
+        return;
+    }
+    char line[48];
+    snprintf(line, sizeof(line), "%s\n", name);
+    cli_write_file("/etc/timezone", line, strlen(line));
+
+    snprintf(g_zone_now, sizeof(g_zone_now), "%s", name);
+    snprintf(g_note, sizeof(g_note), "the zone is now %s", name);
 }
 
 static int clock_24(void)
@@ -909,16 +985,17 @@ static void show_now(void)
         ui_set_text(g_now_label, g_now_text);
 }
 
-static void on_tz(struct ui_view* v, void* user)
+static void on_zone(struct ui_view* v, void* user)
 {
     (void)user;
-    /* The stepper counts quarter hours from -12:00, which is every offset any
-     * zone actually uses and none of the ones in between. */
-    g_tz_minutes = (v->value * 15) - 12 * 60;
-    show_tz();
-    write_timezone();
+    if (v->selected < 0 || v->selected >= g_zone_n)
+        return;
+    set_zone(g_zone[v->selected]);
+    /* libc re-reads the file within the second, so the time below is right by
+     * the time anybody looks at it. */
     show_now();
     ui_set_text(g_note_label, g_note);
+    g_rebuild = 1;
 }
 
 static void on_clock_format(struct ui_view* v, void* user)
@@ -955,21 +1032,33 @@ static void build_datetime(struct ui_view* page)
     ui_grow(seg, 0);
     ui_on(seg, on_clock_format, 0);
 
+    scan_zones();
+
     struct ui_view* z = ui_group(page, "Time Zone", UI_STACK_V, 12, 4);
     ui_fit(z);
 
-    g_tz_minutes = (int)(timezone_offset() / 60);
-    r = row(z, "Offset from UTC");
-    /* -12:00 to +14:00 in quarter hours: 105 steps, which covers every offset
-     * any zone actually uses and none of the ones in between. */
-    g_tz_stepper = ui_stepper(r, (g_tz_minutes + 12 * 60) / 15, 104);
-    ui_size(g_tz_stepper, 150, 24);
-    ui_grow(g_tz_stepper, 0);
-    ui_on(g_tz_stepper, on_tz, 0);
-    show_tz();
-    (void)line;
+    r = row(z, "Zone");
+    ui_grow(ui_label(r, g_zone_now), 0);
 
-    ui_grow(ui_label(page, "written to /etc/timezone; every program reads it"), 0);
+    r = row(z, "Offset now");
+    const long off = timezone_offset() / 60;
+    const long m = off < 0 ? -off : off;
+    snprintf(line, sizeof(line), "UTC%s%02ld:%02ld",
+             off < 0 ? "-" : "+", m / 60, m % 60);
+    ui_grow(ui_label(r, line), 0);
+
+    /* The list rather than a number of minutes. A zone is not an offset: New
+     * York is five hours behind in January and four in July, and picking the
+     * offset meant every timestamp being an hour out for half the year. */
+    struct ui_view* list = ui_list(z, zone_name, g_zone_n, 0);
+    list->selected = zone_index();
+    ui_size(list, 0, 150);
+    ui_grow(list, 0);
+    ui_on(list, on_zone, 0);
+
+    ui_grow(ui_label(page,
+                     "the zone file is copied to /etc/localtime, which every "
+                     "program reads"), 0);
     ui_spacer(page);
 }
 

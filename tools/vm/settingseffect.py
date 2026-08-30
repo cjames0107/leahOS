@@ -33,11 +33,14 @@ def body(t):
     t.m.type("/Applications/Settings.app/settings %d %d &\n" % (WX, WY))
     time.sleep(8)
 
-    # --- the time zone, which writes the file libc has always read ----------
+    # --- the time zone, which is a file libc reads and not a number --------
+    # America/Chicago, the sixth row of the list. Picked because it keeps
+    # daylight saving: in August it is UTC-05:00 and in January UTC-06:00, so
+    # an offset that came out as -06:00 would mean the zone was being read as
+    # a fixed number rather than as a set of rules.
     page(t, "Date & Time")
-    for _ in range(4):                          # four quarter hours: UTC+01:00
-        t.m.click(*at(669, 224))
-        time.sleep(1)
+    t.m.click(*at(250, 401))
+    time.sleep(2)
     t.m.shot("eff-timezone")
 
     # --- natural scrolling, which the compositor reads on every notch -------
@@ -65,8 +68,10 @@ def body(t):
     t.m.click(150, 620)                         # the terminal, for focus
     time.sleep(1)
 
-    t.expect("cat /etc/timezone", "+60")
-    t.expect("date", "UTC+01:00")
+    t.expect("cat /etc/timezone", "America/Chicago")
+    # CDT, not UTC-05:00: date says what the zone calls itself now that the
+    # zone file has a name for it.
+    t.expect("date", "CDT")
     t.expect("grep PATH /root/.profile", "export PATH=")
     t.expect("grep SHELL /root/.profile", "export SHELL=/bin/sh")
     # Values are written as hex, and the desktop's file is desktop.conf - the

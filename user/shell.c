@@ -603,9 +603,10 @@ static int make_window(int x, int y, unsigned w, unsigned h, const char* title,
     const int id = win_create(x, y, w, h, title);
     if (id < 0)
         return -1;
+    /* Overlay implies the rest of it: no frame, no title strip, no controls,
+     * and every pixel inside the window the client's own. */
     win_set_overlay(id);
     win_set_alpha(id);
-    win_set_client_title(id);           /* no title bar: this is not a window */
     *px = win_map(id);
     *stride = win_stride(id);
     return id;
