@@ -29,6 +29,7 @@
 #include <cli.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <testexpr.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -41,6 +42,15 @@
 #define MAX_JOBS   32
 
 static int    g_status;         /* $? - what the last command returned */
+
+/* Where a `break`, `continue` or `return` has to unwind to. Set by the builtin
+ * and cleared by whichever construct is entitled to act on it, which is how a
+ * `break` inside an `if` inside a loop leaves the loop and not the if. */
+static int    g_break;          /* how many loops to leave */
+static int    g_continue;
+static int    g_returning;      /* a return, inside a function */
+
+static const char* function_body(const char* name);
 static char** g_args;           /* $1.. inside a script */
 static int    g_argc;
 
@@ -125,6 +135,107 @@ static void word_add(struct word* w, char c)
         w->text[w->len++] = c;
 }
 
+/* --- command substitution ---------------------------------------------------
+ *
+ * $(...) and `...`: run the thing inside and stand in for what it printed.
+ *
+ * A child, because the command inside is a command like any other and may be a
+ * pipeline, a loop or a function - so it needs a whole shell to run it, and
+ * running it here would mean this shell's variables and redirections were
+ * whatever the substitution left behind. The child writes to a pipe and this
+ * end reads until it closes, which is also how it learns the child finished.
+ *
+ * Trailing newlines are stripped, all of them. That is not tidiness: `cd
+ * $(pwd)` has to work, and every command that prints a line ends it. */
+static int exec_text(char* text);
+
+static void capture(const char* command, char* out, int max)
+{
+    out[0] = '\0';
+    int fds[2];
+    if (pipe(fds) != 0)
+        return;
+
+    __fd_before_fork();
+    const int pid = fork();
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], 1);
+        close(fds[1]);
+        /* A copy of the command, because exec_text writes into what it is
+         * given and this is the parent's string. */
+        static char inner[MAX_LINE];
+        snprintf(inner, sizeof(inner), "%s", command);
+        exit(exec_text(inner));
+    }
+    close(fds[1]);
+    if (pid < 0) {
+        close(fds[0]);
+        return;
+    }
+
+    int len = 0;
+    for (;;) {
+        const long n = read(fds[0], out + len, (unsigned long)(max - 1 - len));
+        if (n <= 0)
+            break;
+        len += (int)n;
+        if (len >= max - 1)
+            break;
+    }
+    close(fds[0]);
+    out[len] = '\0';
+    waitpid(pid, 0, 0);
+
+    while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r'))
+        out[--len] = '\0';
+}
+
+/* The text inside $( ) or ` `, and where the closing delimiter was.
+ *
+ * Nesting is counted for $( ), because `$(echo $(date))` is ordinary and a
+ * scan for the first ')' would cut it in the middle. Backticks do not nest -
+ * there is nothing to count with, which is why $( ) replaced them. */
+static int substitution(const char* p, char* out, int max, int* consumed)
+{
+    if (p[0] == '`') {
+        int n = 0, i = 1;
+        while (p[i] != '\0' && p[i] != '`') {
+            if (p[i] == '\\' && p[i + 1] != '\0')
+                ++i;
+            if (n < max - 1)
+                out[n++] = p[i];
+            ++i;
+        }
+        out[n] = '\0';
+        *consumed = p[i] == '`' ? i + 1 : i;
+        return 1;
+    }
+    if (p[0] != '$' || p[1] != '(')
+        return 0;
+
+    int depth = 1, n = 0, i = 2, quote = 0;
+    while (p[i] != '\0') {
+        const char c = p[i];
+        if (quote != 0) {
+            if (c == quote) quote = 0;
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+        } else if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            if (--depth == 0)
+                break;
+        }
+        if (n < max - 1)
+            out[n++] = c;
+        ++i;
+    }
+    out[n] = '\0';
+    *consumed = p[i] == ')' ? i + 1 : i;
+    return 1;
+}
+
 /* $NAME, ${NAME}, $?, $$, $1.. - the text it stands for. */
 static const char* expand_one(const char** at)
 {
@@ -147,6 +258,26 @@ static const char* expand_one(const char** at)
         if (g_args != 0 && which < g_argc)
             return g_args[which];
         return "";
+    }
+    if (*p == '#') {
+        /* How many there are, not counting the name - which is what $# means
+         * everywhere and what `while [ $# -gt 0 ]` is counting down. */
+        snprintf(answer, sizeof(answer), "%d", g_argc > 0 ? g_argc - 1 : 0);
+        *at = p + 1;
+        return answer;
+    }
+    if (*p == '@' || *p == '*') {
+        int len = 0;
+        answer[0] = '\0';
+        for (int i = 1; i < g_argc && g_args != 0; ++i) {
+            const int n = snprintf(&answer[len], sizeof(answer) - (unsigned long)len,
+                                   "%s%s", len > 0 ? " " : "", g_args[i]);
+            if (n < 0 || len + n >= (int)sizeof(answer))
+                break;
+            len += n;
+        }
+        *at = p + 1;
+        return answer;
     }
 
     char name[64];
@@ -345,9 +476,23 @@ static int tokenize(const char* line, char words[][256], int max)
                 if (*p == '\\' && p[1] != '\0') {
                     ++p;
                     word_add(&w, *p++);
-                } else if (*p == '$') {
-                    for (const char* v = expand_one(&p); *v != '\0'; ++v)
-                        word_add(&w, *v);
+                } else if (*p == '$' || *p == '`') {
+                    /* Inside double quotes a substitution still runs; what
+                     * quoting suppresses is the splitting and globbing of what
+                     * comes back, and both of those happen later. */
+                    char inner[MAX_LINE], got[MAX_LINE];
+                    int used = 0;
+                    if (substitution(p, inner, sizeof(inner), &used)) {
+                        capture(inner, got, sizeof(got));
+                        for (const char* v = got; *v != '\0'; ++v)
+                            word_add(&w, *v);
+                        p += used;
+                    } else if (*p == '`') {
+                        word_add(&w, *p++);
+                    } else {
+                        for (const char* v = expand_one(&p); *v != '\0'; ++v)
+                            word_add(&w, *v);
+                    }
                 } else {
                     word_add(&w, *p++);
                 }
@@ -358,13 +503,37 @@ static int tokenize(const char* line, char words[][256], int max)
             w.quoted = 1;
             ++p;
             word_add(&w, *p++);
-        } else if (*p == '$') {
-            /* An unquoted expansion can itself contain a pattern, so the glob
-             * flag comes from what came out rather than what went in. */
-            for (const char* v = expand_one(&p); *v != '\0'; ++v) {
-                if (*v == '*' || *v == '?')
-                    w.glob = 1;
-                word_add(&w, *v);
+        } else if (*p == '$' || *p == '`') {
+            char inner[MAX_LINE], got[MAX_LINE];
+            int used = 0;
+            if (substitution(p, inner, sizeof(inner), &used)) {
+                capture(inner, got, sizeof(got));
+                /* What comes back is words, not one word: `for f in $(ls)`
+                 * has to see a file per turn. Whitespace splits it, which is
+                 * what an unquoted substitution means everywhere. */
+                for (const char* v = got; *v != '\0'; ++v) {
+                    if (*v == ' ' || *v == '\t' || *v == '\n') {
+                        flush_word(&w, &building, words, &count, max);
+                        building = 0;
+                        continue;
+                    }
+                    building = 1;
+                    if (*v == '*' || *v == '?')
+                        w.glob = 1;
+                    word_add(&w, *v);
+                }
+                p += used;
+            } else if (*p == '`') {
+                word_add(&w, *p++);
+            } else {
+                /* An unquoted expansion can itself contain a pattern, so the
+                 * glob flag comes from what came out rather than what went
+                 * in. */
+                for (const char* v = expand_one(&p); *v != '\0'; ++v) {
+                    if (*v == '*' || *v == '?')
+                        w.glob = 1;
+                    word_add(&w, *v);
+                }
             }
         } else {
             if (*p == '*' || *p == '?')
@@ -624,6 +793,100 @@ static int run_simple(char words[][256], int start, int end, int background,
      * would change the child's directory and nothing else. */
     if (strcmp(argv[0], "exit") == 0 || strcmp(argv[0], "logout") == 0)
         exit(argv[1] ? atoi_simple(argv[1]) : g_status);
+
+    /* The expression builtins. In here rather than only in /bin/test because
+     * a loop that forks and execs once per comparison spends most of its time
+     * doing that; the rules themselves are libc's, so the two cannot drift. */
+    if (strcmp(argv[0], "test") == 0 || strcmp(argv[0], "[") == 0) {
+        int n = 0;
+        while (argv[n] != 0) ++n;
+        n -= 1;                                 /* past the command name */
+        if (strcmp(argv[0], "[") == 0) {
+            if (n < 1 || strcmp(argv[n], "]") != 0) {
+                fprintf(stderr, "[: missing ]\n");
+                return 2;
+            }
+            --n;
+        }
+        return test_expr(n, &argv[1]);
+    }
+    if (strcmp(argv[0], "true") == 0 || strcmp(argv[0], ":") == 0)
+        return 0;
+    if (strcmp(argv[0], "false") == 0)
+        return 1;
+
+    /* Leaving a loop, or a function. These set a flag rather than jumping,
+     * because what has to unwind is the statement walker and it is the one
+     * entitled to decide how far. */
+    if (strcmp(argv[0], "break") == 0) {
+        g_break = argv[1] ? atoi_simple(argv[1]) : 1;
+        if (g_break < 1) g_break = 1;
+        return 0;
+    }
+    if (strcmp(argv[0], "continue") == 0) {
+        g_continue = argv[1] ? atoi_simple(argv[1]) : 1;
+        if (g_continue < 1) g_continue = 1;
+        return 0;
+    }
+    if (strcmp(argv[0], "return") == 0) {
+        g_returning = 1;
+        return argv[1] ? atoi_simple(argv[1]) : g_status;
+    }
+    /* shift, which is how a function or a script walks its arguments. */
+    if (strcmp(argv[0], "shift") == 0) {
+        int by = argv[1] ? atoi_simple(argv[1]) : 1;
+        if (by < 0) by = 0;
+        if (g_args != 0 && by < g_argc) {
+            for (int i = 1; i + by < g_argc; ++i)
+                g_args[i] = g_args[i + by];
+            g_argc -= by;
+        } else if (g_args != 0) {
+            g_argc = 1;
+        }
+        return 0;
+    }
+
+    /* A function this shell has been told about, which is looked for before
+     * the filesystem: that is what lets a script define `log` and have every
+     * later call mean its own. */
+    {
+        const char* body = function_body(argv[0]);
+        if (body != 0) {
+            /* The arguments are copied, not pointed at.
+             *
+             * argv points into the shared array that tokenize writes every
+             * word into, and running the body tokenizes - so by the time the
+             * body asked for $1 the caller's arguments had been overwritten
+             * with the body's own words. `greet() { echo hello $1; }; greet
+             * world` printed "hello hello", because "hello" had landed in the
+             * slot "world" was read from. It looked right whenever the body's
+             * second word happened not to be reached first. */
+            #define FN_ARGS 16
+            char store[FN_ARGS][256];
+            char* mine[FN_ARGS + 1];
+            int n = 0;
+            while (argv[n] != 0 && n < FN_ARGS) {
+                snprintf(store[n], sizeof(store[0]), "%s", argv[n]);
+                mine[n] = store[n];
+                ++n;
+            }
+            mine[n] = 0;
+
+            char** saved = g_args;
+            const int saved_n = g_argc;
+            g_args = mine;
+            g_argc = n;
+
+            char run[4096];
+            snprintf(run, sizeof(run), "%s", body);
+            const int status = exec_text(run);
+
+            g_args = saved;
+            g_argc = saved_n;
+            g_returning = 0;            /* a return leaves the function, not more */
+            return status;
+        }
+    }
 
     if (strcmp(argv[0], "cd") == 0) {
         const char* home = getenv("HOME");
@@ -899,8 +1162,697 @@ static int run_line(char* line)
     return status;
 }
 
+/* --- compound commands ------------------------------------------------------
+ *
+ * if, while, until, for, case and functions.
+ *
+ * A shell without these is a launcher: it can run things and join them with
+ * pipes, and it cannot decide anything. Everything a UNIX is held together
+ * with - the script that sets a machine up, the one that builds it, the one
+ * that checks whether it needs building - is a program in this language, and
+ * without a conditional there is no language to write it in.
+ *
+ * The unit is the statement rather than the line, because `if x; then y; fi`
+ * on one line and the same thing on five are the same program and it would be
+ * absurd for one to work and not the other. So a script is split on `;` and
+ * newline into a list of statements, and the keywords are read off the front
+ * of them.
+ *
+ * Splitting happens before any expansion, and expansion still happens command
+ * by command as each one is about to run - so `X=1; echo $X` works, which it
+ * would not if the whole script were expanded up front.
+ */
+
+#define MAX_STMTS 512
+#define MAX_FUNCS 32
+
+static struct {
+    char name[64];
+    char* body;                 /* the text between { and }, kept */
+} g_funcs[MAX_FUNCS];
+static int g_func_count;
+
+/* Split `text` into statements, in place.
+ *
+ * Quotes, backslashes and substitutions are stepped over rather than looked
+ * inside: a `;` inside "..." or inside $( ) is not a separator, and a shell
+ * that thought it was would cut `echo "a;b"` in half. */
+/* Emit one statement, splitting a leading `do`, `then` or `else` off what
+ * follows it.
+ *
+ * `do if [ x ]` becomes `do` and `if [ x ]`, so that every construct starts a
+ * statement of its own. Without that, a construct opened in another
+ * statement's tail is invisible to the depth counting - the scan looking for
+ * the outer `fi` sees the inner one first and stops in the wrong place, which
+ * is how `if a; then if b; then c; fi; fi` came to be read as an if with no
+ * fi. Splitting once here is the alternative to teaching every scan and every
+ * range about tails. */
+static void emit(char* text, char** out, int* count, int max)
+{
+    for (;;) {
+        if (*count >= max)
+            return;
+        char* p = text;
+        while (*p == ' ' || *p == '\t') ++p;
+        int n = 0;
+        while (p[n] != '\0' && p[n] != ' ' && p[n] != '\t')
+            ++n;
+        const int is_keyword =
+            (n == 2 && strncmp(p, "do", 2) == 0) ||
+            (n == 4 && strncmp(p, "then", 4) == 0) ||
+            (n == 4 && strncmp(p, "else", 4) == 0);
+        if (!is_keyword || p[n] == '\0') {
+            out[(*count)++] = text;
+            return;
+        }
+        p[n] = '\0';                    /* the keyword, on its own */
+        out[(*count)++] = text;
+        text = &p[n + 1];               /* and round again for the rest */
+    }
+}
+
+static int split_statements(char* text, char** out, int max)
+{
+    int count = 0;
+    char* start = text;
+    char* p = text;
+    int quote = 0, paren = 0;
+
+    while (*p != '\0') {
+        if (quote != 0) {
+            if (*p == '\\' && quote == '"' && p[1] != '\0') ++p;
+            else if (*p == quote) quote = 0;
+            ++p;
+            continue;
+        }
+        if (*p == '\\' && p[1] != '\0') { p += 2; continue; }
+        if (*p == '\'' || *p == '"') { quote = *p; ++p; continue; }
+        if (*p == '`') {
+            /* Backticks are their own quote, and the only thing that ends one
+             * is another backtick. */
+            ++p;
+            while (*p != '\0' && *p != '`') {
+                if (*p == '\\' && p[1] != '\0') ++p;
+                ++p;
+            }
+            if (*p == '`') ++p;
+            continue;
+        }
+        if (*p == '$' && p[1] == '(') { paren += 1; p += 2; continue; }
+        if (paren > 0) {
+            if (*p == '(') ++paren;
+            else if (*p == ')') --paren;
+            ++p;
+            continue;
+        }
+        if (*p == '#' && (p == text || p[-1] == ' ' || p[-1] == '\t' ||
+                          p[-1] == '\n' || p[-1] == ';')) {
+            /* A comment runs to the end of its line, not of the script. */
+            while (*p != '\0' && *p != '\n')
+                *p++ = ' ';
+            continue;
+        }
+
+        /* ;; ends a case arm and is a statement of its own, so that the arm
+         * before it can be found by looking for it. */
+        if (*p == ';' && p[1] == ';') {
+            *p = '\0';
+            emit(start, out, &count, max);
+            if (count < max) out[count++] = (char*)";;";
+            p += 2;
+            start = p;
+            continue;
+        }
+        if (*p == ';' || *p == '\n') {
+            *p = '\0';
+            emit(start, out, &count, max);
+            ++p;
+            start = p;
+            continue;
+        }
+        ++p;
+    }
+    emit(start, out, &count, max);
+
+    /* Empty statements are what the separators leave behind - `a;; b` and a
+     * blank line both make one - and nothing downstream wants them. ";;" is
+     * kept because it means something. */
+    int keep = 0;
+    for (int i = 0; i < count; ++i) {
+        const char* t = out[i];
+        while (*t == ' ' || *t == '\t') ++t;
+        if (*t != '\0')
+            out[keep++] = out[i];
+    }
+    return keep;
+}
+
+/* The first word of a statement, for reading a keyword off it. */
+static void first_word(const char* stmt, char* out, int max)
+{
+    while (*stmt == ' ' || *stmt == '\t') ++stmt;
+    int n = 0;
+    while (*stmt != '\0' && *stmt != ' ' && *stmt != '\t' && n < max - 1)
+        out[n++] = *stmt++;
+    out[n] = '\0';
+}
+
+static int word_is(const char* stmt, const char* what)
+{
+    char w[32];
+    first_word(stmt, w, sizeof(w));
+    return strcmp(w, what) == 0;
+}
+
+/* What is left of a statement after its first word. */
+static const char* after_word(const char* stmt)
+{
+    while (*stmt == ' ' || *stmt == '\t') ++stmt;
+    while (*stmt != '\0' && *stmt != ' ' && *stmt != '\t') ++stmt;
+    while (*stmt == ' ' || *stmt == '\t') ++stmt;
+    return stmt;
+}
+
+/* Whether a statement opens or closes a block, for finding the one that
+ * matches. `do` is not counted: it belongs to the while or for that opened
+ * already, and counting it would need `done` to close two. */
+/* Where the command in a statement actually begins.
+ *
+ * A construct often shares a statement with the keyword before it: `do if [ x
+ * ]` and `then while true` are ordinary. A depth count that read only the
+ * first word would not see the `if` there, would not count it, and would then
+ * match the outer construct against the inner one's `fi` - which is how a for
+ * loop came to report that it had no `done`. */
+static const char* command_start(const char* stmt)
+{
+    for (;;) {
+        char w[16];
+        first_word(stmt, w, sizeof(w));
+        if (strcmp(w, "do") == 0 || strcmp(w, "then") == 0 ||
+            strcmp(w, "else") == 0)
+            stmt = after_word(stmt);
+        else
+            return stmt;
+    }
+}
+
+static int opens_block(const char* stmt)
+{
+    const char* c = command_start(stmt);
+    return word_is(c, "if") || word_is(c, "while") ||
+           word_is(c, "until") || word_is(c, "for") ||
+           word_is(c, "case");
+}
+
+static int closes_block(const char* stmt)
+{
+    const char* c = command_start(stmt);
+    return word_is(c, "fi") || word_is(c, "done") ||
+           word_is(c, "esac");
+}
+
+/* The statement, at this nesting level, whose first word is one of `wanted`.
+ * Returns its index, or `to` when there is none. */
+static int find_at_depth(char** stmt, int from, int to, const char* const* wanted)
+{
+    int depth = 0;
+    for (int i = from; i < to; ++i) {
+        if (depth == 0)
+            for (int k = 0; wanted[k] != 0; ++k)
+                if (word_is(stmt[i], wanted[k]))
+                    return i;
+        if (opens_block(stmt[i]))  ++depth;
+        if (closes_block(stmt[i])) --depth;
+    }
+    return to;
+}
+
+static int exec_stmts(char** stmt, int from, int to);
+
+/* The body that follows a keyword.
+ *
+ * `then echo yes` and `then` on its own with `echo yes` under it are the same
+ * program, so a body is whatever is left on the keyword's own statement
+ * followed by the statements after it. Missing the first half is what made
+ * `if true; then echo taken; fi` print nothing while the same thing written
+ * over three lines worked. */
+static int exec_body(char** stmt, int head, int from, int to)
+{
+    char tail[MAX_LINE];
+    snprintf(tail, sizeof(tail), "%s", after_word(stmt[head]));
+    if (tail[0] == '\0')
+        return to > from ? exec_stmts(stmt, from, to) : 0;
+
+    /* The tail and the statements after it are one list, not two.
+     *
+     * `do if [ x ]` opens a construct that a `fi` two statements later closes,
+     * and running the tail on its own would have that if looking for its fi
+     * inside a list of one - which fails, and takes the loop with it. */
+    char* joined[MAX_STMTS];
+    int n = 0;
+    joined[n++] = tail;
+    for (int i = from; i < to && n < MAX_STMTS; ++i)
+        joined[n++] = stmt[i];
+    return exec_stmts(joined, 0, n);
+}
+
+/* A condition is a list of statements, and its answer is the last one's. The
+ * first part of it rides on the keyword's own statement, as a body does. */
+static int condition_true(char** stmt, int head, int from, int to)
+{
+    return exec_body(stmt, head, from, to) == 0;
+}
+
+static int do_if(char** stmt, int from, int to, int* status)
+{
+    static const char* const kThen[] = { "then", 0 };
+    static const char* const kNext[] = { "elif", "else", "fi", 0 };
+    static const char* const kFi[]   = { "fi", 0 };
+
+    /* The whole construct, so an unfinished one is skipped rather than run
+     * half way. */
+    const int end = find_at_depth(stmt, from + 1, to, kFi);
+    if (end >= to) {
+        fprintf(stderr, "sh: if without fi\n");
+        *status = 2;
+        return to;
+    }
+
+    int at = from;
+    for (;;) {
+        /* `if cmd` and `elif cmd` carry the first part of the condition on
+         * their own statement; the rest run up to `then`. */
+        const int then_at = find_at_depth(stmt, at + 1, end, kThen);
+        if (then_at >= end) {
+            fprintf(stderr, "sh: if without then\n");
+            *status = 2;
+            return end + 1;
+        }
+        const int met = condition_true(stmt, at, at + 1, then_at);
+
+        const int branch_end = find_at_depth(stmt, then_at + 1, end, kNext);
+        if (met) {
+            *status = exec_body(stmt, then_at, then_at + 1, branch_end);
+            return end + 1;
+        }
+        if (branch_end >= end)
+            break;                              /* nothing else to try */
+        if (word_is(stmt[branch_end], "else")) {
+            *status = exec_body(stmt, branch_end, branch_end + 1, end);
+            return end + 1;
+        }
+        at = branch_end;                        /* an elif */
+    }
+    *status = 0;                                /* no branch ran: not a failure */
+    return end + 1;
+}
+
+static int do_loop(char** stmt, int from, int to, int* status, int until)
+{
+    static const char* const kDo[]   = { "do", 0 };
+    static const char* const kDone[] = { "done", 0 };
+
+    const int end = find_at_depth(stmt, from + 1, to, kDone);
+    const int do_at = find_at_depth(stmt, from + 1, to, kDo);
+    if (end >= to || do_at >= end) {
+        fprintf(stderr, "sh: %s without do ... done\n", until ? "until" : "while");
+        *status = 2;
+        return to;
+    }
+
+    *status = 0;
+    for (int turn = 0; turn < 100000; ++turn) {
+        int met = condition_true(stmt, from, from + 1, do_at);
+        if (until)
+            met = !met;
+        if (!met)
+            break;
+
+        *status = exec_body(stmt, do_at, do_at + 1, end);
+        if (g_returning)
+            break;
+        if (g_continue > 0 && --g_continue > 0) break;
+        if (g_break > 0) { --g_break; break; }
+    }
+    return end + 1;
+}
+
+static int do_for(char** stmt, int from, int to, int* status)
+{
+    static const char* const kDo[]   = { "do", 0 };
+    static const char* const kDone[] = { "done", 0 };
+
+    const int end = find_at_depth(stmt, from + 1, to, kDone);
+    const int do_at = find_at_depth(stmt, from + 1, to, kDo);
+    if (end >= to || do_at >= end) {
+        fprintf(stderr, "sh: for without do ... done\n");
+        *status = 2;
+        return to;
+    }
+
+    /* `for NAME in WORDS`. The words are expanded here and once: a list that
+     * was re-globbed every turn would change under a loop that creates files. */
+    char header[MAX_LINE];
+    snprintf(header, sizeof(header), "%s", after_word(stmt[from]));
+    char name[64];
+    first_word(header, name, sizeof(name));
+    const char* rest = after_word(header);
+    if (word_is(rest, "in"))
+        rest = after_word(rest);
+    else if (rest[0] == '\0')
+        rest = "\"$@\"";                        /* bare `for x` is the arguments */
+
+    static char words[MAX_WORDS + 1][256];
+    char list[MAX_LINE];
+    snprintf(list, sizeof(list), "%s", rest);
+    const int n = tokenize(list, words, MAX_WORDS);
+
+    *status = 0;
+    for (int i = 0; i < n; ++i) {
+        var_set(name, words[i]);
+        *status = exec_body(stmt, do_at, do_at + 1, end);
+        if (g_returning)
+            break;
+        if (g_continue > 0 && --g_continue > 0) break;
+        if (g_break > 0) { --g_break; break; }
+    }
+    return end + 1;
+}
+
+static int do_case(char** stmt, int from, int to, int* status)
+{
+    static const char* const kEsac[] = { "esac", 0 };
+    const int end = find_at_depth(stmt, from + 1, to, kEsac);
+    if (end >= to) {
+        fprintf(stderr, "sh: case without esac\n");
+        *status = 2;
+        return to;
+    }
+
+    /* `case WORD in`, where the first arm often rides on the same statement:
+     * `case $x in a) echo one;;` is how it is written more often than not. So
+     * the header is split at the word `in`, the subject taken from the left of
+     * it and the first arm from the right. */
+    char header[MAX_LINE];
+    snprintf(header, sizeof(header), "%s", after_word(stmt[from]));
+
+    char subject[256] = "";
+    const char* first_arm = "";
+    {
+        /* The word `in`, not the letters: a subject of "index" must not be
+         * cut in half. */
+        char* p = header;
+        char* found = 0;
+        while (*p != '\0') {
+            if ((p == header || p[-1] == ' ' || p[-1] == '\t') &&
+                p[0] == 'i' && p[1] == 'n' &&
+                (p[2] == '\0' || p[2] == ' ' || p[2] == '\t')) {
+                found = p;
+                break;
+            }
+            ++p;
+        }
+        if (found != 0) {
+            *found = '\0';
+            first_arm = found + 2;
+            while (*first_arm == ' ' || *first_arm == '\t')
+                ++first_arm;
+        }
+        static char words[MAX_WORDS + 1][256];
+        const int n = tokenize(header, words, MAX_WORDS);
+        if (n > 0)
+            snprintf(subject, sizeof(subject), "%s", words[0]);
+    }
+
+    *status = 0;
+    /* The arms, in order. `at` is the statement an arm starts on; `text` is
+     * the arm's own text, which for the first one comes off the header. */
+    int at = from;
+    char arm_text[MAX_LINE];
+    snprintf(arm_text, sizeof(arm_text), "%s", first_arm);
+    if (arm_text[0] == '\0') {
+        at = from + 1;
+        if (at < end)
+            snprintf(arm_text, sizeof(arm_text), "%s", stmt[at]);
+    }
+
+    while (at < end) {
+        const char* arm = arm_text;
+        while (*arm == ' ' || *arm == '\t') ++arm;
+        /* A leading ( is allowed and means nothing: `(a|b)` and `a|b)` are the
+         * same arm. */
+        if (*arm == '(') ++arm;
+        const char* close = strchr(arm, ')');
+        if (close == 0)
+            break;                              /* not an arm; nothing to run */
+
+        char patterns[256];
+        int plen = (int)(close - arm);
+        if (plen > (int)sizeof(patterns) - 1)
+            plen = (int)sizeof(patterns) - 1;
+        snprintf(patterns, sizeof(patterns), "%.*s", plen, arm);
+
+        /* One arm may list several patterns, separated by |. */
+        int hit = 0;
+        char one[128];
+        int n = 0;
+        for (const char* q = patterns; ; ++q) {
+            if (*q == '|' || *q == '\0') {
+                one[n] = '\0';
+                char* t = one;
+                while (*t == ' ' || *t == '\t') ++t;
+                int tl = (int)strlen(t);
+                while (tl > 0 && (t[tl - 1] == ' ' || t[tl - 1] == '\t'))
+                    t[--tl] = '\0';
+                if (t[0] != '\0' && match(t, subject))
+                    hit = 1;
+                n = 0;
+                if (*q == '\0')
+                    break;
+                continue;
+            }
+            if (n < (int)sizeof(one) - 1)
+                one[n++] = *q;
+        }
+
+        /* The body: whatever follows the ) here, then the statements up to the
+         * ;; that ends the arm. */
+        char body_head[MAX_LINE];
+        snprintf(body_head, sizeof(body_head), "%s", close + 1);
+        int arm_end = at + 1;
+        while (arm_end < end && !word_is(stmt[arm_end], ";;"))
+            ++arm_end;
+
+        if (hit) {
+            if (body_head[0] != '\0') {
+                char* one_stmt[1] = { body_head };
+                *status = exec_stmts(one_stmt, 0, 1);
+            }
+            if (arm_end > at + 1)
+                *status = exec_stmts(stmt, at + 1, arm_end);
+            return end + 1;
+        }
+
+        at = arm_end + 1;
+        if (at < end)
+            snprintf(arm_text, sizeof(arm_text), "%s", stmt[at]);
+    }
+    return end + 1;
+}
+
+/* `name() { ... }`, possibly spread over many statements. Returns the index
+ * past the closing brace, or `from` when this is not a definition. */
+static int do_function(char** stmt, int from, int to)
+{
+    const char* text = stmt[from];
+    while (*text == ' ' || *text == '\t') ++text;
+
+    /* The shape is a name, then (), then a brace - here or on a later
+     * statement. `function name {` is the other spelling and is not accepted:
+     * one way in is enough. */
+    char name[64];
+    int n = 0;
+    while (text[n] != '\0' && n < (int)sizeof(name) - 1 &&
+           (text[n] == '_' || (text[n] >= 'a' && text[n] <= 'z') ||
+            (text[n] >= 'A' && text[n] <= 'Z') ||
+            (text[n] >= '0' && text[n] <= '9')))
+        ++n;
+    if (n == 0)
+        return from;
+    memcpy(name, text, (unsigned long)n);
+    name[n] = '\0';
+    const char* p = text + n;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (p[0] != '(' || p[1] != ')')
+        return from;
+    p += 2;
+    while (*p == ' ' || *p == '\t') ++p;
+
+    /* The body: from the opening brace to the matching close. Braces are
+     * counted rather than searched for, so a function with an if in it ends
+     * where it should. */
+    int i = from;
+    const char* head = p;
+    if (head[0] != '{') {
+        if (++i >= to)
+            return from;
+        head = stmt[i];
+        while (*head == ' ' || *head == '\t') ++head;
+        if (head[0] != '{')
+            return from;
+    }
+    ++head;                                     /* past the { */
+
+    static char body[4096];
+    int len = 0;
+    int depth = 1;
+    const char* piece = head;
+    for (;;) {
+        for (const char* q = piece; *q != '\0'; ++q) {
+            if (*q == '{') ++depth;
+            else if (*q == '}') {
+                if (--depth == 0) {
+                    /* Everything before the closing brace belongs to the
+                     * body. */
+                    const int take = (int)(q - piece);
+                    if (len + take < (int)sizeof(body) - 1) {
+                        memcpy(&body[len], piece, (unsigned long)take);
+                        len += take;
+                    }
+                    body[len] = '\0';
+                    goto done;
+                }
+            }
+        }
+        {
+            const int take = (int)strlen(piece);
+            if (len + take + 1 < (int)sizeof(body) - 1) {
+                memcpy(&body[len], piece, (unsigned long)take);
+                len += take;
+                body[len++] = '\n';
+            }
+        }
+        if (++i >= to) {
+            fprintf(stderr, "sh: %s: no closing }\n", name);
+            return to;
+        }
+        piece = stmt[i];
+    }
+done:
+    {
+        int slot = -1;
+        for (int k = 0; k < g_func_count; ++k)
+            if (strcmp(g_funcs[k].name, name) == 0)
+                slot = k;
+        if (slot < 0 && g_func_count < MAX_FUNCS)
+            slot = g_func_count++;
+        if (slot >= 0) {
+            snprintf(g_funcs[slot].name, sizeof(g_funcs[slot].name), "%s", name);
+            free(g_funcs[slot].body);
+            g_funcs[slot].body = (char*)malloc((unsigned long)len + 1);
+            if (g_funcs[slot].body != 0)
+                memcpy(g_funcs[slot].body, body, (unsigned long)len + 1);
+        }
+    }
+    return i + 1;
+}
+
+static const char* function_body(const char* name)
+{
+    for (int i = 0; i < g_func_count; ++i)
+        if (strcmp(g_funcs[i].name, name) == 0)
+            return g_funcs[i].body;
+    return 0;
+}
+
+/* Run a list of statements, reading the keywords off the front of them. */
+static int exec_stmts(char** stmt, int from, int to)
+{
+    int status = g_status;
+    int i = from;
+    while (i < to) {
+        if (g_returning || g_break > 0 || g_continue > 0)
+            break;
+        const char* one = stmt[i];
+        while (*one == ' ' || *one == '\t') ++one;
+        if (*one == '\0') { ++i; continue; }
+
+        if (word_is(one, "if"))         { i = do_if(stmt, i, to, &status); continue; }
+        if (word_is(one, "while"))      { i = do_loop(stmt, i, to, &status, 0); continue; }
+        if (word_is(one, "until"))      { i = do_loop(stmt, i, to, &status, 1); continue; }
+        if (word_is(one, "for"))        { i = do_for(stmt, i, to, &status); continue; }
+        if (word_is(one, "case"))       { i = do_case(stmt, i, to, &status); continue; }
+        /* A keyword that got here has no construct around it - `fi` on its
+         * own, or a `then` this shell has already stepped over. Skipped
+         * quietly: complaining about it would mean complaining about every
+         * well-formed script too, because these are how the constructs above
+         * find their ends. */
+        if (word_is(one, "then") || word_is(one, "else") || word_is(one, "elif") ||
+            word_is(one, "fi") || word_is(one, "do") || word_is(one, "done") ||
+            word_is(one, "esac") || word_is(one, ";;")) { ++i; continue; }
+
+        const int after = do_function(stmt, i, to);
+        if (after != i) { i = after; continue; }
+
+        char line[MAX_LINE];
+        snprintf(line, sizeof(line), "%s", stmt[i]);
+        status = run_line(line);
+        g_status = status;
+        ++i;
+    }
+    return status;
+}
+
+/* Whether what has been typed so far is a program or the start of one.
+ *
+ * Counted rather than parsed: every construct here is opened by one word and
+ * closed by another, so the question is whether they balance. A `then` with no
+ * `fi` after it leaves the count above zero and the shell asks for more.
+ * Written into a copy, because counting means splitting and splitting writes
+ * into what it is given. */
+static int needs_more(const char* text)
+{
+    static char copy[MAX_LINE * 8];
+    static char* stmts[MAX_STMTS];
+    snprintf(copy, sizeof(copy), "%s", text);
+    const int n = split_statements(copy, stmts, MAX_STMTS);
+
+    int depth = 0;
+    for (int i = 0; i < n; ++i) {
+        if (opens_block(stmts[i])) ++depth;
+        if (closes_block(stmts[i])) --depth;
+    }
+    return depth > 0;
+}
+
+/* A whole script, or the inside of a substitution. Writes into `text`. */
+static int exec_text(char* text)
+{
+    static char* stmts[MAX_STMTS];
+    char** slot = stmts;
+    /* Nested: a substitution runs a shell inside this one, and a `for` body
+     * that contains a substitution would otherwise share the array being
+     * walked. The nesting is shallow, so one spare set is enough to notice
+     * when it is not. */
+    static int depth;
+    char* local[MAX_STMTS];
+    if (depth++ > 0)
+        slot = local;
+    const int n = split_statements(text, slot, MAX_STMTS);
+    const int status = exec_stmts(slot, 0, n);
+    --depth;
+    return status;
+}
+
 /* --- scripts -------------------------------------------------------------------- */
 
+/* The whole file at once, and then split.
+ *
+ * It used to read a line and run it, which cannot work now: `if` and its `fi`
+ * are on different lines and a shell that has forgotten the first by the time
+ * it reaches the second has no way to connect them. So the script is read
+ * whole - which also means a syntax error is found before anything has run
+ * rather than half way through. */
 static int run_script(const char* path, int argc, char** argv)
 {
     FILE* in = fopen(path, "r");
@@ -908,23 +1860,28 @@ static int run_script(const char* path, int argc, char** argv)
         cli_fail("%s: %s", path, strerror(errno));
         return 127;
     }
+    static char text[65536];
+    int len = 0;
+    int c;
+    while ((c = fgetc(in)) != EOF && len < (int)sizeof(text) - 1)
+        text[len++] = (char)c;
+    text[len] = '\0';
+    const int truncated = (c != EOF);
+    fclose(in);
+    if (truncated)
+        cli_fail("%s: only the first %d bytes were read", path,
+                 (int)sizeof(text) - 1);
+
     char** saved_args = g_args;
     const int saved_argc = g_argc;
     g_args = argv;
     g_argc = argc;
 
-    char line[MAX_LINE];
-    int status = 0;
-    while (fgets(line, sizeof(line), in) != 0) {
-        const int len = (int)strlen(line);
-        if (len > 0 && line[len - 1] == '\n')
-            line[len - 1] = '\0';
-        status = run_line(line);
-    }
-    fclose(in);
+    const int status = exec_text(text);
 
     g_args = saved_args;
     g_argc = saved_argc;
+    g_returning = 0;
     return status;
 }
 
@@ -940,9 +1897,11 @@ int main(int argc, char** argv)
     if (argc > 2 && strcmp(argv[1], "-c") == 0) {
         g_args = &argv[2];
         g_argc = argc - 2;
-        char line[MAX_LINE];
-        snprintf(line, sizeof(line), "%s", argv[2]);
-        return run_line(line);
+        /* exec_text, not run_line: `sh -c 'for f in *; do ...; done'` is one
+         * argument holding a whole program, and it has to be read as one. */
+        static char text[MAX_LINE * 4];
+        snprintf(text, sizeof(text), "%s", argv[2]);
+        return exec_text(text);
     }
     if (argc > 1)
         return run_script(argv[1], argc - 1, &argv[1]);
@@ -994,6 +1953,7 @@ int main(int argc, char** argv)
     printf("builtins: cd exit export unset source help. `help` lists the rest.\n");
 
     char line[MAX_LINE];
+    static char pending[MAX_LINE * 8], run[MAX_LINE * 8];
     for (;;) {
         char cwd[128];
 
@@ -1025,7 +1985,32 @@ int main(int argc, char** argv)
         if (n <= 0)
             break;
         line[(n > 0 && line[n - 1] == '\n') ? n - 1 : n] = '\0';
-        run_line(line);
+
+        /* A construct spread over several lines is read until it closes.
+         *
+         * `if` and its `fi` are two lines and running the first on its own
+         * would be running half a program, so the shell keeps reading with a
+         * different prompt until the blocks balance - which is what every
+         * shell does and what makes typing a loop at a prompt possible. */
+        snprintf(pending, sizeof(pending), "%s", line);
+        while (needs_more(pending)) {
+            printf("> ");
+            fflush(stdout);
+            errno = 0;
+            int more = (int)read(0, line, sizeof(line) - 1);
+            while (more < 0 && errno == EINTR) {
+                errno = 0;
+                more = (int)read(0, line, sizeof(line) - 1);
+            }
+            if (more <= 0)
+                break;
+            line[(more > 0 && line[more - 1] == '\n') ? more - 1 : more] = '\0';
+            const int at = (int)strlen(pending);
+            snprintf(&pending[at], sizeof(pending) - (unsigned long)at,
+                     "\n%s", line);
+        }
+        snprintf(run, sizeof(run), "%s", pending);
+        exec_text(run);
     }
 
     printf("shell exiting\n");

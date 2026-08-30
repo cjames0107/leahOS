@@ -126,7 +126,7 @@ SBIN_PROGRAMS := init login wserver desktop shell blockd vfsd netd e1000d audiod
                  authd usbd ps2d syncd ahcid useradd passwd ifconfig
 BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami date \
                  chmod chown stat less grep find wc head tail sort diff tar \
-                 gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync shutdown
+                 gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync shutdown test true false
 USRBIN_PROGRAMS := hello gui tone say lspci ping ping6 arp nslookup fetch fetch6 env \
                  screenshot tests fsbench ipctest nictest nettest blktest vfstest \
                  mvtest v6test churn wintest
@@ -283,6 +283,7 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) | $(DIST)
 # linked, because this filesystem's builder has no symlinks - see the note
 # about .alias files in mkext.sh.
 EXT_ADDS := bin/reboot=$(BUILD)/shutdown.elf \
+            bin/[=$(BUILD)/test.elf \
             $(foreach p,$(SBIN_PROGRAMS),sbin/$(p)=$(BUILD)/$(p).elf) \
             $(foreach p,$(BIN_PROGRAMS),bin/$(p)=$(BUILD)/$(p).elf) \
             $(foreach p,$(USRBIN_PROGRAMS),usr/bin/$(p)=$(BUILD)/$(p).elf)
@@ -401,6 +402,7 @@ print-qemuflags:
 check: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	@python3 tools/vm/smoke.py
 	@python3 tools/vm/converted.py
+	@python3 tools/vm/shlang.py
 	@python3 tools/vm/scrolled.py
 	@python3 tools/vm/stride.py
 	@python3 tools/vm/zones.py
