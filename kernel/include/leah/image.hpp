@@ -42,26 +42,31 @@ constexpr u64   kMaxBytes  = 8ull * 1024 * 1024;
 
 void init();
 
-// The id of the image called `name` at `version`, or -1. A name that is known
-// at a different version is a different image and is not returned.
-i32 find(const char* name, u64 version);
+// An image is named to the rest of the kernel by an opaque pointer, and to a
+// process by a handle on one - which is what lets the right to execute a
+// program be something a process is given rather than something it assumes.
+// Nothing outside this file may look inside the pointer.
 
-// Keep a copy of `bytes` under `name`. Returns an id, or -1 if it will not
-// fit. `bytes` is in the caller's address space and is copied here.
-i32 create(const char* name, u64 version, const u8* bytes, u64 size);
+// The image called `name` at `version`, or nullptr. A name that is known at a
+// different version is a different image and is not returned.
+void* find(const char* name, u64 version);
 
-bool valid(i32 id);
-u64  size_of(i32 id);
+// Keep a copy of `bytes` under `name`. Returns the image, or nullptr if it
+// will not fit. `bytes` is in the caller's address space and is copied here.
+void* create(const char* name, u64 version, const u8* bytes, u64 size);
+
+bool valid(void* image);
+u64  size_of(void* image);
 
 // The frame holding byte `offset`, which must be page aligned. Returns 0 past
 // the end. Does not take a reference - see share_frame.
-paddr_t frame_at(i32 id, u64 offset);
+paddr_t frame_at(void* image, u64 offset);
 
 // Take a reference on that frame, for a mapping about to be made of it.
-bool share_frame(i32 id, u64 offset);
+bool share_frame(void* image, u64 offset);
 
 // Copy out of an image, for the parts that cannot be shared: a writable
 // segment needs its own copy, and the loader has to read program headers.
-bool read(i32 id, u64 offset, void* into, u64 bytes);
+bool read(void* image, u64 offset, void* into, u64 bytes);
 
 } // namespace image

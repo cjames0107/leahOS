@@ -26,12 +26,27 @@ namespace ipc {
 // in this system is. Anything larger is what the shared segment is for.
 constexpr usize kInlineBytes = 256;
 
+// How many capabilities one message may carry. Two, because a reply that
+// hands back more than a couple of objects is a reply that wants a different
+// shape - and every slot costs on every message whether or not it is used.
+constexpr usize kMaxCarried = 2;
+
 struct Message {
     u32 tag;                    // what this message is; the server defines them
     u32 bytes;                  // how much of `data` means anything
     i64 word[4];                // small arguments, and small answers
     i32 shm_key;                // bulk payload, or 0 for none
     u32 shm_bytes;
+    // Capabilities travelling with this message.
+    //
+    // A handle number means nothing outside the table it came from, so these
+    // are not copied across: the kernel resolves each one in the sender's
+    // table and installs the object it names in the receiver's, writing the
+    // receiver's own numbers back into the message it is handed. A sender can
+    // pass no right it does not hold, which is what makes this safe to do
+    // between processes that do not trust each other.
+    i32 handle[kMaxCarried];
+    u32 handles;                // how many of them mean anything
     char data[kInlineBytes];
 };
 

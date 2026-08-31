@@ -1,5 +1,6 @@
 #include <leah/console.hpp>
 #include <leah/image.hpp>
+#include <leah/object.hpp>
 #include <leah/cpu.hpp>
 #include <leah/heap.hpp>
 #include <leah/memory.hpp>
@@ -178,7 +179,7 @@ struct Segment {
     u64 filesz;
     u64 memsz;
     u32 flags;          // ELF program-header flags: 1 execute, 2 write, 4 read
-    i32 image;          // which held image this is cut from, or -1
+    i32 image;          // a handle on the image this is cut from, or -1
 };
 
 constexpr u32 kSegExecute = 1;
@@ -230,7 +231,18 @@ bool map_segments(const Segment* segments, u32 count, const u8* blob,
          * off by a few bytes and fault somewhere unrecognisable. */
         const bool congruent =
             (s.vaddr & (vmm::kPageSize - 1)) == (s.offset & (vmm::kPageSize - 1));
-        const bool shareable = !writable && s.image >= 0 && congruent;
+        /* The handle is resolved once, here, and every use below is of the
+         * object it named. A segment claiming an image this process does not
+         * hold is simply not backed by one - it falls through to the blob,
+         * which is bounds-checked, rather than reaching anything. */
+        void* held = s.image < 0 ? nullptr
+                                 : object::look(scheduler::current_tgid(),
+                                                static_cast<object::Handle>(s.image),
+                                                object::Type::Image,
+                                                object::kMap);
+        if (s.image >= 0 && held == nullptr)
+            return false;
+        const bool shareable = !writable && held != nullptr && congruent;
 
         for (vaddr_t page = start; page < end; page += vmm::kPageSize) {
             u64 flags = vmm::User;
@@ -241,8 +253,8 @@ bool map_segments(const Segment* segments, u32 count, const u8* blob,
 
             if (shareable && page < file_end) {
                 const u64 at = s.offset - (s.vaddr - page);
-                if (image::share_frame(s.image, at)) {
-                    if (!vmm::map(page, image::frame_at(s.image, at), flags))
+                if (image::share_frame(held, at)) {
+                    if (!vmm::map(page, image::frame_at(held, at), flags))
                         return false;
                     continue;
                 }
@@ -278,8 +290,8 @@ bool map_segments(const Segment* segments, u32 count, const u8* blob,
             const vaddr_t stop = s.vaddr + s.filesz < to ? s.vaddr + s.filesz : to;
             if (stop > from) {
                 const u64 at = s.offset + (from - s.vaddr);
-                if (s.image >= 0) {
-                    if (!image::read(s.image, at, reinterpret_cast<void*>(from),
+                if (held != nullptr) {
+                    if (!image::read(held, at, reinterpret_cast<void*>(from),
                                      stop - from))
                         return false;
                 } else {

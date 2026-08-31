@@ -93,12 +93,18 @@ bool same_name(const Image& image, const char* name)
     return false;                       // longer than a name can be
 }
 
-Image* by_id(i32 id)
+/* A pointer handed back to us. Checked against the array rather than trusted,
+ * because the only thing standing between a stale one and somebody else's
+ * pages is this function. */
+Image* of(void* pointer)
 {
-    if (id < 0 || static_cast<usize>(id) >= kMaxImages)
+    auto* image = static_cast<Image*>(pointer);
+    if (image < &g_images[0] || image >= &g_images[kMaxImages])
         return nullptr;
-    Image& image = g_images[static_cast<usize>(id)];
-    return image.used ? &image : nullptr;
+    if (((reinterpret_cast<u8*>(image) - reinterpret_cast<u8*>(&g_images[0])) %
+         sizeof(Image)) != 0)
+        return nullptr;
+    return image->used ? image : nullptr;
 }
 
 } // namespace
@@ -109,27 +115,27 @@ void init()
         g_images[i].used = false;
 }
 
-i32 find(const char* name, u64 version)
+void* find(const char* name, u64 version)
 {
     for (usize i = 0; i < kMaxImages; ++i) {
         Image& image = g_images[i];
         if (!image.used || image.version != version || !same_name(image, name))
             continue;
         image.used_at = ++g_clock;
-        return static_cast<i32>(i);
+        return &image;
     }
-    return -1;
+    return nullptr;
 }
 
-i32 create(const char* name, u64 version, const u8* bytes, u64 size)
+void* create(const char* name, u64 version, const u8* bytes, u64 size)
 {
     if (size == 0 || size > kMaxBytes)
-        return -1;
+        return nullptr;
 
     /* Already here at this version: the caller raced another exec of the same
      * program, which is the ordinary case when a shell starts two at once. */
-    const i32 existing = find(name, version);
-    if (existing >= 0)
+    void* existing = find(name, version);
+    if (existing != nullptr)
         return existing;
 
     Image* image = take_slot();
@@ -137,7 +143,7 @@ i32 create(const char* name, u64 version, const u8* bytes, u64 size)
         static_cast<usize>((size + vmm::kPageSize - 1) / vmm::kPageSize);
     auto* frames = static_cast<paddr_t*>(kmalloc(pages * sizeof(paddr_t)));
     if (frames == nullptr)
-        return -1;
+        return nullptr;
 
     image->frames = frames;
     image->pages = pages;
@@ -146,7 +152,7 @@ i32 create(const char* name, u64 version, const u8* bytes, u64 size)
         kfree(frames);
         image->frames = nullptr;
         image->pages = 0;
-        return -1;
+        return nullptr;
     }
 
     usize n = 0;
@@ -158,35 +164,35 @@ i32 create(const char* name, u64 version, const u8* bytes, u64 size)
     image->version = version;
     image->used = true;
     image->used_at = ++g_clock;
-    return static_cast<i32>(image - &g_images[0]);
+    return image;
 }
 
-bool valid(i32 id) { return by_id(id) != nullptr; }
+bool valid(void* image) { return of(image) != nullptr; }
 
-u64 size_of(i32 id)
+u64 size_of(void* pointer)
 {
-    const Image* image = by_id(id);
+    const Image* image = of(pointer);
     return image != nullptr ? image->bytes : 0;
 }
 
-paddr_t frame_at(i32 id, u64 offset)
+paddr_t frame_at(void* pointer, u64 offset)
 {
-    const Image* image = by_id(id);
+    const Image* image = of(pointer);
     if (image == nullptr || (offset & (vmm::kPageSize - 1)) != 0)
         return 0;
     const usize page = static_cast<usize>(offset / vmm::kPageSize);
     return page < image->pages ? image->frames[page] : 0;
 }
 
-bool share_frame(i32 id, u64 offset)
+bool share_frame(void* pointer, u64 offset)
 {
-    const paddr_t frame = frame_at(id, offset);
+    const paddr_t frame = frame_at(pointer, offset);
     return frame != 0 && pmm::share(frame);
 }
 
-bool read(i32 id, u64 offset, void* into, u64 bytes)
+bool read(void* pointer, u64 offset, void* into, u64 bytes)
 {
-    const Image* image = by_id(id);
+    const Image* image = of(pointer);
     if (image == nullptr || offset > image->bytes ||
         bytes > image->bytes - offset)
         return false;

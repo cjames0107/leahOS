@@ -1,5 +1,6 @@
 #include <leah/cpu.hpp>
 #include <leah/ipc.hpp>
+#include <leah/object.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
 #include <leah/string.hpp>
@@ -36,12 +37,26 @@ enum class State : u8 {
     Dropped,
 };
 
+/* One capability in transit.
+ *
+ * Held as what it names rather than as the number that named it, because the
+ * number belongs to a table the receiver cannot see. Between the server's
+ * reply and the caller waking up, this is the only thing that remembers the
+ * object at all. */
+struct Carried {
+    object::Type type;
+    void*        pointer;
+    u32          rights;
+};
+
 struct Request {
     State   state;
     i32     port;
     u32     caller_pid;
     u32     server_pid;
     Message body;       // the request on the way out, the reply on the way back
+    Carried carried[kMaxCarried];
+    u32     carried_n;
 };
 
 struct Port {
@@ -195,6 +210,15 @@ i64 call(i32 port, const Message* request, Message* reply_out,
 
     const bool ok = r.state == State::Answered;
     if (ok)
+        /* Install what came with it, in this process's table, and rewrite the
+         * numbers to the ones it will know them by. */
+        for (u32 i = 0; i < r.carried_n && i < kMaxCarried; ++i)
+            r.body.handle[i] = object::give(scheduler::current_tgid(),
+                                            r.carried[i].type,
+                                            r.carried[i].pointer,
+                                            r.carried[i].rights);
+        for (u32 i = r.carried_n; i < kMaxCarried; ++i)
+            r.body.handle[i] = object::kNoHandle;
         memcpy(reply_out, &r.body, sizeof(Message));
     r.state = State::Free;
     return ok ? 0 : -1;
@@ -290,6 +314,28 @@ i64 reply(i32 handle, const Message* msg)
     if (r.state != State::Taken || r.server_pid != scheduler::current_pid())
         return -1;
     memcpy(&r.body, msg, sizeof(Message));
+
+    /* Resolve what the server is passing, in the server's own table. A handle
+     * it does not hold is dropped rather than refused: the reply is still a
+     * valid answer, and the caller finds one fewer capability than it hoped
+     * for, which it has to be able to cope with anyway. */
+    r.carried_n = 0;
+    const u32 offered = r.body.handles > kMaxCarried ? kMaxCarried : r.body.handles;
+    const u32 server = scheduler::current_tgid();
+    for (u32 i = 0; i < offered; ++i) {
+        const object::Type type = object::type_of(server, r.body.handle[i]);
+        if (type == object::Type::None)
+            continue;
+        r.carried[r.carried_n].type = type;
+        r.carried[r.carried_n].pointer =
+            object::look(server, r.body.handle[i], type, 0);
+        /* No more than the server itself holds. This is the whole of the
+         * safety property: authority can be passed on and never invented. */
+        r.carried[r.carried_n].rights = object::rights_of(server, r.body.handle[i]);
+        ++r.carried_n;
+    }
+    r.body.handles = r.carried_n;
+
     r.state = State::Answered;
     scheduler::wake(request_channel(handle));
     return 0;

@@ -12,12 +12,23 @@
 
 #define IPC_INLINE 256
 
+/* How many capabilities one message may carry. Mirrored from <leah/ipc.hpp>;
+ * the two must agree, because the kernel copies this struct as bytes. */
+#define IPC_MAX_CARRIED 2
+
 struct ipc_message {
     uint32_t tag;               /* what this is; the server defines the set   */
     uint32_t bytes;             /* how much of data means anything            */
     int64_t  word[4];           /* small arguments, and small answers         */
     int32_t  shm_key;           /* bulk payload, or 0                         */
     uint32_t shm_bytes;
+    /* Capabilities travelling with this message. A handle number means
+     * nothing outside the table it came from, so the kernel resolves each one
+     * in the sender's table, installs what it names in the receiver's, and
+     * writes the receiver's own numbers back here. Nobody can pass a right
+     * they do not hold. */
+    int32_t  handle[IPC_MAX_CARRIED];
+    uint32_t handles;           /* how many of them mean anything             */
     char     data[IPC_INLINE];
 };
 

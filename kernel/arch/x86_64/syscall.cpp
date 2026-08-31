@@ -46,6 +46,16 @@ constexpr u64 kEferSyscallEnable = 1ull << 0;
 // kernel to kmalloc an arbitrary amount on its say-so.
 constexpr u64 kMaxImageBytes = 32ull * 1024 * 1024;
 
+/* What a process gets on an image it made itself.
+ *
+ * Everything, for now, because the process that read the file is the one
+ * holding the handle and it could have done any of this anyway. The point of
+ * the rights is what happens when the *filesystem* starts issuing these: then
+ * kExecute is withheld from a caller who may read a file but not run it, and
+ * the check finally sits somewhere the caller cannot skip. */
+constexpr u32 kImageRights = object::kRead | object::kMap | object::kExecute |
+                             object::kDuplicate | object::kTransfer;
+
 bool user_range_ok(vaddr_t base, u64 length)
 {
     constexpr vaddr_t kUserCeiling = 0x0000800000000000ull;   // canonical low half
@@ -1364,7 +1374,14 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             frame->rax = static_cast<u64>(-1);
             break;
         }
-        frame->rax = static_cast<u64>(image::find(name, frame->rsi));
+        /* A handle, not an id. What comes back is authority to map and to run
+         * this program, and it can be narrowed or passed on like any other. */
+        void* found = image::find(name, frame->rsi);
+        frame->rax = static_cast<u64>(
+            found == nullptr
+                ? object::kNoHandle
+                : object::give(scheduler::current_tgid(), object::Type::Image,
+                               found, kImageRights));
         break;
     }
 
@@ -1376,9 +1393,14 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             frame->rax = static_cast<u64>(-1);
             break;
         }
+        void* made = image::create(name, frame->rsi,
+                                   reinterpret_cast<const u8*>(frame->rdx),
+                                   frame->r10);
         frame->rax = static_cast<u64>(
-            image::create(name, frame->rsi,
-                          reinterpret_cast<const u8*>(frame->rdx), frame->r10));
+            made == nullptr
+                ? object::kNoHandle
+                : object::give(scheduler::current_tgid(), object::Type::Image,
+                               made, kImageRights));
         break;
     }
 
@@ -1391,9 +1413,13 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             frame->rax = static_cast<u64>(-1);
             break;
         }
-        frame->rax = image::read(static_cast<i32>(frame->rdi), frame->rsi,
-                                 reinterpret_cast<void*>(frame->rdx),
-                                 frame->r10)
+        void* held = object::look(scheduler::current_tgid(),
+                                  static_cast<object::Handle>(frame->rdi),
+                                  object::Type::Image, object::kRead);
+        frame->rax = (held != nullptr &&
+                      image::read(held, frame->rsi,
+                                  reinterpret_cast<void*>(frame->rdx),
+                                  frame->r10))
                          ? 0
                          : static_cast<u64>(-1);
         break;
