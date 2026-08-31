@@ -1,5 +1,6 @@
 #include <leah/cpu.hpp>
 #include <leah/ipc.hpp>
+#include <leah/lock.hpp>
 #include <leah/object.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/timer.hpp>
@@ -66,6 +67,11 @@ struct Port {
 };
 
 Port    g_ports[kMaxPorts];
+
+/* Ports and the requests in flight on them. Ranked below the scheduler because
+ * that is the direction: a server with no request waiting holds this, checks,
+ * and then asks to be blocked. */
+sync::RankedLock g_lock(sync::Rank::Ipc, "ipc");
 Request g_requests[kMaxRequests];
 
 // Channels to sleep on. Distinct address ranges, so a waiter for a port cannot
@@ -86,6 +92,23 @@ bool valid_port(i32 port)
     return port >= 0 && port < static_cast<i32>(kMaxPorts) && g_ports[port].used;
 }
 
+/* With the lock already held: abandon() closes every port a dying process
+ * owned, and would otherwise take it once per port. */
+i64 port_destroy_locked(i32 port)
+{
+    if (!valid_port(port) || g_ports[port].owner_pid != scheduler::current_pid())
+        return -1;
+    g_ports[port].used = false;
+    // Anything waiting on this port will never be answered now.
+    for (usize i = 0; i < kMaxRequests; ++i) {
+        if (g_requests[i].port != port || g_requests[i].state == State::Free)
+            continue;
+        g_requests[i].state = State::Abandoned;
+        scheduler::wake(request_channel(static_cast<i32>(i)));
+    }
+    return 0;
+}
+
 } // namespace
 
 void init()
@@ -96,6 +119,7 @@ void init()
 
 i64 port_create(u32 name)
 {
+    sync::Guard guard(g_lock);
     if (name == 0 || find_port(name) >= 0)
         return -1;              // taken: one server per name, first one wins
     for (usize i = 0; i < kMaxPorts; ++i) {
@@ -111,22 +135,14 @@ i64 port_create(u32 name)
 
 i64 port_open(u32 name)
 {
+    sync::Guard guard(g_lock);
     return find_port(name);
 }
 
 i64 port_destroy(i32 port)
 {
-    if (!valid_port(port) || g_ports[port].owner_pid != scheduler::current_pid())
-        return -1;
-    g_ports[port].used = false;
-    // Anything waiting on this port will never be answered now.
-    for (usize i = 0; i < kMaxRequests; ++i) {
-        if (g_requests[i].port != port || g_requests[i].state == State::Free)
-            continue;
-        g_requests[i].state = State::Abandoned;
-        scheduler::wake(request_channel(static_cast<i32>(i)));
-    }
-    return 0;
+    sync::Guard guard(g_lock);
+    return port_destroy_locked(port);
 }
 
 // How long to sleep to reach a given moment.
@@ -158,6 +174,10 @@ static i64 stop_waiting(Request& r, i64 code)
 i64 call(i32 port, const Message* request, Message* reply_out,
          u64 deadline_ticks)
 {
+    /* Held across the whole exchange, and handed to the scheduler each time
+     * this sleeps: a reply that lands between the check and the block would
+     * otherwise be a wakeup with nobody left awake to see it. */
+    sync::Guard guard(g_lock);
     if (!valid_port(port) || request == nullptr || reply_out == nullptr)
         return -1;
 
@@ -185,12 +205,13 @@ i64 call(i32 port, const Message* request, Message* reply_out,
     scheduler::wake(port_channel(port));
     while (r.state != State::Answered && r.state != State::Abandoned) {
         if (deadline_ticks == 0) {
-            scheduler::block_on(request_channel(handle));
+            scheduler::block_on_releasing(request_channel(handle), g_lock);
         } else {
             if (timer::ticks() >= deadline_ticks)
                 return stop_waiting(r, -2);
-            scheduler::block_on_until(request_channel(handle),
-                                      nap_until(deadline_ticks));
+            scheduler::block_on_until_releasing(request_channel(handle),
+                                                nap_until(deadline_ticks),
+                                                g_lock);
         }
         // The answer first, before either reason for giving up. A reply that
         // landed in the same instant the clock ran out is a completed exchange,
@@ -243,6 +264,7 @@ static i64 take(i32 port, Message* out, u32* caller_pid)
 
 i64 try_recv(i32 port, Message* out, u32* caller_pid)
 {
+    sync::Guard guard(g_lock);
     if (!valid_port(port) || out == nullptr ||
         g_ports[port].owner_pid != scheduler::current_pid())
         return -1;
@@ -251,6 +273,7 @@ i64 try_recv(i32 port, Message* out, u32* caller_pid)
 
 i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
 {
+    sync::Guard guard(g_lock);
     if (!valid_port(port) || out == nullptr)
         return -1;
     if (g_ports[port].owner_pid != scheduler::current_pid())
@@ -263,7 +286,7 @@ i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
         // Nothing waiting. The port is the channel, so a request arriving wakes
         // exactly the server that can serve it.
         if (deadline_ticks == 0) {
-            scheduler::block_on(port_channel(port));
+            scheduler::block_on_releasing(port_channel(port), g_lock);
             // A signal wakes this, and until now that was all it did: nothing
             // had arrived, so the loop went round and slept again. The signal
             // stayed pending and the process stayed alive - which is why a
@@ -275,8 +298,9 @@ i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
         } else {
             if (timer::ticks() >= deadline_ticks)
                 return -2;      // the wait ran out; the caller has work to do
-            scheduler::block_on_until(port_channel(port),
-                                      nap_until(deadline_ticks));
+            scheduler::block_on_until_releasing(port_channel(port),
+                                                nap_until(deadline_ticks),
+                                                g_lock);
             if (!valid_port(port))
                 return -1;
             // Take before deciding the wait expired, and *return* what was
@@ -298,6 +322,7 @@ i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
 
 i64 reply(i32 handle, const Message* msg)
 {
+    sync::Guard guard(g_lock);
     if (handle < 0 || handle >= static_cast<i32>(kMaxRequests) || msg == nullptr)
         return -1;
     Request& r = g_requests[handle];
@@ -343,9 +368,10 @@ i64 reply(i32 handle, const Message* msg)
 
 void abandon(u32 pid)
 {
+    sync::Guard guard(g_lock);
     for (usize i = 0; i < kMaxPorts; ++i)
         if (g_ports[i].used && g_ports[i].owner_pid == pid)
-            port_destroy(static_cast<i32>(i));
+            port_destroy_locked(static_cast<i32>(i));
 
     for (usize i = 0; i < kMaxRequests; ++i) {
         Request& r = g_requests[i];

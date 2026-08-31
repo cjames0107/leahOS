@@ -78,7 +78,7 @@ Pty g_ptys[kMaxPtys];
  * waits: a read with nothing typed has to sleep, and a write from the other
  * end has to be able to wake it without the wake being lost. Everything else
  * in this file is short enough that one lock costs nothing. */
-sync::RankedLock g_lock(sync::Rank::Files, "pty");
+sync::RankedLock g_lock(sync::Rank::Pty, "pty");
 
 /* One channel per direction per pty, as pipes have. The addresses are distinct
  * because they are inside distinct objects. */

@@ -1,4 +1,5 @@
 #include <leah/heap.hpp>
+#include <leah/lock.hpp>
 #include <leah/memory.hpp>
 #include <leah/pmm.hpp>
 #include <leah/scheduler.hpp>
@@ -22,6 +23,11 @@ struct Segment {
 };
 
 Segment g_segments[kMaxSegments];
+
+/* Below the frame allocator it calls and above the scheduler that tears it
+ * down: shm::abandon runs from a process's last breath, with the scheduler's
+ * own lock held. */
+sync::RankedLock g_lock(sync::Rank::Shm, "shm");
 
 /* An id is a slot and a generation, not a slot.
  *
@@ -101,6 +107,17 @@ bool allocate(Segment& segment, usize pages)
     return true;
 }
 
+/* With the lock already held: open() asks this about every segment it
+ * walks past, and would otherwise take the lock a second time. */
+bool accessible_locked(i32 id, u32 uid)
+{
+    const i32 slot = slot_of(id);
+    if (slot < 0)
+        return false;
+    return uid == 0 || uid == g_segments[slot].owner_uid ||
+           (g_segments[slot].flags & Public) != 0;
+}
+
 } // namespace
 
 void init()
@@ -110,15 +127,13 @@ void init()
 
 bool accessible(i32 id, u32 uid)
 {
-    const i32 slot = slot_of(id);
-    if (slot < 0)
-        return false;
-    return uid == 0 || uid == g_segments[slot].owner_uid ||
-           (g_segments[slot].flags & Public) != 0;
+    sync::Guard guard(g_lock);
+    return accessible_locked(id, uid);
 }
 
 i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
 {
+    sync::Guard guard(g_lock);
     if (key == 0)
         return -1;                      // 0 is reserved for "no key"
 
@@ -127,7 +142,7 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
             continue;
         // Same rule as a file: the owner, or root - unless the creator marked
         // it public.
-        if (!accessible(make_id(i, g_segments[i].generation), uid))
+        if (!accessible_locked(make_id(i, g_segments[i].generation), uid))
             return -1;
         // The slot is claimed before its frames exist, so a segment can be
         // found here while it is still being built. pages is set last and is
@@ -180,6 +195,7 @@ i32 open(u32 key, u64 bytes, u32 uid, u32 flags)
 
 void abandon(u32 pid)
 {
+    sync::Guard guard(g_lock);
     /* Segments belong to the process that made them, and nothing was giving
      * them back. libc opens one per process for talking to vfsd, keyed by pid
      * so two processes never share a transfer buffer - which means a fresh key
@@ -200,6 +216,7 @@ void abandon(u32 pid)
 
 bool destroy(i32 id, u32 uid)
 {
+    sync::Guard guard(g_lock);
     const i32 slot = slot_of(id);
     if (slot < 0)
         return false;
@@ -216,6 +233,7 @@ bool destroy(i32 id, u32 uid)
 
 paddr_t frame_of(i32 id, usize index)
 {
+    sync::Guard guard(g_lock);
     const i32 slot = slot_of(id);
     if (slot < 0 || index >= g_segments[slot].pages)
         return 0;
@@ -232,6 +250,7 @@ bool  exists(i32 id)       { return slot_of(id) >= 0; }
 
 bool share_frames(i32 id)
 {
+    sync::Guard guard(g_lock);
     const i32 slot = slot_of(id);
     if (slot < 0)
         return false;

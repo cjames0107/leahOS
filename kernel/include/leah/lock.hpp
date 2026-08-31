@@ -47,7 +47,8 @@ namespace sync {
 
 enum class Rank : u32 {
     None      = 0,
-    Files     = 10,     // pipes, the console device, pseudo-terminals
+    Files     = 10,     // pipes, the console device, the descriptor table
+    Pty       = 12,     // pseudo-terminals, which files reaches into
     Ipc       = 15,     // ports and requests in flight
     Scheduler = 20,     // the task table and the run queue
     Handles   = 30,     // per-process capability tables

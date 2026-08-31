@@ -78,6 +78,7 @@ void wake(u64 channel);
 // before returning. The only correct way to wait for something a lock is
 // protecting; see the note in scheduler.cpp.
 void block_on_releasing(u64 channel, sync::RankedLock& held);
+void block_on_until_releasing(u64 channel, u64 ticks, sync::RankedLock& held);
 
 // Wake at most `limit` sleepers on `channel`; returns how many were woken. This
 // is what futex needs: waking one waiter rather than a thundering herd.

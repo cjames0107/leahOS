@@ -903,6 +903,25 @@ void block_on_releasing(u64 channel, sync::RankedLock& held)
     held.acquire();
 }
 
+/* The same, with a deadline. A server waiting for a request that may never
+ * come needs both: the lock handed over, and a moment to give up at. */
+void block_on_until_releasing(u64 channel, u64 ticks, sync::RankedLock& held)
+{
+    {
+        KernelLock lock;
+        Task* self = current();
+        self->wait_channel = channel;
+        if (ticks != 0)
+            self->wake_tick = timer::ticks() + ticks;
+        self->state = State::Blocked;
+        held.release();
+        switch_to(pick_next());
+        self->wake_tick = 0;
+        self->wait_channel = 0;
+    }
+    held.acquire();
+}
+
 void wake(u64 channel)
 {
     KernelLock lock;
