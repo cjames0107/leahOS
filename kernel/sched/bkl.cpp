@@ -1,3 +1,4 @@
+#include <leah/lock.hpp>
 #include <leah/percpu.hpp>
 #include <leah/vmm.hpp>
 #include <leah/spinlock.hpp>
@@ -27,6 +28,23 @@ void acquire()
         depth_of_this_cpu() = depth_of_this_cpu() + 1;   // already ours: a nested entry
         return;
     }
+    /* Taking this while already holding a finer lock is the deadlock, and it
+     * is the whole reason the ranks exist.
+     *
+     * One processor holds a subsystem lock and waits here; another holds this
+     * and waits for that subsystem. Neither can move. It is not caught by the
+     * ranks themselves - this lock is recursive and is handed between tasks at
+     * a context switch, so it cannot be a RankedLock and cannot be pushed onto
+     * a per-processor stack that a migrating owner would invalidate. But it
+     * does not need to be: the condition is exactly "acquiring this from
+     * scratch while holding something else", which needs no bookkeeping to
+     * notice.
+     *
+     * The nested case is safe and is the common one: every syscall takes this
+     * on entry, so a subsystem reaching the scheduler finds it already held by
+     * this processor and never reaches the wait below. */
+    sync::assert_none_held("acquiring the kernel lock");
+
     u64 flags;
     asm volatile("pushfq; pop %0" : "=r"(flags));
     while (!g_lock.try_acquire()) {
@@ -95,7 +113,7 @@ void handoff(u32 target_depth)
     if (target_depth == 0) {
         if (holding) {
             depth_of_this_cpu() = 0;
-            __atomic_store_n(&g_owner, kNoOwner, __ATOMIC_RELEASE);
+                __atomic_store_n(&g_owner, kNoOwner, __ATOMIC_RELEASE);
             g_lock.release();
         }
         return;
@@ -104,7 +122,7 @@ void handoff(u32 target_depth)
     if (!holding) {
         g_lock.acquire();
         __atomic_store_n(&g_owner, self, __ATOMIC_RELEASE);
-    }
+        }
     depth_of_this_cpu() = target_depth;
 }
 

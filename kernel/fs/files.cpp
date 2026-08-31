@@ -42,19 +42,17 @@ struct Pipe {
     bool  doomed;
 };
 
-/* No lock here yet, and the reason is worth writing down.
+/* The descriptor table, and nothing else.
  *
- * The structure below is ready for one: read and write resolve a descriptor,
- * take a reference, and only then do the part that can block. What is not
- * ready is the interaction with the big kernel lock, which has no rank. Every
- * syscall takes it first and a ranked lock second; but scheduler::wake, called
- * from inside a subsystem that is holding a ranked lock, takes it second - and
- * that is only safe while it is recursive on the same processor. Closing a
- * pipe does exactly that and deadlocked two processors on the first boot.
+ * Deliberately the narrowest lock in this file. Everything it protects is a
+ * lookup - a number to an object - and every one of those is short and cannot
+ * block. What can block is what happens afterwards, and that is done with this
+ * dropped and a reference held instead.
  *
- * The fix is the same step S2 ends on: the big lock has to become a ranked
- * lock of its own, lowest and taken first, so the ordering is total rather
- * than nearly total. Until then this table rides on it as it always has. */
+ * An earlier attempt at this deadlocked, and the cause was not here: the big
+ * kernel lock had no place in the order, so a path that took it while holding
+ * this one was a hang rather than a complaint. It now says so. */
+sync::RankedLock g_lock(sync::Rank::Files, "files");
 u64 read_channel(Pipe* p)  { return reinterpret_cast<u64>(p); }
 u64 write_channel(Pipe* p) { return reinterpret_cast<u64>(p) + 1; }
 

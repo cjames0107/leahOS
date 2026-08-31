@@ -47,6 +47,7 @@ namespace sync {
 
 enum class Rank : u32 {
     None      = 0,
+    Kernel    = 5,      // the big lock, while it is still taken at every entry
     Files     = 10,     // pipes, the console device, the descriptor table
     Pty       = 12,     // pseudo-terminals, which files reaches into
     Ipc       = 15,     // ports and requests in flight
@@ -101,6 +102,18 @@ bool holding(Rank rank);
 
 // How many ranked locks this processor holds.
 u32 held_count();
+
+// Record a lock this module does not own the acquisition of.
+//
+// The big kernel lock is recursive and is handed between tasks at a context
+// switch, so it cannot be a RankedLock. It can still be *ranked*: these note
+// its outermost acquire and release, which is enough to put it in the order
+// and to catch anything that takes it while already holding something finer.
+// That combination is the deadlock this is here to find - one processor
+// holding a subsystem lock and waiting for the big one, while another holds
+// the big one and waits for the subsystem.
+void note_acquire(Rank rank, const char* name);
+void note_release(Rank rank);
 
 // Panic unless this processor holds none.
 //
