@@ -1,4 +1,5 @@
 #include <leah/console.hpp>
+#include <leah/lock.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
 #include <leah/heap.hpp>
@@ -29,6 +30,20 @@ u64 g_free_frames  = 0;
 // Most allocations follow the previous one, so resuming the scan where it left
 // off turns the common case from O(heap) into O(1).
 u64 g_search_hint = 0;
+
+/* The first thing carved out from under the big kernel lock.
+ *
+ * The frame allocator is a leaf: it calls nothing that takes a lock of its
+ * own, so it can be made safe on its own terms without waiting for anything
+ * else to be. It is also the most contended thing in the kernel - every page
+ * fault, every exec, every fork goes through it - so it is the one worth doing
+ * first.
+ *
+ * Still taken underneath the big lock for now, which changes no behaviour. The
+ * point of this step is that the discipline exists and the ordering is being
+ * exercised on every boot, so that when the big lock goes the ranks have
+ * already been proved right rather than reasoned about. */
+sync::RankedLock g_lock(sync::Rank::Pmm, "pmm");
 
 bool test(u64 frame)
 {
@@ -138,6 +153,54 @@ void check_poison(paddr_t frame)
     }
 }
 
+/* Allocating, with the lock already held. Same reason as free_locked below:
+ * asking for one contiguous frame is asking for a frame, and the delegation
+ * that expressed it took the lock a second time. */
+paddr_t alloc_locked()
+{
+    for (u64 pass = 0; pass < 2; ++pass) {
+        const u64 start = pass == 0 ? g_search_hint : 0;
+        const u64 stop  = pass == 0 ? g_bitmap_words : g_search_hint;
+
+        for (u64 word = start; word < stop; ++word) {
+            if (g_bitmap[word] == ~0ull)
+                continue;                       // fully allocated, skip 64 frames
+
+            for (u64 bit = 0; bit < 64; ++bit) {
+                const u64 frame = word * 64 + bit;
+                if (frame >= g_frame_count)
+                    break;
+                if (test(frame))
+                    continue;
+                mark_used(frame);
+                g_search_hint = word;
+                check_poison(frame << kPageShift);
+                return frame << kPageShift;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Freeing, with the lock already held.
+ *
+ * There are three public ways to give a frame back and two of them are written
+ * in terms of the third, which is exactly the shape that turns a lock into a
+ * deadlock the first time it is taken twice. The ranked lock catches that as a
+ * panic rather than a hang - which is how this was found - but the fix is to
+ * have one unlocked body and let the entry points wrap it. */
+void free_locked(paddr_t frame)
+{
+    if (frame == 0)
+        return;
+    const u64 index = frame >> kPageShift;
+    if (index < g_frame_count && test(index))
+        poison(frame);
+    mark_free(index);
+    if (index / 64 < g_search_hint)
+        g_search_hint = index / 64;
+}
+
 } // namespace
 
 void init(const boot::Info& info)
@@ -218,36 +281,17 @@ void init(const boot::Info& info)
 
 paddr_t alloc()
 {
-    for (u64 pass = 0; pass < 2; ++pass) {
-        const u64 start = pass == 0 ? g_search_hint : 0;
-        const u64 stop  = pass == 0 ? g_bitmap_words : g_search_hint;
-
-        for (u64 word = start; word < stop; ++word) {
-            if (g_bitmap[word] == ~0ull)
-                continue;                       // fully allocated, skip 64 frames
-
-            for (u64 bit = 0; bit < 64; ++bit) {
-                const u64 frame = word * 64 + bit;
-                if (frame >= g_frame_count)
-                    break;
-                if (test(frame))
-                    continue;
-                mark_used(frame);
-                g_search_hint = word;
-                check_poison(frame << kPageShift);
-                return frame << kPageShift;
-            }
-        }
-    }
-    return 0;
+    sync::Guard guard(g_lock);
+    return alloc_locked();
 }
 
 paddr_t alloc_contiguous(usize frames)
 {
+    sync::Guard guard(g_lock);
     if (frames == 0)
         return 0;
     if (frames == 1)
-        return alloc();
+        return alloc_locked();
 
     // Contiguous runs are rare enough (DMA buffers, page-table groups) that a
     // linear scan is fine; the bitmap is the only structure we have anyway.
@@ -272,14 +316,8 @@ paddr_t alloc_contiguous(usize frames)
 
 void free(paddr_t frame)
 {
-    if (frame == 0)
-        return;
-    const u64 index = frame >> kPageShift;
-    if (index < g_frame_count && test(index))
-        poison(frame);
-    mark_free(index);
-    if (index / 64 < g_search_hint)
-        g_search_hint = index / 64;
+    sync::Guard guard(g_lock);
+    free_locked(frame);
 }
 
 // --- reference counts -------------------------------------------------------
@@ -305,6 +343,7 @@ void init_refcounts()
 
 bool share(paddr_t frame)
 {
+    sync::Guard guard(g_lock);
     const u64 index = frame >> kPageShift;
     if (g_refs == nullptr || index >= g_ref_count)
         return false;
@@ -324,18 +363,20 @@ bool is_shared(paddr_t frame)
 
 void release(paddr_t frame)
 {
+    sync::Guard guard(g_lock);
     const u64 index = frame >> kPageShift;
     if (g_refs != nullptr && index < g_ref_count && g_refs[index] > 0) {
         --g_refs[index];            // someone else still holds it
         return;
     }
-    free(frame);
+    free_locked(frame);
 }
 
 void free_contiguous(paddr_t base, usize frames)
 {
+    sync::Guard guard(g_lock);
     for (usize i = 0; i < frames; ++i)
-        free(base + i * kPageSize);
+        free_locked(base + i * kPageSize);
 }
 
 void use_direct_map()
