@@ -1,6 +1,7 @@
 /* See <leah/pty.hpp>. */
 
 #include <leah/file.hpp>
+#include <leah/lock.hpp>
 #include <leah/pty.hpp>
 #include <leah/scheduler.hpp>
 #include <leah/string.hpp>
@@ -69,6 +70,15 @@ struct Pty {
 };
 
 Pty g_ptys[kMaxPtys];
+
+/* One lock over every pseudo-terminal.
+ *
+ * The first blocking subsystem taken out from under the big lock, and the one
+ * worth doing first because it is the smallest thing here that genuinely
+ * waits: a read with nothing typed has to sleep, and a write from the other
+ * end has to be able to wake it without the wake being lost. Everything else
+ * in this file is short enough that one lock costs nothing. */
+sync::RankedLock g_lock(sync::Rank::Files, "pty");
 
 /* One channel per direction per pty, as pipes have. The addresses are distinct
  * because they are inside distinct objects. */
@@ -199,6 +209,7 @@ bool exists(int index)
 
 i64 control(void* object, int op, u64 argument)
 {
+    sync::Guard guard(g_lock);
     auto* p = static_cast<Pty*>(object);
     if (p == nullptr || !p->used)
         return -1;
@@ -232,6 +243,7 @@ i64 read(void* object, bool master, void* buffer, usize count)
     Ring& ring = master ? p->to_master : p->to_slave;
     const u64 channel = master ? master_channel(p) : slave_channel(p);
 
+    sync::Guard guard(g_lock);
     for (;;) {
         if (ring.count > 0) {
             usize n = 0;
@@ -251,7 +263,9 @@ i64 read(void* object, bool master, void* buffer, usize count)
          * whose terminal window was shut. */
         if (master ? (p->slaves == 0) : (p->masters == 0))
             return 0;
-        scheduler::block_on(channel);
+        /* Held across the check above and dropped inside the block, so a
+         * writer cannot put a byte in and wake between the two. */
+        scheduler::block_on_releasing(channel, g_lock);
         if (scheduler::signal_pending())
             return files::kInterrupted;
     }
@@ -259,6 +273,7 @@ i64 read(void* object, bool master, void* buffer, usize count)
 
 i64 write(void* object, bool master, const void* buffer, usize count)
 {
+    sync::Guard guard(g_lock);
     auto* p = static_cast<Pty*>(object);
     const auto* in = static_cast<const u8*>(buffer);
     if (p == nullptr || !p->used)
@@ -290,6 +305,7 @@ i64 write(void* object, bool master, const void* buffer, usize count)
 
 void reopen(void* object, bool master)
 {
+    sync::Guard guard(g_lock);
     auto* p = static_cast<Pty*>(object);
     if (p == nullptr || !p->used)
         return;
@@ -299,6 +315,7 @@ void reopen(void* object, bool master)
 
 void close(void* object, bool master)
 {
+    sync::Guard guard(g_lock);
     auto* p = static_cast<Pty*>(object);
     if (p == nullptr || !p->used)
         return;
@@ -322,6 +339,7 @@ void close(void* object, bool master)
 
 bool readable(void* object, bool master)
 {
+    sync::Guard guard(g_lock);
     auto* p = static_cast<Pty*>(object);
     if (p == nullptr || !p->used)
         return true;                    /* gone counts as ready: it reads 0 */

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <leah/file.hpp>
+#include <leah/lock.hpp>
 #include <leah/types.hpp>
 #include <leah/vmm.hpp>
 
@@ -72,6 +73,11 @@ void block_on_until(u64 channel, u64 ticks);
 
 // Make every task sleeping on `channel` runnable. Safe to call from an IRQ.
 void wake(u64 channel);
+
+// Block on `channel`, dropping `held` for the duration and taking it again
+// before returning. The only correct way to wait for something a lock is
+// protecting; see the note in scheduler.cpp.
+void block_on_releasing(u64 channel, sync::RankedLock& held);
 
 // Wake at most `limit` sleepers on `channel`; returns how many were woken. This
 // is what futex needs: waking one waiter rather than a thundering herd.

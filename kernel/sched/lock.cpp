@@ -73,6 +73,19 @@ void RankedLock::release()
     m_lock.release();
 }
 
+u32 held_count() { return mine().count; }
+
+void assert_none_held(const char* where)
+{
+    const Held& held = mine();
+    if (held.count == 0)
+        return;
+    console::printf("\n  %s while holding %s (rank %u)\n", where,
+                    held.name[held.count - 1],
+                    static_cast<u32>(held.rank[held.count - 1]));
+    panic("a ranked lock was held across a context switch");
+}
+
 bool holding(Rank rank)
 {
     const Held& held = mine();

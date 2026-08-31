@@ -380,6 +380,16 @@ namespace {
 // task takes an interrupt or a syscall while in ring 3.
 void switch_to(u32 next_index)
 {
+    /* Nothing ranked may be held here.
+     *
+     * These are spin locks. A task that sleeps holding one leaves every other
+     * processor spinning for something that is not running - and the tracking
+     * is per-processor while the lock belongs to a task, which is about to be
+     * on a different one. Waiting for something a lock protects is done by
+     * handing that lock to block_on_releasing; this is the assertion that
+     * nothing else found another way. */
+    sync::assert_none_held("context switch");
+
     if (next_index == current_index())
         return;
 
@@ -862,6 +872,35 @@ void block_on_until(u64 channel, u64 ticks)
     // going to look at the world again either way.
     self->wake_tick = 0;
     self->wait_channel = 0;
+}
+
+/* Block on `channel`, giving up `held` while asleep.
+ *
+ * The lock is dropped after this task is marked Blocked and before it stops
+ * running, and taken again on the way out. That ordering is the whole of the
+ * thing: a waker that holds `held` and then calls wake() either arrives before
+ * the check - in which case the condition is already true and this is never
+ * reached - or after this task is on the queue, in which case the wake is
+ * seen. There is no window between the two for a wakeup to be lost in.
+ *
+ * This is what the big kernel lock has been doing implicitly all along. Its
+ * own comment says so: every check-then-block sequence runs inside a syscall
+ * that already holds it, so nothing can slip in between a check and its block.
+ * Taking that lock apart means every blocking path has to say out loud which
+ * lock it was relying on, and this is how it says it.
+ */
+void block_on_releasing(u64 channel, sync::RankedLock& held)
+{
+    {
+        KernelLock lock;
+        Task* self = current();
+        self->wait_channel = channel;
+        self->state = State::Blocked;
+        held.release();
+        switch_to(pick_next());
+        self->wait_channel = 0;
+    }
+    held.acquire();
 }
 
 void wake(u64 channel)

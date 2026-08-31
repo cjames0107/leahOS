@@ -98,4 +98,18 @@ private:
 // subsystems that mean to require their own lock is already held.
 bool holding(Rank rank);
 
+// How many ranked locks this processor holds.
+u32 held_count();
+
+// Panic unless this processor holds none.
+//
+// The rule these locks live under is that one may never be held across a
+// context switch. They are spin locks: a task that sleeps holding one leaves
+// every other processor spinning for something that is not running, and the
+// tracking here is per-processor while the lock would be held by a task, which
+// migrates. Blocking is done by handing the lock to the scheduler to drop at
+// the right moment - see block_on_releasing - and this asserts that nothing
+// else slipped through.
+void assert_none_held(const char* where);
+
 } // namespace sync
