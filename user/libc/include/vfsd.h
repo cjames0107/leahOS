@@ -43,6 +43,17 @@ struct vfs_shared {
 #define VFS_MKNOD   20  /* data = path, w1 = kind, w2 = rdev -> a device node */
 #define VFS_MOUNT   22  /* data = mount point, w1 = disk -> attaches it       */
 #define VFS_UMOUNT  23  /* data = mount point -> detaches it                  */
+/* data = path, w1 = 1 to run it / 0 to map it as a library
+ *   -> w0 = size, handle[0] = an image carrying the rights that were earned
+ *
+ * The one request that exists because of who is answering it. Execute
+ * permission cannot be enforced anywhere else: execve is handed bytes and
+ * never learns which file they came from, so a check in libc is the process
+ * checking itself. Here the file, its mode bits and the caller's credentials
+ * are all in one place, and what comes back is a capability rather than an
+ * answer that has to be believed. */
+#define VFS_EXECIMAGE 24
+
 #define VFS_FSCK    21  /* w1 = repair -> w0 = problems, w1 = fixed, data =
                            the report as lines of text                      */
 

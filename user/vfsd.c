@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <proc.h>
 #include <stdlib.h>
+#include <object.h>
 #include <vfsd.h>
 
 /* --- the disk, one level down --------------------------------------------- */
@@ -2478,6 +2479,54 @@ static int may_access(const struct inode* in, unsigned caller, int want_write)
     return (in->mode & (want_write ? write_bit : read_bit)) != 0;
 }
 
+/* Whether `caller` may *run* this, which is a different question from whether
+ * it may read it - and the question no other part of the system is in a
+ * position to answer. Root may run anything with any execute bit set, and may
+ * not run something with none: an unexecutable file is not a program, whoever
+ * is asking. */
+static int may_execute(const struct inode* in, unsigned caller)
+{
+    const unsigned long creds = (unsigned long)__syscall(SYS_credsof, caller,
+                                                        0, 0, 0, 0);
+    const unsigned uid = (unsigned)creds;
+    const unsigned gid = (unsigned)(creds >> 32);
+    if (uid == 0)
+        return (in->mode & 0111) != 0;
+    unsigned bit;
+    if (in->uid == uid)      bit = 0100;
+    else if (in->gid == gid) bit = 0010;
+    else                     bit = 0001;
+    return (in->mode & bit) != 0;
+}
+
+/* A whole file, into one buffer. The read path above moves a chunk at a time
+ * because that is what a caller asked for; an image is all or nothing. */
+static long read_whole(const struct inode* in, unsigned char* into,
+                       unsigned long max)
+{
+    if (in->size > max)
+        return -1;
+    unsigned long done = 0;
+    while (done < in->size) {
+        const unsigned long fb = done / g_block_size;
+        const unsigned within = done % g_block_size;
+        unsigned long n = g_block_size - within;
+        if (n > in->size - done)
+            n = in->size - done;
+        const unsigned long phys = map_block(in, fb);
+        if (phys == 0) {
+            memset(into + done, 0, n);  /* a hole is zeros, not the end */
+            done += n;
+            continue;
+        }
+        if (read_block(phys, g_block) != 0)
+            return -1;
+        memcpy(into + done, g_block + within, n);
+        done += n;
+    }
+    return (long)done;
+}
+
 static unsigned caller_uid(unsigned caller)
 {
     return (unsigned)__syscall(SYS_credsof, caller, 0, 0, 0, 0);
@@ -2523,6 +2572,9 @@ int main(void)
 
     for (;;) {
         struct ipc_message m, r;
+        /* A capability handed to the caller, to be given up once the reply has
+         * carried it across. */
+        int passed = -1;
         unsigned from = 0;
         const int handle = ipc_recv(port, &m, &from);
         struct vfs_shared* out;
@@ -2821,6 +2873,61 @@ int main(void)
                     r.word[0] = (long)done;
                 }
             }
+        } else if (m.tag == VFS_EXECIMAGE) {
+            /* Static, and reused: one request is answered at a time, and a
+             * fresh allocation per program would grow this server's heap for
+             * every distinct binary ever run - its free() is a no-op. The
+             * pages of it that are never touched cost nothing, because a
+             * segment's .bss is reserved rather than allocated. */
+            static unsigned char g_image[4 * 1024 * 1024];
+            struct inode in;
+            const int running = m.word[1] != 0;
+
+            r.word[0] = -ENOENT;
+            r.handles = 0;
+            if (lookup((const char*)m.data, &in) != 0) {
+                if ((in.mode & 0xF000) != 0x8000) {
+                    r.word[0] = -EACCES;   /* only a regular file is a program */
+                } else if (!may_access(&in, from, 0) ||
+                           (running && !may_execute(&in, from))) {
+                    /* The whole point. A caller who may read this and not run
+                     * it is refused here, and there is nothing it can do on
+                     * its own side to change that. */
+                    r.word[0] = -EACCES;
+                } else if (in.size == 0 || in.size > sizeof(g_image)) {
+                    r.word[0] = -E2BIG;
+                } else {
+                    const unsigned long version =
+                        ((unsigned long)in.size << 24) ^ (unsigned long)in.mtime;
+                    long h = __syscall(SYS_imagefind, (long)m.data,
+                                       (long)version, 0, 0, 0);
+                    if (h < 0 &&
+                        read_whole(&in, g_image, sizeof(g_image)) == (long)in.size)
+                        h = __syscall(SYS_imagecreate, (long)m.data,
+                                      (long)version, (long)g_image,
+                                      (long)in.size, 0);
+                    if (h < 0) {
+                        r.word[0] = -EIO;
+                    } else {
+                        /* Narrowed to what was earned. A library is mapped and
+                         * read, never run: it needs no execute bit on disk and
+                         * does not get the right to be a program. */
+                        const unsigned mask =
+                            OBJ_READ | OBJ_MAP | (running ? OBJ_EXECUTE : 0u);
+                        const long narrow = __syscall(SYS_handledup, h,
+                                                      (long)mask, 0, 0, 0);
+                        __syscall(SYS_handleclose, h, 0, 0, 0, 0);
+                        if (narrow < 0) {
+                            r.word[0] = -EIO;
+                        } else {
+                            r.word[0] = (long)in.size;
+                            r.handle[0] = (int)narrow;
+                            r.handles = 1;
+                            passed = (int)narrow;
+                        }
+                    }
+                }
+            }
         } else if (m.tag == VFS_CREATE || m.tag == VFS_MKDIR) {
             r.word[0] = create((const char*)m.data, m.tag == VFS_MKDIR);
         } else if (m.tag == VFS_UNLINK) {
@@ -3109,5 +3216,12 @@ int main(void)
             r.word[0] = -EIO;
 
         ipc_reply(handle, &r);
+        /* The reply resolved it into the caller's table; this server has no
+         * further use for its own. Left open, a hundred and twenty-eight
+         * programs from now there would be no slots left. */
+        if (passed >= 0) {
+            __syscall(SYS_handleclose, passed, 0, 0, 0, 0);
+            passed = -1;
+        }
     }
 }

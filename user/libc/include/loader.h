@@ -118,6 +118,15 @@ struct loader_request {
     unsigned      auxc;
     struct loader_segment segs[LOADER_MAX_SEGMENTS];
     unsigned long aux[LOADER_MAX_AUX];
+    /* The handle on the program itself, last so that everything before it
+     * stays where the kernel already reads it.
+     *
+     * Separate from the segments because "may be run" is a fact about the
+     * program and not about a segment: a shared library's text is executable
+     * memory in every process that maps it, and is not a program. The kernel
+     * refuses the exec unless this handle carries the right to run. */
+    int           program_image;
+    int           reserved_tail;
 };
 
 /* Work out what running `path` means: its own segments, and - if it names an
@@ -139,9 +148,11 @@ int __loader_prepare(const char* path, struct loader_request* request,
 /* The three calls that hold and read images. Thin wrappers on syscalls, here
  * rather than in a header of their own because nothing but the loader has any
  * business with them. */
-int  __image_find(const char* name, unsigned long version);
-int  __image_create(const char* name, unsigned long version,
-                    const void* bytes, unsigned long size);
-int  __image_read(int id, unsigned long offset, void* into, unsigned long bytes);
+int  __image_read(int handle, unsigned long offset, void* into,
+                  unsigned long bytes);
+
+/* An image of `path` from the filesystem server, and the rights that came with
+ * it. See user/libc/fs.c. */
+int  __vfs_image(const char* path, int running, long* size);
 
 #endif /* _LOADER_H */

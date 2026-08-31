@@ -407,9 +407,30 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
 
 void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
           char** envp, u64 entry_point, const void* user_segments, u32 count,
-          const u64* aux, u32 auxc)
+          const u64* aux, u32 auxc, i32 program_image)
 {
     const vmm::AddressSpace old_space = scheduler::current_task_space();
+
+    /* May this process run this program at all?
+     *
+     * The one check that could not be made anywhere else. The kernel is handed
+     * bytes and never learns which file they came from, so it cannot look at a
+     * mode bit - but it can insist that whoever is asking holds a capability
+     * saying they were allowed to. The filesystem server issues that, having
+     * seen the file, its mode and the caller's credentials together; a caller
+     * who may read a program but not run it is refused there and cannot mint
+     * the right on its own side.
+     *
+     * A program with no image at all is refused too. That path existed while
+     * libc still loaded programs itself, and leaving it open would be leaving
+     * the check optional. */
+    if (object::look(scheduler::current_tgid(),
+                     static_cast<object::Handle>(program_image),
+                     object::Type::Image,
+                     object::kExecute | object::kMap) == nullptr) {
+        frame.rax = static_cast<u64>(-1);
+        return;
+    }
 
     /* The image and argv are in the caller's space, which build_image switches
      * away from, so both are copied into the kernel first - its memory is

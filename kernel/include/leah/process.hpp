@@ -34,6 +34,6 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
 // blocked as somebody else's client.
 void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
           char** envp, u64 entry_point, const void* segments, u32 count,
-          const u64* aux, u32 auxc);
+          const u64* aux, u32 auxc, i32 program_image);
 
 } // namespace process

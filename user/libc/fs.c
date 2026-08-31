@@ -230,6 +230,37 @@ static int vfs_call(unsigned tag, const char* path, long w1, long w2,
     return 0;
 }
 
+/* Ask the filesystem for an image of `path`, and the right to use it.
+ *
+ * This is where execute permission is finally enforced. The server has the
+ * file, its mode bits and the caller's credentials in one place; what comes
+ * back is a capability, not an answer this side could choose to disbelieve.
+ * `running` distinguishes a program from a library: a library is mapped and
+ * read and never run, so it needs no execute bit and is not given the right to
+ * be a program.
+ *
+ * Returns a handle, or -1 with errno set. `size` is filled in on success.
+ */
+int __vfs_image(const char* path, int running, long* size)
+{
+    struct ipc_message reply;
+    if (vfs_call(VFS_EXECIMAGE, path, running ? 1 : 0, 0, &reply) != 0) {
+        errno = EIO;
+        return -1;
+    }
+    if (reply.word[0] < 0) {
+        errno = (int)-reply.word[0];
+        return -1;
+    }
+    if (reply.handles < 1) {
+        errno = EIO;
+        return -1;
+    }
+    if (size != 0)
+        *size = (long)reply.word[0];
+    return reply.handle[0];
+}
+
 /* --- paths -------------------------------------------------------------------
  *
  * Resolution moved out with the table, because a relative path only means

@@ -1160,7 +1160,7 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         /* execve(image, bytes, argv, entry, segments, count). The caller read
          * the program *and* worked out what its segments are; the kernel maps
          * what it is told and knows nothing about the format they came in. */
-        if (!user_range_ok(frame->r10, 16 + 16 * 40 + 32 * 8)) {
+        if (!user_range_ok(frame->r10, 16 + 16 * 40 + 32 * 8 + 8)) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
@@ -1172,6 +1172,9 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
              * length is the high half of the same word the count is in. */
             const u32 auxc = static_cast<u32>(request[1] >> 32);
             const u64* aux = request + 2 + (16 * 40) / sizeof(u64);
+            /* The handle on the program, on the end of the request. */
+            const i32 program_image =
+                *reinterpret_cast<const i32*>(aux + 32);
             /* r8 is the environment, which may be null - a program started
              * with none is a program with none, not an error. */
             process::exec(*frame, reinterpret_cast<const u8*>(frame->rdi),
@@ -1180,7 +1183,7 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
                           reinterpret_cast<char**>(frame->r8),
                           entry_point,
                           reinterpret_cast<const u8*>(frame->r10) + 16, count,
-                          aux, auxc > 32 ? 0 : auxc);
+                          aux, auxc > 32 ? 0 : auxc, program_image);
         }
         // A new image knows nothing of the old one's handlers, and their
         // addresses no longer mean anything, so dispositions go back to default.

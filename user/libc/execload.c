@@ -153,58 +153,30 @@ static long file_offset_of(const struct source* s, unsigned long vaddr)
 
 /* --- getting hold of one -------------------------------------------------- */
 
-/* What makes this the same file as last time. Size and modification time
- * together: a rebuild changes both, and nothing else here changes either. */
-static unsigned long version_of(const struct stat* st)
+/* An image of `path`, and the rights that came with it.
+ *
+ * Nothing is read here any more, and that is the point rather than an
+ * optimisation. This used to stat the file, open it, read all of it and hand
+ * the bytes to the kernel - which meant the only place execute permission
+ * could be checked was here, in the process's own library, where the process
+ * could simply not call it. The filesystem server issues the image now, having
+ * seen the file and the caller's credentials together, and what comes back is
+ * a capability that cannot be minted on this side.
+ *
+ * `running` separates the program from what it links against. A library is
+ * mapped and read, never run: it needs no execute bit on disk and does not
+ * receive the right to be a program.
+ */
+static int obtain(const char* path, int running, struct source* out)
 {
-    return ((unsigned long)st->st_size << 24) ^ (unsigned long)st->st_mtime;
-}
-
-/* Held, or read and then held. On the path that reads, the bytes stay around
- * as well - this exec is going to parse them and there is no reason to ask for
- * them back through the kernel. */
-static int obtain(const char* path, struct source* out)
-{
-    struct stat st;
-    if (stat(path, &st) != 0)
+    long size = 0;
+    const int handle = __vfs_image(path, running, &size);
+    if (handle < 0)
         return -1;
-    if (st.st_type != S_IFREG || st.st_size == 0) {
-        errno = ENOEXEC;
-        return -1;
-    }
-
     out->bytes = 0;
-    out->size = (long)st.st_size;
+    out->size = size;
     out->base = 0;
-
-    const unsigned long version = version_of(&st);
-    out->image = __image_find(path, version);
-    if (out->image >= 0)
-        return 0;                       /* already held: nothing is read */
-
-    const int fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return -1;
-    void* buffer = malloc((size_t)st.st_size);
-    if (buffer == 0) {
-        close(fd);
-        errno = ENOMEM;
-        return -1;
-    }
-    const long got = read(fd, buffer, (unsigned long)st.st_size);
-    close(fd);
-    if (got != (long)st.st_size) {
-        errno = EIO;
-        return -1;
-    }
-    out->bytes = buffer;
-    out->image = __image_create(path, version, buffer, (unsigned long)got);
-    if (out->image < 0) {
-        /* The cache is full of things bigger than it, or this file is. Not an
-         * error: the bytes are here, and a segment that names no image is
-         * copied from the blob exactly as it used to be. */
-        errno = 0;
-    }
+    out->image = handle;
     return 0;
 }
 
@@ -289,7 +261,7 @@ static int add_needed(const struct source* of, struct source* pieces,
 
         char path[LOADER_NAME_MAX + 16];
         snprintf(path, sizeof(path), "%s/%s", LOADER_LIB_DIR, name);
-        if (obtain(path, &pieces[*count]) != 0)
+        if (obtain(path, 0, &pieces[*count]) != 0)
             return -1;
         short_name(path, pieces[*count].name);
         ++*count;
@@ -379,13 +351,15 @@ int __loader_prepare(const char* path, struct loader_request* request,
 {
     request->count = 0;
     request->auxc = 0;
+    request->program_image = -1;
+    request->reserved_tail = 0;
     *blob = 0;
     *blob_size = 0;
 
     struct source pieces[LOADER_MAX_OBJECTS + 1];
     int count = 0;
 
-    if (obtain(path, &pieces[0]) != 0)
+    if (obtain(path, 1, &pieces[0]) != 0)
         return -1;
     {
         unsigned char ident[6];
@@ -397,6 +371,7 @@ int __loader_prepare(const char* path, struct loader_request* request,
         }
     }
     short_name("program", pieces[0].name);
+    request->program_image = pieces[0].image;
     ++count;
 
     /* The interpreter, if it has one. A program with no PT_INTERP is complete
@@ -428,17 +403,13 @@ int __loader_prepare(const char* path, struct loader_request* request,
         }
         request->entry = u64_of(&pieces[0], 24);
         fill_aux(request, &pieces[0]);
-        if (pieces[0].image < 0) {
-            *blob = (void*)pieces[0].bytes;
-            *blob_size = pieces[0].size;
-        }
         return 0;
     }
 
     pieces[0].base =
         u16_of(&pieces[0], 16) == ET_DYN ? LOADER_BASE_PROGRAM : 0;
 
-    if (obtain(interp, &pieces[count]) != 0)
+    if (obtain(interp, 0, &pieces[count]) != 0)
         return -1;
     /* The interpreter is linked at a fixed address and is the one object here
      * that is not moved. See user/ld.ld. */
@@ -495,9 +466,6 @@ int __loader_prepare(const char* path, struct loader_request* request,
      * warm cache that is the table alone - a few hundred bytes, where an exec
      * used to hand over a megabyte. */
     long total = (long)sizeof(table);
-    for (int i = 0; i < count; ++i)
-        if (pieces[i].image < 0)
-            total += (pieces[i].size + 15) & ~15L;
 
     unsigned char* out = malloc((size_t)total);
     if (out == 0) {
@@ -506,16 +474,9 @@ int __loader_prepare(const char* path, struct loader_request* request,
     }
 
     long at = 0;
-    for (int i = 0; i < count; ++i) {
-        if (pieces[i].image < 0) {
-            memcpy(out + at, pieces[i].bytes, (size_t)pieces[i].size);
-            if (place(request, &pieces[i], (unsigned long)at) != 0)
-                return -1;
-            at += (pieces[i].size + 15) & ~15L;
-        } else if (place(request, &pieces[i], 0) != 0) {
+    for (int i = 0; i < count; ++i)
+        if (place(request, &pieces[i], 0) != 0)
             return -1;
-        }
-    }
 
     memcpy(out + at, &table, sizeof(table));
     if (request->count >= LOADER_MAX_SEGMENTS) {

@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <proc.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <stdlib.h>
 #include <thread.h>
@@ -219,6 +222,51 @@ int main(void)
     }
 
     cost_of_processes(12);
+
+    /* Execute permission, checked where it can be.
+     *
+     * Run from here rather than from a terminal window because this is a
+     * property of exec, not of the desktop, and the console is the one path
+     * that does not depend on a window server being up. */
+    {
+        char* const cp[] = { (char*)"cp", (char*)"/bin/echo",
+                             (char*)"/tmp/prog", 0 };
+        int pid = fork();
+        if (pid == 0) { execve("/bin/cp", cp, 0); exit(127); }
+        wait(0);
+
+        chmod("/tmp/prog", 0644);
+        pid = fork();
+        if (pid == 0) {
+            char* const run[] = { (char*)"/tmp/prog", (char*)"RAN", 0 };
+            execve("/tmp/prog", run, 0);
+            exit(42);                   /* exec refused, as it should be */
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        printf("noexec: exec refused = %s\n",
+               WEXITSTATUS(status) == 42 ? "yes" : "NO");
+
+        /* Still perfectly readable: what was withheld is the right to run. */
+        int fd = open("/tmp/prog", O_RDONLY);
+        char head[4];
+        printf("noexec: still readable = %s\n",
+               (fd >= 0 && read(fd, head, 4) == 4) ? "yes" : "NO");
+        if (fd >= 0) close(fd);
+
+        chmod("/tmp/prog", 0755);
+        pid = fork();
+        if (pid == 0) {
+            char* const run[] = { (char*)"/tmp/prog", (char*)"RAN", 0 };
+            execve("/tmp/prog", run, 0);
+            exit(42);
+        }
+        status = 0;
+        waitpid(pid, &status, 0);
+        printf("exec: with the bit set = %s\n",
+               WEXITSTATUS(status) == 42 ? "NO" : "yes");
+        fflush(stdout);
+    }
 
     printf("about to call gettid\n");
     fflush(stdout);

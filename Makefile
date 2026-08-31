@@ -496,6 +496,7 @@ check: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	@python3 tools/vm/pty.py
 	@python3 tools/vm/sockets.py
 	@python3 tools/vm/editor.py
+	@python3 tools/vm/dynprobe.py
 	@python3 tools/vm/scrolled.py
 	@python3 tools/vm/stride.py
 	@python3 tools/vm/zones.py
