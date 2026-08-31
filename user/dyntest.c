@@ -268,6 +268,36 @@ int main(void)
         fflush(stdout);
     }
 
+    /* A file, mapped rather than read. */
+    {
+        const int fd = open("/etc/passwd", O_RDONLY);
+        char first[16];
+        long got = fd < 0 ? -1 : read(fd, first, sizeof(first));
+        if (fd >= 0) lseek(fd, 0, SEEK_SET);
+        char* p = fd < 0 ? MAP_FAILED
+                         : mmap(0, 4096, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE, fd, 0);
+        if (p == MAP_FAILED || got <= 0) {
+            printf("mapfile: mapped = NO\n");
+        } else {
+            int same = 1;
+            for (long i = 0; i < got; ++i)
+                if (p[i] != first[i]) same = 0;
+            printf("mapfile: mapped = yes, contents match = %s\n",
+                   same ? "yes" : "NO");
+            /* Private: writing changes this copy and not the file. */
+            p[0] = 'Z';
+            const int again = open("/etc/passwd", O_RDONLY);
+            char check = 0;
+            read(again, &check, 1);
+            close(again);
+            printf("mapfile: write stayed private = %s\n",
+                   (p[0] == 'Z' && check == first[0]) ? "yes" : "NO");
+        }
+        if (fd >= 0) close(fd);
+        fflush(stdout);
+    }
+
     printf("about to call gettid\n");
     fflush(stdout);
     printf("gettid = %d, getpid = %d\n", (int)gettid(), (int)getpid());

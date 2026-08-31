@@ -91,6 +91,7 @@
 #define SYS_handleclose 99
 #define SYS_handledup   100
 #define SYS_handleinfo  101
+#define SYS_mapfile     102
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

@@ -1822,3 +1822,15 @@ int dup(int oldfd)
     g_fds[fd] = g_fds[oldfd];
     return fd;
 }
+
+/* The path a descriptor names, or 0 if it does not name one.
+ *
+ * Only a K_FILE has one: a pipe, a terminal and a socket are not files and
+ * have nothing to map. Used by mmap, which is given a descriptor and needs the
+ * name to ask the filesystem for an image of it. */
+const char* __fd_path(int fd)
+{
+    if (!valid(fd) || g_fds[fd].kind != K_FILE)
+        return 0;
+    return g_fds[fd].path;
+}

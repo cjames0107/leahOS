@@ -1458,6 +1458,67 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         break;
     }
 
+    case MapFile: {
+        /* A file, mapped from the pages the kernel already holds for it.
+         *
+         * This is what mmap could not do: the anonymous path is all it had,
+         * because file-backed mapping needs somewhere for a file's pages to
+         * live that is not one process's copy of them. Images are that, and
+         * they were built for exec - a program's text has been mapped rather
+         * than copied since the image cache landed. This is the same mechanism
+         * offered to anyone with a handle.
+         *
+         * Private, always. A shared writable mapping would have to write back
+         * to the file, and there is nothing here that does: the image is a
+         * snapshot taken when it was read. So a write gets a private copy
+         * through the ordinary copy-on-write path, which is what MAP_PRIVATE
+         * means and is what a program mapping a file to read it wants.
+         */
+        void* held = object::look(scheduler::current_tgid(),
+                                  static_cast<object::Handle>(frame->r10),
+                                  object::Type::Image,
+                                  object::kRead | object::kMap);
+        if (held == nullptr || frame->rsi == 0) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const u64 offset = frame->r8 & ~(vmm::kPageSize - 1);
+        const u64 bytes  = (frame->rsi + vmm::kPageSize - 1) &
+                           ~(vmm::kPageSize - 1);
+        const u64 base   = scheduler::current_mmap_next();
+        if (base + bytes > memory::kUserMmapEnd) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+
+        u64 flags = vmm::User | vmm::CopyOnWrite;
+        if ((frame->rdx & 4) == 0)          /* PROT_EXEC */
+            flags |= vmm::NoExecute;
+
+        bool ok = true;
+        u64 done = 0;
+        for (; done < bytes && ok; done += vmm::kPageSize) {
+            const u64 at = offset + done;
+            if (image::frame_at(held, at) == 0)
+                break;                      /* past the end: stop, do not fail */
+            if (!image::share_frame(held, at)) {
+                ok = false;
+                break;
+            }
+            /* Read-only and marked copy-on-write, so the first write takes a
+             * private copy and the file's own pages are never altered. */
+            if (!vmm::map(base + done, image::frame_at(held, at), flags))
+                ok = false;
+        }
+        if (!ok || done == 0) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        scheduler::set_current_mmap_next(base + bytes);
+        frame->rax = base;
+        break;
+    }
+
     case Power: {
         // Stopping the machine is root's alone: any process being able to end
         // everyone's session is not a permission, it is an accident waiting to

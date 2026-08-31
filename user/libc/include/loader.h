@@ -155,4 +155,7 @@ int  __image_read(int handle, unsigned long offset, void* into,
  * it. See user/libc/fs.c. */
 int  __vfs_image(const char* path, int running, long* size);
 
+/* The path a descriptor names, or 0 for one that names no file. */
+const char* __fd_path(int fd);
+
 #endif /* _LOADER_H */

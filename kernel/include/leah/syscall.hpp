@@ -123,6 +123,7 @@ enum Number : u64 {
     HandleClose = 99,  // give up a capability
     HandleDup   = 100, // a second one, with rights narrowed
     HandleInfo  = 101, // what this handle is, and what it permits
+    MapFile     = 102, // map a held image's pages into this address space
 };
 
 // What Power is being asked to do. Mirrored in user/libc/include/proc.h.
