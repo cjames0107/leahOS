@@ -1,6 +1,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
+#include <leah/lock.hpp>
 #include <leah/heap.hpp>
 #include <leah/keyboard.hpp>
 #include <leah/pty.hpp>
@@ -29,8 +30,31 @@ struct Pipe {
     usize count;
     int   readers;
     int   writers;
+    /* How many calls are inside this pipe right now.
+     *
+     * The descriptor table cannot be locked across a read that blocks - the
+     * task would sleep holding a spin lock, which the scheduler asserts
+     * against. So the table lock is held only long enough to turn a descriptor
+     * number into an object, and this is what stops the object being freed out
+     * from under the call that is using it. A close while somebody is inside
+     * marks it and the last one out does the freeing. */
+    int   busy;
+    bool  doomed;
 };
 
+/* No lock here yet, and the reason is worth writing down.
+ *
+ * The structure below is ready for one: read and write resolve a descriptor,
+ * take a reference, and only then do the part that can block. What is not
+ * ready is the interaction with the big kernel lock, which has no rank. Every
+ * syscall takes it first and a ranked lock second; but scheduler::wake, called
+ * from inside a subsystem that is holding a ranked lock, takes it second - and
+ * that is only safe while it is recursive on the same processor. Closing a
+ * pipe does exactly that and deadlocked two processors on the first boot.
+ *
+ * The fix is the same step S2 ends on: the big lock has to become a ranked
+ * lock of its own, lowest and taken first, so the ordering is total rather
+ * than nearly total. Until then this table rides on it as it always has. */
 u64 read_channel(Pipe* p)  { return reinterpret_cast<u64>(p); }
 u64 write_channel(Pipe* p) { return reinterpret_cast<u64>(p) + 1; }
 
@@ -163,8 +187,27 @@ void release_pipe(Descriptor& d)
                 g_named[i].used = false;
                 g_named[i].pipe = nullptr;
             }
-        kfree(p);
+        /* Not while a call is inside it. The last one out frees it instead -
+         * see drop_pipe. */
+        if (p->busy == 0)
+            kfree(p);
+        else
+            p->doomed = true;
     }
+}
+
+/* Take and give back a reference for the duration of one call.
+ *
+ * Both are called with the table lock held, which is what makes "still open"
+ * and "reference taken" one step rather than two. */
+void hold_pipe(Pipe* p) { if (p != nullptr) ++p->busy; }
+
+void drop_pipe(Pipe* p)
+{
+    if (p == nullptr)
+        return;
+    if (--p->busy == 0 && p->doomed)
+        kfree(p);
 }
 
 int alloc_fd()
@@ -310,57 +353,104 @@ i64 adopt_pty(void* object, bool master)
     return fd;
 }
 
+/* Resolve, then let go, then do the work.
+ *
+ * The table lock cannot be held across the call below: every one of these can
+ * block, and a task that sleeps holding a spin lock leaves other processors
+ * waiting on something that is not running - which the scheduler now asserts
+ * against outright. So the lock covers only the lookup, and a reference taken
+ * in the same breath is what keeps the object alive afterwards.
+ *
+ * That reference is the whole design. Without it, another thread closing this
+ * descriptor while the read is asleep would free the pipe under it. The pty
+ * needs no separate one: its ends are already counted, and it is those counts
+ * that decide when it goes.
+ */
 i64 read(int fd, void* buffer, usize count)
 {
-    if (!valid_fd(fd))
-        return -1;
-    Descriptor& d = table().fds[fd];
-
-    switch (d.kind) {
-    case Kind::ConsoleIn:
-        return read_console(buffer, count);
-
-
-    case Kind::Pipe:
-        if ((d.flags & kRead) == 0)
+    Kind  kind   = Kind::None;
+    void* object = nullptr;
+    {
+        if (!valid_fd(fd))
             return -1;
-        return pipe_read(static_cast<Pipe*>(d.pipe), buffer, count);
+        Descriptor& d = table().fds[fd];
+        kind = d.kind;
+        object = d.pipe;
+        if (kind == Kind::Pipe) {
+            if ((d.flags & kRead) == 0)
+                return -1;
+            hold_pipe(static_cast<Pipe*>(object));
+        }
+    }
 
+    i64 result;
+    switch (kind) {
+    case Kind::ConsoleIn:
+        result = read_console(buffer, count);
+        break;
+    case Kind::Pipe:
+        result = pipe_read(static_cast<Pipe*>(object), buffer, count);
+        break;
     case Kind::PtyMaster:
     case Kind::PtySlave:
-        return pty::read(d.pipe, d.kind == Kind::PtyMaster, buffer, count);
-
+        result = pty::read(object, kind == Kind::PtyMaster, buffer, count);
+        break;
     default:
-        return -1;
+        result = -1;
+        break;
     }
+
+    if (kind == Kind::Pipe) {
+        drop_pipe(static_cast<Pipe*>(object));
+    }
+    return result;
 }
 
 i64 write(int fd, const void* buffer, usize count)
 {
-    if (!valid_fd(fd))
-        return -1;
-    Descriptor& d = table().fds[fd];
+    Kind  kind   = Kind::None;
+    void* object = nullptr;
+    {
+        if (!valid_fd(fd))
+            return -1;
+        Descriptor& d = table().fds[fd];
+        kind = d.kind;
+        object = d.pipe;
+        if (kind == Kind::Pipe) {
+            if ((d.flags & kWrite) == 0)
+                return -1;
+            hold_pipe(static_cast<Pipe*>(object));
+        }
+    }
 
-    switch (d.kind) {
+    i64 result;
+    switch (kind) {
     case Kind::ConsoleOut: {
         const char* text = static_cast<const char*>(buffer);
         for (usize i = 0; i < count; ++i)
             console::put(text[i]);
-        return static_cast<i64>(count);
+        result = static_cast<i64>(count);
+        break;
     }
 
     case Kind::Pipe:
-        if ((d.flags & kWrite) == 0)
-            return -1;
-        return pipe_write(static_cast<Pipe*>(d.pipe), buffer, count);
+        result = pipe_write(static_cast<Pipe*>(object), buffer, count);
+        break;
 
     case Kind::PtyMaster:
     case Kind::PtySlave:
-        return pty::write(d.pipe, d.kind == Kind::PtyMaster, buffer, count);
+        result = pty::write(object, kind == Kind::PtyMaster, buffer, count);
+        break;
 
     default:
-        return -1;
+        result = -1;
+        break;
     }
+
+    if (kind == Kind::Pipe) {
+        drop_pipe(static_cast<Pipe*>(object));
+    }
+    return result;
 }
 
 /* Open one end of the FIFO named by `key`.
