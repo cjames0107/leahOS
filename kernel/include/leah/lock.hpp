@@ -23,6 +23,11 @@
 // so is taken first; the console is called from inside everything and so is
 // taken last; memory sits between, because a page table walk allocates frames
 // and never the other way round.
+//
+// Handles come before images because that is the direction things are looked
+// up in: a process presents a handle, the handle names an image, and never the
+// reverse. Ranks are spaced so that something can be inserted between two of
+// them without renumbering the rest.
 
 namespace sync {
 
@@ -31,7 +36,9 @@ enum class Rank : u32 {
     Scheduler = 10,     // the task table and the run queue
     Ipc       = 20,     // ports and requests in flight
     Files     = 30,     // pipes, the console device, pseudo-terminals
-    Objects   = 40,     // shared memory, program images, handle tables
+    Handles   = 40,     // per-process capability tables
+    Image     = 44,     // held program images
+    Shm       = 48,     // shared memory segments
     Vmm       = 50,     // address spaces and page tables
     Pmm       = 60,     // the physical frame bitmap
     Console   = 70,     // printing, which anything may do while holding others

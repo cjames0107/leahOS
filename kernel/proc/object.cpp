@@ -2,6 +2,7 @@
 
 #include <leah/object.hpp>
 #include <leah/heap.hpp>
+#include <leah/lock.hpp>
 #include <leah/string.hpp>
 
 namespace object {
@@ -36,6 +37,16 @@ constexpr usize kMaxTables = 96;        // matches the task limit
  * process ever held a handle - which, for a while yet, most will not. The
  * table is made the first time a process is given something. */
 Table* g_tables[kMaxTables];
+
+/* One lock over every process's table rather than one per process.
+ *
+ * A per-process lock would be finer and is the obvious thing to want, but the
+ * operations that matter here span two of them - transferring a capability
+ * resolves it in the sender's table and installs it in the receiver's - and
+ * two locks of equal rank cannot both be held. One lock says so honestly; the
+ * split, if it is ever needed, wants a rank per direction and a rule about
+ * which way round. */
+sync::RankedLock g_lock(sync::Rank::Handles, "handles");
 
 Table* find(u32 pid)
 {
@@ -106,6 +117,12 @@ void init()
 
 Handle give(u32 pid, Type type, void* pointer, u32 rights)
 {
+    sync::Guard guard(g_lock);
+    return give_locked(pid, type, pointer, rights);
+}
+
+Handle give_locked(u32 pid, Type type, void* pointer, u32 rights)
+{
     if (type == Type::None)
         return kNoHandle;
     Table* table = find_or_make(pid);
@@ -131,6 +148,7 @@ Handle give(u32 pid, Type type, void* pointer, u32 rights)
 
 void* look(u32 pid, Handle handle, Type type, u32 needed)
 {
+    sync::Guard guard(g_lock);
     const Entry* entry = decode(find(pid), handle);
     if (entry == nullptr || entry->type != type)
         return nullptr;
@@ -143,18 +161,21 @@ void* look(u32 pid, Handle handle, Type type, u32 needed)
 
 u32 rights_of(u32 pid, Handle handle)
 {
+    sync::Guard guard(g_lock);
     const Entry* entry = decode(find(pid), handle);
     return entry != nullptr ? entry->rights : 0;
 }
 
 Type type_of(u32 pid, Handle handle)
 {
+    sync::Guard guard(g_lock);
     const Entry* entry = decode(find(pid), handle);
     return entry != nullptr ? entry->type : Type::None;
 }
 
 Handle duplicate(u32 pid, Handle handle, u32 mask)
 {
+    sync::Guard guard(g_lock);
     Table* table = find(pid);
     const Entry* entry = decode(table, handle);
     if (entry == nullptr || (entry->rights & kDuplicate) == 0)
@@ -162,11 +183,12 @@ Handle duplicate(u32 pid, Handle handle, u32 mask)
     /* Narrowed, never widened. A mask asking for a right the original does not
      * hold simply does not get it - which is what makes handing a handle to
      * something less trusted a safe thing to do. */
-    return give(pid, entry->type, entry->pointer, entry->rights & mask);
+    return give_locked(pid, entry->type, entry->pointer, entry->rights & mask);
 }
 
 bool close(u32 pid, Handle handle)
 {
+    sync::Guard guard(g_lock);
     Entry* entry = decode(find(pid), handle);
     if (entry == nullptr)
         return false;
@@ -178,6 +200,7 @@ bool close(u32 pid, Handle handle)
 
 void close_all(u32 pid)
 {
+    sync::Guard guard(g_lock);
     Table* table = find(pid);
     if (table == nullptr)
         return;
@@ -186,6 +209,7 @@ void close_all(u32 pid)
 
 void inherit(u32 from_pid, u32 to_pid)
 {
+    sync::Guard guard(g_lock);
     const Table* from = find(from_pid);
     if (from == nullptr)
         return;

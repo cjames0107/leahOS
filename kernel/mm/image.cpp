@@ -3,6 +3,7 @@
 #include <leah/console.hpp>
 #include <leah/heap.hpp>
 #include <leah/image.hpp>
+#include <leah/lock.hpp>
 #include <leah/memory.hpp>
 #include <leah/pmm.hpp>
 #include <leah/scheduler.hpp>
@@ -24,6 +25,11 @@ struct Image {
 
 Image g_images[kMaxImages];
 u64   g_clock;
+
+/* Taken below the handle table and above the frame allocator, which is the
+ * order things actually happen in: a process presents a handle, the handle
+ * names an image, and mapping the image allocates frames. */
+sync::RankedLock g_lock(sync::Rank::Image, "image");
 
 /* An image's frames are private to the image until somebody maps them, so the
  * pages beyond the last byte are zero - which is what a program with a
@@ -117,6 +123,12 @@ void init()
 
 void* find(const char* name, u64 version)
 {
+    sync::Guard guard(g_lock);
+    return find_locked(name, version);
+}
+
+void* find_locked(const char* name, u64 version)
+{
     for (usize i = 0; i < kMaxImages; ++i) {
         Image& image = g_images[i];
         if (!image.used || image.version != version || !same_name(image, name))
@@ -131,10 +143,11 @@ void* create(const char* name, u64 version, const u8* bytes, u64 size)
 {
     if (size == 0 || size > kMaxBytes)
         return nullptr;
+    sync::Guard guard(g_lock);
 
     /* Already here at this version: the caller raced another exec of the same
      * program, which is the ordinary case when a shell starts two at once. */
-    void* existing = find(name, version);
+    void* existing = find_locked(name, version);
     if (existing != nullptr)
         return existing;
 
@@ -171,11 +184,18 @@ bool valid(void* image) { return of(image) != nullptr; }
 
 u64 size_of(void* pointer)
 {
+    sync::Guard guard(g_lock);
     const Image* image = of(pointer);
     return image != nullptr ? image->bytes : 0;
 }
 
 paddr_t frame_at(void* pointer, u64 offset)
+{
+    sync::Guard guard(g_lock);
+    return frame_at_locked(pointer, offset);
+}
+
+paddr_t frame_at_locked(void* pointer, u64 offset)
 {
     const Image* image = of(pointer);
     if (image == nullptr || (offset & (vmm::kPageSize - 1)) != 0)
@@ -186,12 +206,14 @@ paddr_t frame_at(void* pointer, u64 offset)
 
 bool share_frame(void* pointer, u64 offset)
 {
-    const paddr_t frame = frame_at(pointer, offset);
+    sync::Guard guard(g_lock);
+    const paddr_t frame = frame_at_locked(pointer, offset);
     return frame != 0 && pmm::share(frame);
 }
 
 bool read(void* pointer, u64 offset, void* into, u64 bytes)
 {
+    sync::Guard guard(g_lock);
     const Image* image = of(pointer);
     if (image == nullptr || offset > image->bytes ||
         bytes > image->bytes - offset)

@@ -86,6 +86,10 @@ void init();
 // full.
 Handle give(u32 pid, Type type, void* pointer, u32 rights);
 
+// The same, for callers that already hold the table's lock. Exists because
+// duplicate() is written in terms of give() and would otherwise take it twice.
+Handle give_locked(u32 pid, Type type, void* pointer, u32 rights);
+
 // Look one up. Returns nullptr unless the handle names a live object of
 // exactly `type` and carries every right in `needed`.
 void* look(u32 pid, Handle handle, Type type, u32 needed);

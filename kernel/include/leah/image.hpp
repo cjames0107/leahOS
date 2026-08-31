@@ -50,6 +50,7 @@ void init();
 // The image called `name` at `version`, or nullptr. A name that is known at a
 // different version is a different image and is not returned.
 void* find(const char* name, u64 version);
+void* find_locked(const char* name, u64 version);
 
 // Keep a copy of `bytes` under `name`. Returns the image, or nullptr if it
 // will not fit. `bytes` is in the caller's address space and is copied here.
@@ -61,6 +62,7 @@ u64  size_of(void* image);
 // The frame holding byte `offset`, which must be page aligned. Returns 0 past
 // the end. Does not take a reference - see share_frame.
 paddr_t frame_at(void* image, u64 offset);
+paddr_t frame_at_locked(void* image, u64 offset);
 
 // Take a reference on that frame, for a mapping about to be made of it.
 bool share_frame(void* image, u64 offset);
