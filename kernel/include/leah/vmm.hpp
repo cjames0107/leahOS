@@ -33,7 +33,16 @@ enum Flags : u64 {
     // copy-on-write: the whole point of the segment is that writes are seen by
     // everyone mapping it, and copying it on the first write would quietly turn
     // one shared page into two private ones.
-    Shared       = 1ull << 10,
+    //
+    // Bit 11, and it was bit 10 - the same bit as Lazy - until 2026-08-31. The
+    // comment above them says bits 9 to 11 are the three the CPU ignores, and
+    // three meanings were given two bits. Nothing has been proved to fail
+    // because of it: every path that reads one of them checks Present first,
+    // and Present is what tells the two apart. But "reserved" and "shared by
+    // several address spaces" are opposite facts sharing one bit, and the next
+    // person to add a check that does not look at Present first would find out
+    // the hard way, intermittently.
+    Shared       = 1ull << 11,
     NoExecute    = 1ull << 63,
 };
 

@@ -28,17 +28,31 @@
 // up in: a process presents a handle, the handle names an image, and never the
 // reverse. Ranks are spaced so that something can be inserted between two of
 // them without renumbering the rest.
+//
+// The scheduler was first in an earlier version of this list, on the reasoning
+// that it is entered from everywhere. That is true and it is the wrong way
+// round. What decides the order is who calls whom *while holding*: a pipe with
+// nothing in it holds its own lock, checks, and then asks the scheduler to
+// block - so the blocking subsystems come before the scheduler. And the
+// scheduler, tearing a process down, calls into handles and shared memory
+// while holding its own - so those come after it. The rank order is the call
+// graph, not an intuition about importance.
+//
+// Note that a rank is only compared against what is held *now*. Taking a lock,
+// releasing it, and then taking a lower-ranked one is fine and common: ipc's
+// reply resolves capabilities (handles, 30) and then wakes the caller
+// (scheduler, 20), and the two never overlap.
 
 namespace sync {
 
 enum class Rank : u32 {
     None      = 0,
-    Scheduler = 10,     // the task table and the run queue
-    Ipc       = 20,     // ports and requests in flight
-    Files     = 30,     // pipes, the console device, pseudo-terminals
-    Handles   = 40,     // per-process capability tables
-    Image     = 44,     // held program images
-    Shm       = 48,     // shared memory segments
+    Files     = 10,     // pipes, the console device, pseudo-terminals
+    Ipc       = 15,     // ports and requests in flight
+    Scheduler = 20,     // the task table and the run queue
+    Handles   = 30,     // per-process capability tables
+    Image     = 34,     // held program images
+    Shm       = 38,     // shared memory segments
     Vmm       = 50,     // address spaces and page tables
     Pmm       = 60,     // the physical frame bitmap
     Console   = 70,     // printing, which anything may do while holding others
