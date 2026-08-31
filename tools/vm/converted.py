@@ -32,6 +32,10 @@ def body(t):
     t.expect("head -n 3 /etc/passwd 2> /dev/console | wc -l", "3")
     t.expect("head -n3 /etc/passwd | wc -l", "3")
     t.expect("tail -n 2 /etc/passwd | wc -l", "2")
+    # The obsolescent count. It is what fingers type and what old scripts are
+    # written in, and it used to be answered with "unknown option -1".
+    t.expect("head -1 /etc/passwd | wc -l", "1")
+    t.expect("tail -2 /etc/passwd | wc -l", "2")
 
     # --- unknown options are refused, once and in the program's name --------
     t.expect("wc -Z /etc/passwd 2> /dev/console", "wc: unknown option -Z")

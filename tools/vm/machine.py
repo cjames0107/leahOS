@@ -60,7 +60,7 @@ KEYMAP = {
 
 
 class Machine:
-    def __init__(self, cpus=1, mem="512M", may_reset=False):
+    def __init__(self, cpus=1, mem="512M", may_reset=False, hostfwd=None):
         self.sock, self.log, self.qmp_path = _paths()
         for p in (self.sock, self.log, self.qmp_path):
             if os.path.exists(p):
@@ -75,9 +75,16 @@ class Machine:
         # are asked for through make rather than added afterwards - passing
         # them twice is how you get a QEMU that refuses to start. A test wants
         # no audio device at all, which is what "none" is for.
+        # A port on this host forwarded into the guest, for testing something
+        # the guest is serving. It goes through QEMU_EXTRA so that the machine
+        # is still the Makefile's - see the note above about testing a machine
+        # nobody runs.
+        extra = []
+        if hostfwd is not None:
+            extra = ["HOSTFWD=,hostfwd=tcp::%d-:%d" % hostfwd]
         flags = subprocess.run(
             ["make", "-s", "print-qemuflags",
-             "AUDIODEV=none", "MEM=%s" % mem, "CPUS=%d" % cpus],
+             "AUDIODEV=none", "MEM=%s" % mem, "CPUS=%d" % cpus] + extra,
             cwd=ROOT, capture_output=True, text=True).stdout.split()
         if not flags:
             raise RuntimeError("make print-qemuflags said nothing")
@@ -358,9 +365,10 @@ class Test:
     """A booted machine, logged in, with a shell that reports to the serial
     line rather than to a screen nobody is watching."""
 
-    def __init__(self, cpus=2, boot_timeout=420, may_reset=False):
+    def __init__(self, cpus=2, boot_timeout=420, may_reset=False,
+                 hostfwd=None):
         start = time.time()
-        self.m = Machine(cpus=cpus, may_reset=may_reset)
+        self.m = Machine(cpus=cpus, may_reset=may_reset, hostfwd=hostfwd)
         self.checks = 0
         # Markers are counted separately from checks. They were the same
         # number until a check that runs no command was added, and then the

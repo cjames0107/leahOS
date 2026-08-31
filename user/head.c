@@ -30,9 +30,9 @@ static void first(int fd, long want, const char* name, int show_name)
 
 int main(int argc, char** argv)
 {
-    cli_begin(argc, argv, "[-n lines] [file...]", "n:");
+    cli_begin(argc, argv, "[-n lines] [file...]", "n:#");
 
-    const long want = cli_number("-n", 10);
+    const long want = cli_count("-n", 10);
     if (want <= 0)
         return 0;
 

@@ -32,17 +32,35 @@ _start:
     ; libc needs the environment whether or not main asks for it - getenv is
     ; called by things that never see argv. This computation was already here,
     ; pointing at the strings, because there was no second vector to find.
+%ifdef PIC
+    ; Through the GOT, because `environ` lives in libc.so and this program does
+    ; not know where that was placed - only the linker does, and the GOT slot
+    ; is where it wrote the answer. A RIP-relative store would go to wherever
+    ; this program's own code happens to be, which is not where environ is.
+    mov rax, [rel environ wrt ..got]
+    mov [rax], rdx
+%else
+    ; The four boot images link libc in, so environ is at a known distance.
     mov [rel environ], rdx
+%endif
 
     ; Align the stack to 16 bytes; the following CALL pushes the return address,
     ; leaving main entered at the ABI-required 16-aligned-plus-8.
     and rsp, -16
 
+%ifdef PIC
+    call main wrt ..plt
+%else
     call main
+%endif
 
     ; main's return value is the process exit status.
     mov edi, eax
+%ifdef PIC
+    call exit wrt ..plt
+%else
     call exit
+%endif
 
     ; exit does not return; if it somehow does, do not fall off the end.
 .hang:

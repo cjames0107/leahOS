@@ -30,6 +30,15 @@
 #define NET_TCP_RECV   10   /* w0 = connection -> data, w0 = length, 0 at end   */
 #define NET_TCP_CLOSE  11   /* w0 = connection                                  */
 
+/* The server side. Listening claims a port: it makes a SYN arriving there into
+ * a connection rather than a segment with nowhere to go. Accept takes the next
+ * one that has arrived, and waits when none has - which is what makes it the
+ * call a server sits in. */
+#define NET_TCP_LISTEN   20  /* w0 = port -> w0 = 0, or -1                     */
+#define NET_TCP_ACCEPT   21  /* w0 = port -> w0 = connection, w1 = peer IP,
+                              *              w2 = peer port                    */
+#define NET_TCP_UNLISTEN 22  /* w0 = port                                      */
+
 /* IPv6. The addresses do not fit in a word, so they travel in data - which is
  * the first thing about v6 that is different and not the last. */
 #define NET6_INFO   12  /* -> data = 16 bytes link-local + 16 global, w0 = have */

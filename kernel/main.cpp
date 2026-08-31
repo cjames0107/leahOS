@@ -21,6 +21,8 @@
 #include <leah/pmm.hpp>
 #include <leah/process.hpp>
 #include <leah/scheduler.hpp>
+#include <leah/image.hpp>
+#include <leah/object.hpp>
 #include <leah/shm.hpp>
 #include <leah/smp.hpp>
 #include <leah/timer.hpp>
@@ -527,6 +529,8 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     }
 
     shm::init();
+    image::init();
+    object::init();
     ipc::init();
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");

@@ -54,8 +54,11 @@ protected_mode:
     or  eax, (1 << 8) | (1 << 11)   ; LME (long mode) + NXE (honour the NX bit)
     wrmsr
 
+    ; CR0.PG turns paging on; CR0.WP makes a read-only page read-only for the
+    ; kernel too. See the longer note in boot/stage2.asm - every processor
+    ; needs it, not just the one that booted.
     mov eax, cr0
-    or  eax, 1 << 31                ; CR0.PG - paging on, long mode active
+    or  eax, (1 << 31) | (1 << 16)
     mov cr0, eax
 
     lgdt [gdt64_pointer]

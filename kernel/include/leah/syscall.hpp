@@ -117,6 +117,12 @@ enum Number : u64 {
     PtyOpen     = 93,  // a fresh pseudo-terminal pair; returns the master
     PtySlave    = 94,  // the far end of one that exists
     TtyCtl      = 95,  // the foreground group, the line modes, the size
+    ImageFind   = 96,  // is this program already held, at this version?
+    ImageCreate = 97,  // hold these bytes under this name
+    ImageRead   = 98,  // read back out of one that is held
+    HandleClose = 99,  // give up a capability
+    HandleDup   = 100, // a second one, with rights narrowed
+    HandleInfo  = 101, // what this handle is, and what it permits
 };
 
 // What Power is being asked to do. Mirrored in user/libc/include/proc.h.

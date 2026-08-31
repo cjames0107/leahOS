@@ -34,6 +34,7 @@
 #include <ipc.h>
 #include <poll.h>
 #include <shm.h>
+#include <net.h>
 #include <paths.h>
 #include <stdio.h>
 #include <termios.h>
@@ -66,6 +67,12 @@
  *   say yes without being told, and so that the calls that ask a terminal
  *   about itself know which terminal to ask. */
 #define K_PTY    4
+/*   K_SOCKET - one end of a TCP connection, or a port being listened on. The
+ *   stack is a server in ring 3 and the connection is a number it hands back;
+ *   this is that number wearing a descriptor, so that read, write, close and
+ *   dup2 work on it and a connection can be handed to an ordinary program as
+ *   its standard input. */
+#define K_SOCKET 5
 
 #define DEV_NULL    1
 #define DEV_ZERO    2
@@ -745,6 +752,52 @@ int poll(struct pollfd* fds, unsigned long count, int timeout_ms)
     return ready;
 }
 
+/* --- sockets, from the descriptor table's side -----------------------------
+ *
+ * The socket calls themselves are in net.c, because what they are made of is
+ * the network stack. These four are the part that is this table's: taking a
+ * descriptor, and remembering which of the three things a socket can be it
+ * currently is. See the note by K_SOCKET.
+ */
+int __fd_adopt_socket(int connection)
+{
+    start();
+    const int fd = alloc_fd();
+    if (fd < 0)
+        return -1;
+    g_fds[fd].kind = K_SOCKET;
+    g_fds[fd].kfd  = connection;        /* 0 until it is one thing or another */
+    return fd;
+}
+
+int __fd_socket_bind(int fd, unsigned short port)
+{
+    start();
+    if (!valid(fd) || g_fds[fd].kind != K_SOCKET || port == 0)
+        return -1;
+    /* Minus the port: a listening socket carries which port rather than which
+     * connection, and the sign is what says so. */
+    g_fds[fd].kfd = -(int)port;
+    return 0;
+}
+
+int __fd_socket_port(int fd)
+{
+    start();
+    if (!valid(fd) || g_fds[fd].kind != K_SOCKET || g_fds[fd].kfd >= 0)
+        return -1;
+    return -g_fds[fd].kfd;
+}
+
+int __fd_socket_connected(int fd, int connection)
+{
+    start();
+    if (!valid(fd) || g_fds[fd].kind != K_SOCKET)
+        return -1;
+    g_fds[fd].kfd = connection;
+    return 0;
+}
+
 int isatty(int fd)
 {
     start();
@@ -1114,6 +1167,15 @@ int close(int fd)
     if (kernel_backed(g_fds[fd].kind) && kernel_refs(g_fds[fd].kfd) == 1 &&
         g_fds[fd].kfd > 2)
         __syscall(SYS_close, g_fds[fd].kfd, 0, 0, 0, 0);
+    if (g_fds[fd].kind == K_SOCKET) {
+        /* A connection is closed; a listening port is given up. The two are
+         * told apart by whether there is a connection behind it, which is what
+         * the negative number in kfd means. */
+        if (g_fds[fd].kfd > 0)
+            tcp_close(g_fds[fd].kfd);
+        else if (g_fds[fd].kfd < 0)
+            net_unlisten((unsigned short)-g_fds[fd].kfd);
+    }
     g_fds[fd].kind   = K_NONE;
     g_fds[fd].pos_id = -1;
     g_fds[fd].pos    = 0;
@@ -1133,6 +1195,16 @@ long read(int fd, void* buffer, unsigned long count)
     if (kernel_backed(e->kind))
         return from_kernel(__syscall(SYS_read, e->kfd, (long)buffer,
                                      (long)count, 0, 0));
+    if (e->kind == K_SOCKET) {
+        if (e->kfd <= 0) {              /* a listening socket has no stream */
+            errno = EINVAL;
+            return -1;
+        }
+        const long n = tcp_read(e->kfd, buffer, count);
+        if (n < 0)
+            errno = EIO;
+        return n;
+    }
     if (e->kind == K_DEVICE) {
         switch (e->kfd) {
         case DEV_NULL:
@@ -1191,6 +1263,16 @@ long write(int fd, const void* buffer, unsigned long count)
     if (kernel_backed(e->kind))
         return from_kernel(__syscall(SYS_write, e->kfd, (long)buffer,
                                      (long)count, 0, 0));
+    if (e->kind == K_SOCKET) {
+        if (e->kfd <= 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        const long n = tcp_write(e->kfd, buffer, count);
+        if (n < 0)
+            errno = EIO;
+        return n;
+    }
     if (e->kind == K_DEVICE) {
         switch (e->kfd) {
         case DEV_NULL:

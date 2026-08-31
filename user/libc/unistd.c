@@ -1,5 +1,6 @@
 #include <sys/syscall.h>
 #include <errno.h>
+#include <loader.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,7 +44,6 @@ int execve(const char* path, char* const argv[], char* const envp[])
     char full[256];
     struct stat st;
     int fd;
-    void* image;
     long got;
     int result;
 
@@ -67,153 +67,108 @@ int execve(const char* path, char* const argv[], char* const envp[])
         return -1;
     }
 
+    /* Only the first line, and only to see whether this is a script.
+     *
+     * The whole file used to be read here. It no longer is: the loader asks
+     * the kernel whether it is already holding this program before reading
+     * anything, and on a hit reads nothing at all. What has to be read here is
+     * the two bytes that decide whether this is a program in the first place.
+     */
+    char head[256];
     fd = open(full, O_RDONLY);
     if (fd < 0)
         return -1;
-    image = malloc((size_t)st.st_size);
-    if (image == 0) {
-        close(fd);
-        return -1;
-    }
-    got = read(fd, image, (unsigned long)st.st_size);
+    got = read(fd, head, sizeof(head) - 1);
     close(fd);
-    if (got != (long)st.st_size) {
-        free(image);
+    if (got <= 0) {
+        errno = ENOEXEC;
         return -1;
     }
+    head[got] = '\0';
 
     /* A script names its interpreter on the first line. Handled here rather
      * than in the kernel because this is where a program is turned into
      * something runnable - the kernel is handed segments and does not know
      * what a file format is. */
-    {
-        const char* text = (const char*)image;
-        if (got > 2 && text[0] == '#' && text[1] == '!') {
-            static int depth;
-            if (++depth > MAX_SHEBANG) {
-                depth = 0;
-                free(image);
-                errno = ELOOP;
-                return -1;
-            }
-            /* The rest of the line, split into the interpreter and at most one
-             * argument - which is what every UNIX does, and why "#!/bin/sh -e"
-             * works and "#!/bin/sh -e -u" does not. */
-            char line[256];
-            long n = 0;
-            while (n < got - 2 && n < (long)sizeof(line) - 1 &&
-                   text[2 + n] != '\n')
-                { line[n] = text[2 + n]; ++n; }
-            line[n] = '\0';
-            free(image);
-
-            char* interp = line;
-            while (*interp == ' ' || *interp == '\t')
-                ++interp;
-            char* extra = interp;
-            while (*extra != '\0' && *extra != ' ' && *extra != '\t')
-                ++extra;
-            if (*extra != '\0') {
-                *extra++ = '\0';
-                while (*extra == ' ' || *extra == '\t')
-                    ++extra;
-            }
-            if (interp[0] == '\0') {
-                depth = 0;
-                errno = ENOEXEC;
-                return -1;
-            }
-
-            /* argv becomes: interpreter, [its argument], the script, then
-             * whatever the caller passed after argv[0]. The script's own path
-             * goes in as it was named, so $0 reads as the script. */
-            char* rebuilt[MAX_ARGS + 3];
-            int at = 0;
-            rebuilt[at++] = interp;
-            if (extra[0] != '\0')
-                rebuilt[at++] = extra;
-            rebuilt[at++] = (char*)full;
-            for (int i = 1; argv != 0 && argv[i] != 0 && at < MAX_ARGS + 2; ++i)
-                rebuilt[at++] = argv[i];
-            rebuilt[at] = 0;
-
-            const int r = execve(interp, rebuilt, envp);
+    if (got > 2 && head[0] == '#' && head[1] == '!') {
+        static int depth;
+        if (++depth > MAX_SHEBANG) {
             depth = 0;
-            return r;                   /* only ever reached on failure */
+            errno = ELOOP;
+            return -1;
         }
+        /* The rest of the line, split into the interpreter and at most one
+         * argument - which is what every UNIX does, and why "#!/bin/sh -e"
+         * works and "#!/bin/sh -e -u" does not. */
+        char line[256];
+        long n = 0;
+        while (n < got - 2 && n < (long)sizeof(line) - 1 && head[2 + n] != '\n')
+            { line[n] = head[2 + n]; ++n; }
+        line[n] = '\0';
+
+        char* interp = line;
+        while (*interp == ' ' || *interp == '\t')
+            ++interp;
+        char* extra = interp;
+        while (*extra != '\0' && *extra != ' ' && *extra != '\t')
+            ++extra;
+        if (*extra != '\0') {
+            *extra++ = '\0';
+            while (*extra == ' ' || *extra == '\t')
+                ++extra;
+        }
+        if (interp[0] == '\0') {
+            depth = 0;
+            errno = ENOEXEC;
+            return -1;
+        }
+
+        /* argv becomes: interpreter, [its argument], the script, then
+         * whatever the caller passed after argv[0]. The script's own path
+         * goes in as it was named, so $0 reads as the script. */
+        char* rebuilt[MAX_ARGS + 3];
+        int at = 0;
+        rebuilt[at++] = interp;
+        if (extra[0] != '\0')
+            rebuilt[at++] = extra;
+        rebuilt[at++] = (char*)full;
+        for (int i = 1; argv != 0 && argv[i] != 0 && at < MAX_ARGS + 2; ++i)
+            rebuilt[at++] = argv[i];
+        rebuilt[at] = 0;
+
+        const int r = execve(interp, rebuilt, envp);
+        depth = 0;
+        return r;                       /* only ever reached on failure */
     }
 
-    /* Last, because it has to reflect the table as it will be handed over -
-     * after the descriptor this function opened has been closed again. */
-    __fd_save_for_exec();
-
-    /* Work out what the segments are here. The kernel maps what it is told
-     * and no longer knows what an ELF is - the only programs it ever loaded
-     * itself are the three the build hands it, already parsed. */
+    /* Work out what has to be mapped. For a static program that is its own
+     * segments and nothing else; for a dynamic one it is those plus the
+     * interpreter, plus every library it names, plus the table that tells the
+     * interpreter where they all went. See user/libc/execload.c. */
     {
-        struct seg { unsigned long vaddr, offset, filesz, memsz;
-                     unsigned flags, pad; };
-        struct { unsigned long entry; unsigned count, pad;
-                 struct seg segs[16]; } req;
-        struct seg* segs = req.segs;
-        const unsigned char* e = (const unsigned char*)image;
-        unsigned long phoff;
-        unsigned short phentsize, phnum, i;
-        unsigned count = 0;
-        unsigned long entry;
+        static struct loader_request req;
+        void* blob = 0;
+        long blob_size = 0;
 
-        if (got < 64 || e[0] != 0x7F || e[1] != 'E' || e[2] != 'L' ||
-            e[3] != 'F' || e[4] != 2 || e[5] != 1) {
-            free(image);
+        if (__loader_prepare(full, &req, &blob, &blob_size) != 0)
             return -1;
-        }
-        memcpy(&entry, e + 24, 8);
-        memcpy(&phoff, e + 32, 8);
-        memcpy(&phentsize, e + 54, 2);
-        memcpy(&phnum, e + 56, 2);
 
-        for (i = 0; i < phnum && count < 16; ++i) {
-            const unsigned char* ph = e + phoff + (unsigned long)i * phentsize;
-            unsigned p_type, p_flags;
-            unsigned long p_offset, p_vaddr, p_filesz, p_memsz;
-            if ((unsigned long)(ph - e) + phentsize > (unsigned long)got)
-                break;
-            memcpy(&p_type, ph, 4);
-            memcpy(&p_flags, ph + 4, 4);
-            memcpy(&p_offset, ph + 8, 8);
-            memcpy(&p_vaddr, ph + 16, 8);
-            memcpy(&p_filesz, ph + 32, 8);
-            memcpy(&p_memsz, ph + 40, 8);
-            if (p_type != 1 || p_memsz == 0)
-                continue;               /* only PT_LOAD carries anything */
-            if (p_filesz > p_memsz || p_offset + p_filesz > (unsigned long)got) {
-                free(image);
-                return -1;
-            }
-            segs[count].vaddr  = p_vaddr;
-            segs[count].offset = p_offset;
-            segs[count].filesz = p_filesz;
-            segs[count].memsz  = p_memsz;
-            segs[count].flags  = p_flags;
-            segs[count].pad    = 0;
-            ++count;
-        }
-        if (count == 0) {
-            free(image);
-            return -1;
-        }
-        req.entry = entry;
-        req.count = count;
-        req.pad   = 0;
+        /* Last, because it has to reflect the table as it will be handed over
+         * - after every descriptor the loader opened has been closed again. */
+        __fd_save_for_exec();
+
         /* The fifth argument is r8, which is where the kernel reads the
-         * environment from. */
-        result = (int)__syscall(SYS_execve, (long)image, got, (long)argv,
-                                (long)&req, (long)envp);
+         * environment from. A blob of zero bytes is still a pointer the
+         * kernel will check, so an empty one is passed as a byte. */
+        static char nothing;
+        result = (int)__syscall(SYS_execve,
+                                blob != 0 ? (long)blob : (long)&nothing,
+                                blob_size > 0 ? blob_size : 1,
+                                (long)argv, (long)&req, (long)envp);
     }
 
     /* Only reached when the exec failed: on success the kernel never returns
      * here, and this address space is already gone. */
-    free(image);
     return result;
 }
 

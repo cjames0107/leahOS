@@ -286,7 +286,35 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
              * fault at address 0 from an instruction that only ever touches
              * the stack means RSP is the thing that is wrong, and without this
              * that has to be worked out from a disassembly. */
-            console::printf("\n  %s[%u] faulted: %s at %p, %s %p%s (rsp %p)\n",
+            /* And the bytes at the instruction, because an address alone has
+             * repeatedly not been enough: matching a fault against a
+             * disassembly means trusting that the binary on the host is the
+             * one that ran, and twice now it was not. Eight bytes is one
+             * instruction and enough of the next to recognise it. Read only if
+             * the page is really there - a fault on the instruction fetch
+             * itself must not become a second fault in the handler. */
+            char bytes[32];
+            usize at = 0;
+            const auto* code = reinterpret_cast<const u8*>(frame->rip);
+            for (int i = 0; i < 8 && at + 3 < sizeof(bytes); ++i) {
+                if (vmm::translate(reinterpret_cast<vaddr_t>(code + i) &
+                                   ~(vmm::kPageSize - 1)) == 0)
+                    break;
+                static const char kHex[] = "0123456789abcdef";
+                bytes[at++] = kHex[(code[i] >> 4) & 0xF];
+                bytes[at++] = kHex[code[i] & 0xF];
+                bytes[at++] = ' ';
+            }
+            bytes[at] = '\0';
+
+            /* And the page-table entry behind the instruction. "The bytes are
+             * zero" has two very different causes - the page holds zeros, or
+             * the page is not the one that was mapped there - and only the
+             * entry tells them apart. */
+            const u64 code_pte = vmm::entry_for(frame->rip);
+
+            console::printf("\n  %s[%u] faulted: %s at %p, %s %p%s (rsp %p) "
+                            "[%s] pte %016llx\n",
                             scheduler::current_name(), scheduler::current_pid(),
                             (frame->error_code & 1) ? "protection violation"
                                                     : "unmapped address",
@@ -294,7 +322,8 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
                             (frame->error_code & 2) ? "writing from" : "reading from",
                             reinterpret_cast<void*>(frame->rip),
                             (frame->error_code & 0x10) ? " (instruction fetch)" : "",
-                            reinterpret_cast<void*>(frame->rsp));
+                            reinterpret_cast<void*>(frame->rsp), bytes,
+                            code_pte);
             scheduler::exit_current(139);      // 128 + SIGSEGV
         }
     }

@@ -182,6 +182,7 @@ static void arp_answer(const uint8_t* req)
 #define WAIT_TCP_ARP 7  /* a connection that needs an address first */
 #define WAIT_ND    8    /* a neighbour being solicited over IPv6 */
 #define WAIT_PING6 9    /* an ICMPv6 echo that has not come back */
+#define WAIT_ACCEPT 10  /* a server waiting for somebody to connect */
 
 static struct pending {
     int used;
@@ -198,7 +199,7 @@ static struct pending {
 static unsigned g_ticks;
 
 struct conn;
-static struct conn* conn_find(unsigned local_port);
+static struct conn* conn_by_id(unsigned id);
 static void conn_close(struct conn* c);
 
 static struct pending* pending_add(int kind, int handle, unsigned ip, unsigned seq)
@@ -246,7 +247,7 @@ static void expire_pending(void)
         if (g_pending[i].kind == WAIT_CONNECT ||
             g_pending[i].kind == WAIT_TCP_ARP) {
             /* Nothing answered; do not leave a half-open connection behind. */
-            conn_close(conn_find(g_pending[i].ip));
+            conn_close(conn_by_id(g_pending[i].ip));
         }
         /* A name that got no answer over v4 is worth one more try over v6 -
          * which is what "v4 first, v6 as the fallback" was always supposed to
@@ -610,6 +611,8 @@ static unsigned dns_answer(const uint8_t* p, unsigned length, unsigned* id_out)
 #define TCP_ESTABLISHED 2
 #define TCP_FIN_WAIT    3
 #define TCP_DEAD        4
+#define TCP_SYN_RCVD    5   /* a connection somebody else started */
+#define TCP_LISTEN_Q    6   /* established, waiting to be accepted */
 
 #define CONN_MAX 8
 #define TCP_RX   8192
@@ -618,6 +621,14 @@ static unsigned dns_answer(const uint8_t* p, unsigned length, unsigned* id_out)
 static struct conn {
     int used;
     int state;
+    /* What userland calls this connection.
+     *
+     * It used to be the local port, which is unique for a connection this
+     * machine started and is not for one it accepted: every connection to a
+     * listening port shares that port, and telling them apart is what the
+     * remote address is for. So a connection has a number of its own, and the
+     * four addresses are what finds it when a segment arrives. */
+    unsigned id;
     int peer_closed;
     unsigned peer_ip, peer_port, local_port;
     int      v6;                    /* the peer is an IPv6 address */
@@ -637,6 +648,36 @@ static struct conn {
 } g_conn[CONN_MAX];
 
 static unsigned g_next_port = 40000;
+static unsigned g_next_id = 1;          /* 0 is never a connection */
+
+/* --- listening --------------------------------------------------------------
+ *
+ * A port something is waiting on, and the connections that have arrived at it
+ * and not yet been accepted.
+ *
+ * This is the whole of what was missing from the server side: the state
+ * machine could already start a connection, carry it and close it, and had no
+ * way to be the end that was connected *to*. A listener is a port, a queue,
+ * and the rule that a SYN arriving at that port makes a connection rather than
+ * being dropped.
+ */
+#define LISTEN_MAX  4
+#define BACKLOG_MAX 4
+
+static struct listener {
+    int      used;
+    unsigned port;
+    unsigned queue[BACKLOG_MAX];        /* ids, established and unaccepted */
+    int      queued;
+} g_listen[LISTEN_MAX];
+
+static struct listener* listener_find(unsigned port)
+{
+    for (int i = 0; i < LISTEN_MAX; ++i)
+        if (g_listen[i].used && g_listen[i].port == port)
+            return &g_listen[i];
+    return 0;
+}
 
 /* TCP's checksum covers a header that is not in the packet: the addresses, the
  * protocol and the length, so that a segment delivered to the wrong host or
@@ -700,10 +741,35 @@ static int tcp_send(struct conn* c, unsigned flags, unsigned seq,
     return send_frame(f, 54 + length);
 }
 
-static struct conn* conn_find(unsigned local_port)
+static struct conn* conn_by_id(unsigned id)
+{
+    if (id == 0)
+        return 0;
+    for (int i = 0; i < CONN_MAX; ++i)
+        if (g_conn[i].used && g_conn[i].id == id)
+            return &g_conn[i];
+    return 0;
+}
+
+/* The connection a segment belongs to: all four addresses, because a listening
+ * port has one connection per peer and the local port alone cannot tell them
+ * apart. */
+static struct conn* conn_find_tuple(unsigned local_port, unsigned peer_ip,
+                                    unsigned peer_port)
+{
+    for (int i = 0; i < CONN_MAX; ++i) {
+        struct conn* c = &g_conn[i];
+        if (c->used && !c->v6 && c->local_port == local_port &&
+            c->peer_ip == peer_ip && c->peer_port == peer_port)
+            return c;
+    }
+    return 0;
+}
+
+static struct conn* conn_free_slot(void)
 {
     for (int i = 0; i < CONN_MAX; ++i)
-        if (g_conn[i].used && g_conn[i].local_port == local_port)
+        if (!g_conn[i].used)
             return &g_conn[i];
     return 0;
 }
@@ -1210,7 +1276,7 @@ static void handle_frame(const uint8_t* f, unsigned len)
                 } else if (p->kind == WAIT_DNS && p->name[0] != '\0') {
                     dns_ask(p->name, p->seq, f + 22, p->want6);
                 } else if (p->kind == WAIT_TCP_ARP) {
-                    struct conn* c = conn_find(p->ip);
+                    struct conn* c = conn_by_id(p->ip);
                     if (c != 0) {
                         tcp_send(c, TCP_SYN, c->snd_next, 0, 0);
                         c->snd_next += 1;
@@ -1326,13 +1392,73 @@ static void handle_frame(const uint8_t* f, unsigned len)
         if (len < 14 + ihl + 20)
             return;
         const unsigned dst_port = rd16(t + 2);
-        struct conn* c = conn_find(dst_port);
-        if (c == 0 || !c->used)
-            return;
-
+        const unsigned src_port = rd16(t + 0);
+        const unsigned peer     = src_ip_of(ip_hdr);
         const unsigned seq   = rd32(t + 4);
         const unsigned ack   = rd32(t + 8);
         const unsigned flags = rd16(t + 12) & 0x3F;
+
+        struct conn* c = conn_find_tuple(dst_port, peer, src_port);
+
+        /* A SYN at a port something is listening on is a new connection rather
+         * than a stray segment. This is the passive open, and it is the whole
+         * of what the server side needed that the client side did not: from
+         * here on the state machine is the one that was already here. */
+        if (c == 0 && (flags & TCP_SYN) != 0 && (flags & TCP_ACK) == 0) {
+            struct listener* l = listener_find(dst_port);
+            if (l != 0) {
+                c = conn_free_slot();
+                if (c != 0) {
+                    /* Where to send the answer, taken from the frame that just
+                     * arrived. A machine this one has never spoken to has no
+                     * ARP entry, and asking for one would mean holding the SYN
+                     * until the reply came back - when the address is already
+                     * in the ethernet header in front of us. Every packet
+                     * carries the sender's hardware address; a stack that did
+                     * not learn from that would ask about the one host it
+                     * certainly knows how to reach. */
+                    arp_learn(peer, f + 6);
+                    memset(c, 0, sizeof(*c));
+                    c->used = 1;
+                    c->id = g_next_id++;
+                    c->local_port = dst_port;
+                    c->peer_ip = peer;
+                    c->peer_port = src_port;
+                    c->rcv_next = seq + 1;
+                    c->snd_next = 0x5EED0000u + g_ticks * 7919u;
+                    c->state = TCP_SYN_RCVD;
+                    tcp_send(c, TCP_SYN | TCP_ACK, c->snd_next, 0, 0);
+                    c->snd_next += 1;
+                }
+            }
+        }
+        if (c == 0 || !c->used)
+            return;
+
+        /* The handshake's last step: their ACK of our SYN. The connection is
+         * open, and goes to whoever is waiting to accept one - or into the
+         * queue, because a server is not always in accept when a client
+         * arrives, and that is what a backlog is for. */
+        if (c->state == TCP_SYN_RCVD && (flags & TCP_ACK) != 0) {
+            c->state = TCP_ESTABLISHED;
+            struct listener* l = listener_find(c->local_port);
+            int handed = 0;
+            for (int i = 0; i < PENDING_MAX && !handed; ++i) {
+                struct pending* p = &g_pending[i];
+                if (p->used && p->kind == WAIT_ACCEPT && p->ip == c->local_port) {
+                    struct ipc_message r;
+                    memset(&r, 0, sizeof(r));
+                    r.word[0] = (long)c->id;
+                    r.word[1] = (long)c->peer_ip;
+                    r.word[2] = (long)c->peer_port;
+                    ipc_reply(p->handle, &r);
+                    p->used = 0;
+                    handed = 1;
+                }
+            }
+            if (!handed && l != 0 && l->queued < BACKLOG_MAX)
+                l->queue[l->queued++] = c->id;
+        }
         const unsigned off   = ((rd16(t + 12) >> 12) & 0xF) * 4;
         const unsigned total = rd16(ip_hdr + 2);
         const unsigned dlen  = (total > ihl + off) ? total - ihl - off : 0;
@@ -1345,7 +1471,7 @@ static void handle_frame(const uint8_t* f, unsigned len)
             c->state = TCP_DEAD;
             for (int i = 0; i < PENDING_MAX; ++i) {
                 struct pending* p = &g_pending[i];
-                if (p->used && p->ip == c->local_port &&
+                if (p->used && p->ip == c->id &&
                     (p->kind == WAIT_CONNECT || p->kind == WAIT_READ))
                     answer(p, -1, 0, 0);
             }
@@ -1359,8 +1485,8 @@ static void handle_frame(const uint8_t* f, unsigned len)
             tcp_send(c, TCP_ACK, c->snd_next, 0, 0);
             for (int i = 0; i < PENDING_MAX; ++i) {
                 struct pending* p = &g_pending[i];
-                if (p->used && p->kind == WAIT_CONNECT && p->ip == c->local_port)
-                    answer(p, (long)c->local_port, 0, 0);
+                if (p->used && p->kind == WAIT_CONNECT && p->ip == c->id)
+                    answer(p, (long)c->id, 0, 0);
             }
             return;
         }
@@ -1398,7 +1524,7 @@ static void handle_frame(const uint8_t* f, unsigned len)
          * stream has ended. */
         for (int i = 0; i < PENDING_MAX; ++i) {
             struct pending* p = &g_pending[i];
-            if (!p->used || p->kind != WAIT_READ || p->ip != c->local_port)
+            if (!p->used || p->kind != WAIT_READ || p->ip != c->id)
                 continue;
             if (c->rx_len > 0) {
                 unsigned n = c->rx_len > 200 ? 200 : c->rx_len;
@@ -1507,7 +1633,11 @@ static void handle_tcp6(const uint8_t* f, const uint8_t* h, const uint8_t* t,
 {
     if (length < 20)
         return;
-    struct conn* c = conn_find(rd16(t + 2));
+    struct conn* c = 0;
+    for (int i = 0; i < CONN_MAX; ++i)
+        if (g_conn[i].used && g_conn[i].v6 &&
+            g_conn[i].local_port == rd16(t + 2))
+            c = &g_conn[i];
     if (c == 0 || !c->used || !c->v6)
         return;
 
@@ -1526,7 +1656,7 @@ static void handle_tcp6(const uint8_t* f, const uint8_t* h, const uint8_t* t,
         c->state = TCP_DEAD;
         for (int i = 0; i < PENDING_MAX; ++i) {
             struct pending* p = &g_pending[i];
-            if (p->used && p->ip == c->local_port &&
+            if (p->used && p->ip == c->id &&
                 (p->kind == WAIT_CONNECT || p->kind == WAIT_READ))
                 answer(p, -2, 0, 0);
         }
@@ -1541,8 +1671,8 @@ static void handle_tcp6(const uint8_t* f, const uint8_t* h, const uint8_t* t,
         tcp_send(c, TCP_ACK, c->snd_next, 0, 0);
         for (int i = 0; i < PENDING_MAX; ++i) {
             struct pending* p = &g_pending[i];
-            if (p->used && p->kind == WAIT_CONNECT && p->ip == c->local_port)
-                answer(p, (long)c->local_port, 0, 0);
+            if (p->used && p->kind == WAIT_CONNECT && p->ip == c->id)
+                answer(p, (long)c->id, 0, 0);
         }
         return;
     }
@@ -1572,7 +1702,7 @@ static void handle_tcp6(const uint8_t* f, const uint8_t* h, const uint8_t* t,
 
     for (int i = 0; i < PENDING_MAX; ++i) {
         struct pending* p = &g_pending[i];
-        if (!p->used || p->kind != WAIT_READ || p->ip != c->local_port)
+        if (!p->used || p->kind != WAIT_READ || p->ip != c->id)
             continue;
         if (c->rx_len > 0) {
             unsigned n = c->rx_len > 200 ? 200 : c->rx_len;
@@ -1802,11 +1932,12 @@ int main(void)
                 c->peer_port = (unsigned)m.word[1];
                 c->local_port = g_next_port++;
                 if (g_next_port > 60000) g_next_port = 40000;
+                c->id = g_next_id++;
                 c->snd_next = 0x5EED0000u + g_ticks * 7919u;
                 c->state = TCP_SYN_SENT;
 
                 struct pending* p = pending_add(WAIT_CONNECT, handle,
-                                                c->local_port, 0);
+                                                c->id, 0);
                 if (p == 0) {
                     c->used = 0;
                     r.word[0] = -1;
@@ -1841,6 +1972,7 @@ int main(void)
                 c->peer_port = (unsigned)m.word[1];
                 c->local_port = g_next_port++;
                 if (g_next_port > 60000) g_next_port = 40000;
+                c->id = g_next_id++;
                 /* An initial sequence number that is not always the same, so
                  * a new connection cannot be confused with an old one on the
                  * same pair of ports. */
@@ -1850,7 +1982,7 @@ int main(void)
                 const unsigned via = ((c->peer_ip ^ g_ip) & g_mask)
                                          ? g_gw : c->peer_ip;
                 struct pending* p = pending_add(WAIT_CONNECT, handle,
-                                                c->local_port, 0);
+                                                c->id, 0);
                 if (p == 0) {
                     c->used = 0;
                     r.word[0] = -1;
@@ -1867,7 +1999,7 @@ int main(void)
                 }
             }
         } else if (m.tag == NET_TCP_SEND) {
-            struct conn* c = conn_find((unsigned)m.word[0]);
+            struct conn* c = conn_by_id((unsigned)m.word[0]);
             if (c == 0 || c->state != TCP_ESTABLISHED || c->out_len > 0) {
                 /* Busy or gone. One segment in flight at a time, so a caller
                  * offering more before the last was acknowledged is told to
@@ -1890,7 +2022,7 @@ int main(void)
             }
             ipc_reply(handle, &r);
         } else if (m.tag == NET_TCP_RECV) {
-            struct conn* c = conn_find((unsigned)m.word[0]);
+            struct conn* c = conn_by_id((unsigned)m.word[0]);
             if (c == 0 || c->state == TCP_DEAD) {
                 r.word[0] = -1;
                 ipc_reply(handle, &r);
@@ -1908,13 +2040,60 @@ int main(void)
             } else {
                 /* Nothing yet. Put the reader aside rather than answering
                  * with nothing, which would turn every read into a poll. */
-                if (pending_add(WAIT_READ, handle, c->local_port, 0) == 0) {
+                if (pending_add(WAIT_READ, handle, c->id, 0) == 0) {
                     r.word[0] = -1;
                     ipc_reply(handle, &r);
                 }
             }
+        } else if (m.tag == NET_TCP_LISTEN) {
+            /* Claim a port. Nothing is created and nothing waits: what this
+             * does is make a SYN arriving at that port into a connection
+             * instead of a segment with nowhere to go. */
+            const unsigned port = (unsigned)m.word[0];
+            struct listener* l = listener_find(port);
+            if (l == 0) {
+                for (int i = 0; i < LISTEN_MAX && l == 0; ++i)
+                    if (!g_listen[i].used)
+                        l = &g_listen[i];
+                if (l != 0) {
+                    memset(l, 0, sizeof(*l));
+                    l->used = 1;
+                    l->port = port;
+                }
+            }
+            r.word[0] = l != 0 ? 0 : -1;
+            ipc_reply(handle, &r);
+        } else if (m.tag == NET_TCP_ACCEPT) {
+            const unsigned port = (unsigned)m.word[0];
+            struct listener* l = listener_find(port);
+            if (l == 0) {
+                r.word[0] = -1;
+                ipc_reply(handle, &r);
+            } else if (l->queued > 0) {
+                /* One that arrived while nobody was asking. */
+                const unsigned id = l->queue[0];
+                for (int i = 1; i < l->queued; ++i)
+                    l->queue[i - 1] = l->queue[i];
+                --l->queued;
+                struct conn* c = conn_by_id(id);
+                r.word[0] = (long)id;
+                r.word[1] = c != 0 ? (long)c->peer_ip : 0;
+                r.word[2] = c != 0 ? (long)c->peer_port : 0;
+                ipc_reply(handle, &r);
+            } else if (pending_add(WAIT_ACCEPT, handle, port, 0) == 0) {
+                r.word[0] = -1;
+                ipc_reply(handle, &r);
+            }
+            /* Otherwise the reply waits until somebody connects, which is what
+             * accept means. */
+        } else if (m.tag == NET_TCP_UNLISTEN) {
+            struct listener* l = listener_find((unsigned)m.word[0]);
+            if (l != 0)
+                l->used = 0;
+            r.word[0] = 0;
+            ipc_reply(handle, &r);
         } else if (m.tag == NET_TCP_CLOSE) {
-            struct conn* c = conn_find((unsigned)m.word[0]);
+            struct conn* c = conn_by_id((unsigned)m.word[0]);
             if (c != 0) {
                 if (c->state == TCP_ESTABLISHED) {
                     tcp_send(c, TCP_FIN | TCP_ACK, c->snd_next, 0, 0);

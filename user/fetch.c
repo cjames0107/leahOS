@@ -15,7 +15,8 @@
 
 int main(int argc, char** argv)
 {
-    cli_begin(argc, argv, "HOST [path]", "");
+    cli_begin(argc, argv, "[-p port] HOST [path]", "p:");
+    const int port = (int)cli_number("-p", 80);
     if (cli_argc() < 1 || cli_argc() > 2)
         cli_usage();
     const char* host = cli_arg(0);
@@ -26,10 +27,11 @@ int main(int argc, char** argv)
         cli_fail("cannot resolve '%s'", host);
         return 1;
     }
-    printf("connecting to %s (%u.%u.%u.%u) port 80\n", host,
-           (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+    printf("connecting to %s (%u.%u.%u.%u) port %d\n", host,
+           (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF,
+           port);
 
-    const int conn = tcp_connect(ip, 80);
+    const int conn = tcp_connect(ip, (uint16_t)port);
     if (conn < 0) {
         cli_fail("connection refused or timed out");
         return 1;

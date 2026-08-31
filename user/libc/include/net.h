@@ -46,6 +46,13 @@ long tcp_read(int connection, void* buffer, unsigned long bytes);
 long tcp_write(int connection, const void* buffer, unsigned long bytes);
 void tcp_close(int connection);
 
+/* The server side, underneath <socket.h>. A port is claimed, connections
+ * arrive at it, and each one is a connection like any other once accepted.
+ * Most callers want socket.h; these are what it is made of. */
+int  net_listen(unsigned short port);
+void net_unlisten(unsigned short port);
+int  net_accept(unsigned short port, uint32_t* peer, uint16_t* peer_port);
+
 /* The same over IPv6. A connection made this way is read, written and closed
  * with the three calls above: what carried the handshake stops mattering the
  * moment it has finished, which is the whole reason TCP is not two protocols.

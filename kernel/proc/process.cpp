@@ -1,4 +1,5 @@
 #include <leah/console.hpp>
+#include <leah/image.hpp>
 #include <leah/cpu.hpp>
 #include <leah/heap.hpp>
 #include <leah/memory.hpp>
@@ -27,6 +28,10 @@ struct Args {
     usize env_offset[kMaxArgs];
     char  storage[kArgStorage];
     usize used;
+    /* The auxiliary vector, as type/value pairs. Zero entries is a program
+     * started without one, which is what the four boot images get. */
+    int   auxc;
+    u64   aux[32];
 };
 
 // Copy an argv vector out of the currently active (caller's) address space.
@@ -130,6 +135,17 @@ vaddr_t build_stack(const Args& args)
     };
 
     // Pushed backwards, so that they read forwards from the low address.
+    //
+    // The auxiliary vector goes above the environment, which is where every
+    // other system puts it and where every program that reads one looks. It
+    // ends with an AT_NULL pair; a program that does not know about it simply
+    // stops at the environment's own terminator and never sees this.
+    push(0);                             // AT_NULL's value
+    push(0);                             // AT_NULL
+    for (int i = args.auxc - 2; i >= 0; i -= 2) {
+        push(args.aux[i + 1]);           // value, at the higher address
+        push(args.aux[i]);               // type
+    }
     push(0);                             // envp[envc] = NULL
     for (int i = args.envc - 1; i >= 0; --i)
         push(env_addr[i]);
@@ -158,11 +174,11 @@ vaddr_t build_stack(const Args& args)
  * libc reading a file or the build reading it years earlier. */
 struct Segment {
     u64 vaddr;
-    u64 offset;         // into the blob these segments came with
+    u64 offset;         // into the image, or into the blob when image is -1
     u64 filesz;
     u64 memsz;
     u32 flags;          // ELF program-header flags: 1 execute, 2 write, 4 read
-    u32 reserved;
+    i32 image;          // which held image this is cut from, or -1
 };
 
 constexpr u32 kSegExecute = 1;
@@ -183,7 +199,9 @@ bool map_segments(const Segment* segments, u32 count, const u8* blob,
         const Segment& s = segments[i];
         if (s.memsz == 0)
             continue;
-        if (s.filesz > s.memsz || s.offset + s.filesz > blob_size)
+        if (s.filesz > s.memsz)
+            return false;
+        if (s.image < 0 && s.offset + s.filesz > blob_size)
             return false;
         if (s.vaddr >= memory::kKernelBase)
             return false;               // a user program, in the user half
@@ -193,38 +211,95 @@ bool map_segments(const Segment* segments, u32 count, const u8* blob,
         const vaddr_t start = s.vaddr & ~(vmm::kPageSize - 1);
         const vaddr_t end   = (s.vaddr + s.memsz + vmm::kPageSize - 1) &
                               ~(vmm::kPageSize - 1);
+        /* Where the file's bytes stop. Past this the segment is .bss, which is
+         * the same zeros in every process and is never shared. */
+        const vaddr_t file_end = (s.vaddr + s.filesz + vmm::kPageSize - 1) &
+                                 ~(vmm::kPageSize - 1);
 
-        /* Writable while loading, because the loader has to write into it. A
-         * read-only segment is tightened once its contents are in place. */
-        u64 flags = vmm::Write | vmm::User;
-        if ((s.flags & kSegExecute) == 0)
-            flags |= vmm::NoExecute;
+        const bool writable = (s.flags & kSegWrite) != 0;
+
+        /* A read-only segment cut from a held image is *mapped*, not copied:
+         * the frames are the image's, every process that runs this program
+         * points at the same ones, and libc exists once in memory instead of
+         * once per process. That is the whole point of the image cache.
+         *
+         * It works because ELF guarantees p_vaddr and p_offset are congruent
+         * modulo the page size - the same guarantee that lets every other
+         * system mmap a segment straight out of a file. Checked rather than
+         * assumed, because a program that broke it would otherwise be mapped
+         * off by a few bytes and fault somewhere unrecognisable. */
+        const bool congruent =
+            (s.vaddr & (vmm::kPageSize - 1)) == (s.offset & (vmm::kPageSize - 1));
+        const bool shareable = !writable && s.image >= 0 && congruent;
 
         for (vaddr_t page = start; page < end; page += vmm::kPageSize) {
+            u64 flags = vmm::User;
+            if (writable)
+                flags |= vmm::Write;
+            if ((s.flags & kSegExecute) == 0)
+                flags |= vmm::NoExecute;
+
+            if (shareable && page < file_end) {
+                const u64 at = s.offset - (s.vaddr - page);
+                if (image::share_frame(s.image, at)) {
+                    if (!vmm::map(page, image::frame_at(s.image, at), flags))
+                        return false;
+                    continue;
+                }
+                /* No reference to be had - fall through and copy, which is
+                 * always correct and only slower. */
+            }
+
+            /* Past the file's bytes is .bss: reserved rather than allocated,
+             * so a program with a megabyte of it that touches a page of it
+             * pays for a page. libc alone has two hundred kilobytes. */
+            if (page >= file_end) {
+                if (!vmm::reserve(page, flags))
+                    return false;
+                continue;
+            }
+
             const paddr_t frame = pmm::alloc();
             if (frame == 0)
                 return false;
-            if (!vmm::map(page, frame, flags)) {
+            /* Writable while loading, because the loader has to write into it.
+             * A read-only segment is tightened once its contents are in. */
+            if (!vmm::map(page, frame, flags | vmm::Write)) {
                 pmm::free(frame);
                 return false;
             }
-            /* Cleared, which is also what makes .bss read as zero: everything
-             * past filesz is already the zeros it has to be. */
+            /* Cleared, which is also what makes the tail of the last page read
+             * as the zeros it has to be. */
             memset(reinterpret_cast<void*>(page), 0, vmm::kPageSize);
+
+            /* And the bytes themselves, clipped to this page. */
+            const vaddr_t from = page > s.vaddr ? page : s.vaddr;
+            const vaddr_t to   = page + vmm::kPageSize;
+            const vaddr_t stop = s.vaddr + s.filesz < to ? s.vaddr + s.filesz : to;
+            if (stop > from) {
+                const u64 at = s.offset + (from - s.vaddr);
+                if (s.image >= 0) {
+                    if (!image::read(s.image, at, reinterpret_cast<void*>(from),
+                                     stop - from))
+                        return false;
+                } else {
+                    memcpy(reinterpret_cast<void*>(from), blob + at, stop - from);
+                }
+            }
         }
 
-        if (s.filesz > 0)
-            memcpy(reinterpret_cast<void*>(s.vaddr), blob + s.offset,
-                   static_cast<usize>(s.filesz));
-
-        if ((s.flags & kSegWrite) == 0) {
+        if (!writable) {
             u64 readonly = vmm::User;
             if ((s.flags & kSegExecute) == 0)
                 readonly |= vmm::NoExecute;
-            for (vaddr_t page = start; page < end; page += vmm::kPageSize)
-                vmm::map(page, vmm::translate(page), readonly);
+            for (vaddr_t page = start; page < end; page += vmm::kPageSize) {
+                const paddr_t frame = vmm::translate(page);
+                if (frame != 0)
+                    vmm::map(page, frame, readonly);
+            }
         }
     }
+
     return true;
 }
 
@@ -290,11 +365,21 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
 
     Args args;
     single_arg(name, args);
+    args.auxc = 0;
+
+    /* The four programs the build hands the kernel are cut from the boot image
+     * itself, not from a held one - there is no filesystem yet, which is the
+     * whole reason they are here. Said explicitly rather than relying on the
+     * tool to have written a -1 into a field it predates. */
+    Segment owned[16];
+    memcpy(owned, segments, count * sizeof(Segment));
+    for (u32 i = 0; i < count; ++i)
+        owned[i].image = -1;
 
     vaddr_t entry = 0;
     vaddr_t stack = 0;
     const vmm::AddressSpace space =
-        build_image(name, args, entry, stack, entry_point, segments, count,
+        build_image(name, args, entry, stack, entry_point, owned, count,
                     image, size);
     if (space == 0)
         return 0;
@@ -309,7 +394,8 @@ u32 create_embedded(const char* name, const u8* image, usize size, u32 parent_pi
 }
 
 void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
-          char** envp, u64 entry_point, const void* user_segments, u32 count)
+          char** envp, u64 entry_point, const void* user_segments, u32 count,
+          const u64* aux, u32 auxc)
 {
     const vmm::AddressSpace old_space = scheduler::current_task_space();
 
@@ -337,6 +423,11 @@ void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
     if (args.argc == 0)
         single_arg("program", args);     // at least argv[0]
     copy_envp(envp, args);
+    args.auxc = 0;
+    if (aux != nullptr && auxc > 0 && auxc <= 32) {
+        memcpy(args.aux, aux, auxc * sizeof(u64));
+        args.auxc = static_cast<int>(auxc);
+    }
 
     vaddr_t entry = 0;
     vaddr_t stack = 0;
@@ -344,8 +435,8 @@ void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
     const vmm::AddressSpace space =
         build_image(name, args, entry, stack, entry_point, segments, count,
                     owned, size);
-    kfree(owned);
     if (space == 0) {
+        kfree(owned);
         frame.rax = static_cast<u64>(-1);
         return;
     }
@@ -357,6 +448,8 @@ void exec(syscall::Frame& frame, const u8* image, usize size, char** argv,
     scheduler::set_current_brk(memory::kUserBrkBase);   // fresh heap for the new image
     vmm::switch_address_space(space);
     vmm::destroy_address_space(old_space);
+
+    kfree(owned);
 
     // Rewrite the syscall frame so SYSRET enters the new program on its fresh
     // argv stack with a clean register file - the floating-point ones

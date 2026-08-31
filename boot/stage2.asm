@@ -621,8 +621,16 @@ pm_entry:
     or  eax, 1 << 8                     ; EFER.LME
     wrmsr
 
+    ; CR0.WP - the read-only bit applies to ring 0 as well.
+    ;
+    ; Without it a kernel write to a user page ignores the page's permissions
+    ; entirely, so a stray pointer scribbles over a program's own code and
+    ; nothing anywhere reports it. That is how a page of libc's text turned
+    ; into zeros with every check saying it had been loaded correctly.
+    ; Copy-on-write and the lazy mmap pages still work: a kernel-mode fault
+    ; reaches the same handler as a user-mode one and is resolved there.
     mov eax, cr0
-    or  eax, 1 << 31                    ; CR0.PG - long mode activates here
+    or  eax, (1 << 31) | (1 << 16)      ; CR0.PG - long mode activates here
     mov cr0, eax
 
     jmp SEL_CODE64:lm_entry

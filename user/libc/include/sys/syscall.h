@@ -85,6 +85,12 @@
 #define SYS_ptyopen     93
 #define SYS_ptyslave    94
 #define SYS_ttyctl      95
+#define SYS_imagefind   96
+#define SYS_imagecreate 97
+#define SYS_imageread   98
+#define SYS_handleclose 99
+#define SYS_handledup   100
+#define SYS_handleinfo  101
 
 /* shm_open's flags live in <shm.h> with the call they belong to. */
 

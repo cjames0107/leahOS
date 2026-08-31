@@ -101,8 +101,8 @@ static void follow(const char* path, long from)
 
 int main(int argc, char** argv)
 {
-    cli_begin(argc, argv, "[-f] [-n lines] [file...]", "n:f");
-    long want = cli_number("-n", 10);
+    cli_begin(argc, argv, "[-f] [-n lines] [file...]", "n:f#");
+    long want = cli_count("-n", 10);
     const int following = cli_flag("-f");
     if (want < 0)
         want = 0;

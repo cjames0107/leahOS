@@ -5,6 +5,7 @@
 #include <leah/ipc.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
+#include <leah/object.hpp>
 #include <leah/percpu.hpp>
 #include <leah/file.hpp>
 #include <leah/fpu.hpp>
@@ -966,6 +967,11 @@ u32 fork_current(const TrapFrame& parent_user)
         child_task->uid = parent->uid;
         child_task->gid = parent->gid;
     }
+    /* The child holds what the parent held. Copied rather than shared: closing
+     * one in the child must not close the parent's, which is the difference
+     * between inheriting authority and sharing it. */
+    object::inherit(parent->tgid, child);
+
     return child;
 }
 
@@ -1071,6 +1077,10 @@ void exit_current(i32 code)
          * giving them back. Braced, because unbraced this ran for every
          * exiting *thread* and would tear down a live process's segments. */
         shm::abandon(self->tgid);
+        /* And every handle it held. A capability is authority, and authority
+         * that outlives the thing holding it is exactly what this design
+         * exists to prevent. */
+        object::close_all(self->tgid);
     }
 
 

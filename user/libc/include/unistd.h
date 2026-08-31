@@ -17,6 +17,12 @@ pid_t   getpid(void);
 void    __fd_save_for_exec(void);
 void    __fd_before_fork(void);
 void    __fd_resolve(const char* path, char* out);
+/* The descriptor table's side of a socket - see <socket.h>, which is what
+ * callers want. Here because the table is here and the calls are not. */
+int     __fd_adopt_socket(int connection);
+int     __fd_socket_bind(int fd, unsigned short port);
+int     __fd_socket_port(int fd);
+int     __fd_socket_connected(int fd, int connection);
 
 pid_t fork(void);
 int   execve(const char* path, char* const argv[], char* const envp[]);

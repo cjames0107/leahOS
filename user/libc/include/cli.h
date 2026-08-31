@@ -81,6 +81,12 @@ int cli_flag(const char* name);
 const char* cli_value(const char* name, const char* fallback);
 long        cli_number(const char* name, long fallback);
 
+/* A count that may also be written as the bare -NUMBER head and tail have
+ * always taken: `head -1` and `head -n 1` are the same request. Declare it by
+ * putting a '#' in the options string, which is what makes -5 a known option
+ * rather than an unknown one. */
+long        cli_count(const char* name, long fallback);
+
 /* What is left after the options: the files, the paths, the words. `index` is
  * from 0. cli_arg returns 0 past the end. */
 int         cli_argc(void);

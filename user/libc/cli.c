@@ -31,9 +31,23 @@ static int takes_value(char letter)
     return 0;
 }
 
+/* Whether this program takes the obsolescent -NUMBER count: a '#' anywhere in
+ * the options string says so. */
+static int takes_count(void)
+{
+    if (g_options == 0)
+        return 0;
+    for (const char* o = g_options; *o != '\0'; ++o)
+        if (*o == '#')
+            return 1;
+    return 0;
+}
+
 static int known_option(char letter)
 {
     if (g_options == 0)
+        return 1;
+    if (letter >= '0' && letter <= '9' && takes_count())
         return 1;
     for (const char* o = g_options; *o != '\0'; ++o)
         if (*o == letter)
@@ -211,6 +225,30 @@ long cli_number(const char* name, long fallback)
     if (text == 0 || text[0] == '\0')
         return fallback;
     return atoi_simple(text);
+}
+
+/* A count, written either as an option's value or as the bare -NUMBER that
+ * head and tail have taken since before options had letters.
+ *
+ * `head -1` is what people type - it is in scripts older than -n and it is
+ * still what fingers do - and a head that answers "unknown option -1" is
+ * wrong about its own interface. It is a count and not a flag, so it cannot
+ * be run together with anything: -1 is one, and there is no -1a. */
+long cli_count(const char* name, long fallback)
+{
+    for (int i = 0; i < g_argc; ++i) {
+        const char* a = g_argv[i];
+        if (a[0] == '-' && a[1] == '-' && a[2] == '\0')
+            break;
+        if (a[0] != '-' || a[1] < '0' || a[1] > '9')
+            continue;
+        int k = 1;
+        while (a[k] >= '0' && a[k] <= '9')
+            ++k;
+        if (a[k] == '\0')
+            return atoi_simple(&a[1]);
+    }
+    return cli_number(name, fallback);
 }
 
 int cli_argc(void)

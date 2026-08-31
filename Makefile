@@ -126,8 +126,8 @@ SBIN_PROGRAMS := init login wserver desktop shell blockd vfsd netd e1000d audiod
                  authd usbd ps2d syncd ahcid useradd passwd ifconfig
 BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami date \
                  chmod chown stat less grep find wc head tail sort diff tar \
-                 gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync shutdown test true false
-USRBIN_PROGRAMS := hello gui tone say lspci ping ping6 arp nslookup fetch fetch6 env \
+                 gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync shutdown test true false vi dyntest
+USRBIN_PROGRAMS := hello gui tone say httpd lspci ping ping6 arp nslookup fetch fetch6 env \
                  screenshot tests fsbench ipctest nictest nettest blktest vfstest \
                  mvtest v6test churn wintest
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player \
@@ -195,6 +195,13 @@ $(BUILD)/%.asm.o: %.asm
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS_ELF) $< -o $@
 
+# The same assembly, told which kind of link it is going into. crt0 is the one
+# file that has to know: reaching `environ` and `main` is a different
+# instruction in a program that is linked against a shared libc.
+$(BUILD)/pic/%.asm.o: %.asm
+	@mkdir -p $(dir $@)
+	$(AS) $(ASFLAGS_ELF) -DPIC $< -o $@
+
 $(BUILD)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
@@ -233,19 +240,42 @@ $(KERNEL_BIN): $(KERNEL_ELF)
 # return address, checked on the way out. Turned on to find an overrun
 # whose damage only shows up somewhere else entirely - see
 # docs/startup-fault.md - and worth keeping afterwards.
-USER_CFLAGS := -std=c11 -ffreestanding -fstack-protector-strong -fno-pic -fno-pie \
+USER_CFLAGS := -std=c11 -ffreestanding -fstack-protector-strong \
                -msse -msse2 -mfpmath=sse \
                -O2 -g -Wall -Wextra -Iuser/libc/include
 
 LIBC_CSRCS := $(shell find user/libc -name '*.c' | sort)
-LIBC_OBJS  := $(LIBC_CSRCS:%.c=$(BUILD)/%.o)
-CRT0_OBJ   := $(BUILD)/user/libc/crt0.asm.o
+
+# Two builds of libc, and the reason there are two is the boot.
+#
+# Everything on the disk is dynamically linked against /lib/libc.so: one copy
+# of libc in memory instead of one per process, and programs that are a few
+# kilobytes instead of a megabyte each. That is the whole point and it applies
+# to every program a person ever runs.
+#
+# It cannot apply to the four the kernel carries. init, vfsd, blockd and ahcid
+# are boot images, started before there is a filesystem - and /lib/libc.so is a
+# file. A dynamically linked vfsd would need vfsd running to be read. So those
+# four keep a static libc, which is not a shortcut but the shape of the
+# problem: the program that serves the files cannot be one of the files.
+STATIC_PROGRAMS := init vfsd blockd ahcid
+
+LIBC_OBJS     := $(LIBC_CSRCS:%.c=$(BUILD)/%.o)
+LIBC_PIC_OBJS := $(LIBC_CSRCS:%.c=$(BUILD)/pic/%.o)
+CRT0_OBJ      := $(BUILD)/user/libc/crt0.asm.o
+LIBC_SO       := $(BUILD)/libc.so
+LD_SO         := $(BUILD)/ld.so
 
 # User C sources compile with the user toolchain flags, kept separate from the
-# kernel's C++ rule.
+# kernel's C++ rule. -fno-pic for the static build; the PIC build is the same
+# sources through a second rule.
 $(BUILD)/user/%.o: user/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(USER_CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(USER_CFLAGS) -fno-pic -fno-pie -MMD -MP -c $< -o $@
+
+$(BUILD)/pic/user/%.o: user/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -fPIC -MMD -MP -c $< -o $@
 
 # The maths library is the one file that must not be built against the
 # compiler's own idea of what these functions do. GCC recognises exp(y*log(x))
@@ -254,11 +284,45 @@ $(BUILD)/user/%.o: user/%.c
 # the pattern rule above.
 $(BUILD)/user/libc/math.o: user/libc/math.c
 	@mkdir -p $(dir $@)
-	$(CC) $(USER_CFLAGS) -fno-builtin -MMD -MP -c $< -o $@
+	$(CC) $(USER_CFLAGS) -fno-pic -fno-pie -fno-builtin -MMD -MP -c $< -o $@
 
-# One rule builds any user program: crt0 first, the program object, then libc.
-$(BUILD)/%.elf: $(CRT0_OBJ) $(BUILD)/user/%.o $(LIBC_OBJS) user/user.ld
-	$(LD) -nostdlib -T user/user.ld -o $@ $(CRT0_OBJ) $(BUILD)/user/$*.o $(LIBC_OBJS)
+$(BUILD)/pic/user/libc/math.o: user/libc/math.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -fPIC -fno-builtin -MMD -MP -c $< -o $@
+
+# libc as a shared object.
+#
+# -z now: every relocation is resolved before the program starts, so there is
+# no lazy binding - no resolver trampoline in ld.so, and no writable PLT for
+# anything to redirect. Lazy binding trades that away for a faster start on
+# programs that call little of what they link against, and nothing here is
+# large enough for the trade to pay.
+#
+# --hash-style=sysv: the linker reads the symbol count out of the hash table's
+# nchain field, and only the SysV table has one. A GNU hash table would leave
+# it with no way to know how many symbols there are.
+$(LIBC_SO): $(LIBC_PIC_OBJS)
+	$(LD) -shared -z now --hash-style=sysv -soname libc.so --build-id=none -o $@ $(LIBC_PIC_OBJS)
+
+# The dynamic linker. Its own two objects and nothing else - it is the thing
+# that makes libc reachable, so it cannot use libc. See user/ld.so.c.
+$(LD_SO): $(BUILD)/user/libc/ldstart.asm.o $(BUILD)/user/ld.so.o user/ld.ld
+	$(LD) -nostdlib -T user/ld.ld --build-id=none -o $@ \
+	      $(BUILD)/user/libc/ldstart.asm.o $(BUILD)/user/ld.so.o
+
+$(BUILD)/user/ld.so.o: user/ld.so.c
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -fno-pic -fno-pie -fno-stack-protector -MMD -MP -c $< -o $@
+
+# One rule builds any user program: crt0 first, the program object, then the
+# shared libc. The four static ones are the exception below.
+$(BUILD)/%.elf: $(BUILD)/pic/user/libc/crt0.asm.o $(BUILD)/pic/user/%.o $(LIBC_SO)
+	$(LD) -pie -z now --hash-style=sysv --build-id=none \
+	      --dynamic-linker=/lib/ld.so -o $@ \
+	      $(BUILD)/pic/user/libc/crt0.asm.o $(BUILD)/pic/user/$*.o $(LIBC_SO)
+
+$(foreach p,$(STATIC_PROGRAMS),$(eval $(BUILD)/$(p).elf: $(CRT0_OBJ) $(BUILD)/user/$(p).o $(LIBC_OBJS) user/user.ld ; \
+	$$(LD) -nostdlib -T user/user.ld --build-id=none -o $$@ $(CRT0_OBJ) $(BUILD)/user/$(p).o $(LIBC_OBJS)))
 
 # --- disk image -------------------------------------------------------------
 # Disk 0 carries the two bootloader stages and the kernel, at fixed sectors,
@@ -282,7 +346,13 @@ $(IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(KERNEL_ELF) | $(DIST)
 # it reads argv[0] and defaults accordingly. Installed twice rather than
 # linked, because this filesystem's builder has no symlinks - see the note
 # about .alias files in mkext.sh.
-EXT_ADDS := bin/reboot=$(BUILD)/shutdown.elf \
+# /lib holds the two halves of dynamic linking: the interpreter every program
+# names in its PT_INTERP, and the C library they all share. Nothing else goes
+# there - a library search path is a thing to get wrong and there is only one
+# library.
+EXT_ADDS := lib/ld.so=$(BUILD)/dist/ld.so \
+            lib/libc.so=$(BUILD)/dist/libc.so \
+            bin/reboot=$(BUILD)/shutdown.elf \
             bin/[=$(BUILD)/test.elf \
             $(foreach p,$(SBIN_PROGRAMS),sbin/$(p)=$(BUILD)/$(p).elf) \
             $(foreach p,$(BIN_PROGRAMS),bin/$(p)=$(BUILD)/$(p).elf) \
@@ -314,7 +384,21 @@ $(FONT_OUT): $(FONT_SRC) tools/mkfont.py | $(BUILD)
 fonts: $(FONT_OUT)
 .PHONY: fonts
 
-$(EXT_IMG): $(USER_ELFS) tools/mkext.sh $(MEDIA_STAMP) $(FONT_OUT) | $(DIST)
+# The copies that go on the disk carry no debug information.
+#
+# Not a size optimisation of the image - a size optimisation of every exec.
+# libc.so is a megabyte, three quarters of which is DWARF, and the loader reads
+# the whole file: from disk, into a buffer, into the blob, across into the
+# kernel, to map 260 KiB of it. Stripping the installed copy takes an exec from
+# 1.3 MiB of copying to 300 KiB. The unstripped ones stay in build/ , which is
+# where a fault report is turned back into a line number.
+$(BUILD)/dist/libc.so: $(LIBC_SO) | $(DIST)
+	@$(OBJCOPY) --strip-debug $< $@
+
+$(BUILD)/dist/ld.so: $(LD_SO) | $(DIST)
+	@$(OBJCOPY) --strip-debug $< $@
+
+$(EXT_IMG): $(USER_ELFS) $(BUILD)/dist/libc.so $(BUILD)/dist/ld.so tools/mkext.sh $(MEDIA_STAMP) $(FONT_OUT) | $(DIST)
 	@APPS="$(EXT_APPS)" MEDIA_DIR="$(BUILD)/media" FONT_DIR="$(BUILD)/fonts" \
 	    tools/mkext.sh $@ $(EXT_MIB) $(EXT_ADDS)
 
@@ -366,6 +450,11 @@ $(DIST):
 # (SLIRP) networking. The guest is 10.0.2.15, the gateway/DNS is 10.0.2.2/3.
 # Naming the netdev explicitly also suppresses the legacy default NIC, so there
 # is exactly one card to find.
+# HOSTFWD is empty except when something is testing a server inside the guest:
+# `HOSTFWD=,hostfwd=tcp::8080-:80` makes port 8080 on this machine reach port 80
+# in there. It goes on the existing netdev rather than adding a second one,
+# because a guest with two cards is a different machine from the one people run.
+#
 # Two IDE disks: disk 0 boots and holds the kernel; disk 1 is the ext4 root
 # filesystem. QEMU assigns them to the primary channel master and slave in
 # order, so the kernel's ATA driver finds the ext disk as drive index 1.
@@ -383,7 +472,8 @@ QEMUFLAGS := -machine pc,hpet=on \
              -drive format=raw,file=$(SATA_IMG),if=none,id=satadisk \
              -device ide-hd,drive=satadisk,bus=sata0.1 \
              -m $(MEM) -smp $(CPUS) \
-             -netdev user,id=net0,ipv4=on,ipv6=on -device e1000,netdev=net0 \
+             -netdev user,id=net0,ipv4=on,ipv6=on$(HOSTFWD) \
+             -device e1000,netdev=net0 \
              -no-reboot -no-shutdown \
              $(QEMU_EXTRA)
 
@@ -404,6 +494,8 @@ check: $(IMG) $(EXT_IMG) $(MNT_IMG) $(SATA_IMG) $(USB_IMG)
 	@python3 tools/vm/converted.py
 	@python3 tools/vm/shlang.py
 	@python3 tools/vm/pty.py
+	@python3 tools/vm/sockets.py
+	@python3 tools/vm/editor.py
 	@python3 tools/vm/scrolled.py
 	@python3 tools/vm/stride.py
 	@python3 tools/vm/zones.py

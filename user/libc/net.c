@@ -8,9 +8,11 @@
  * which is the honest answer - there is no network without it.
  */
 
+#include <errno.h>
 #include <ipc.h>
 #include <net.h>
 #include <netd.h>
+#include <socket.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -216,4 +218,132 @@ void tcp_close(int connection)
     q.tag = NET_TCP_CLOSE;
     q.word[0] = connection;
     ask(&q, &a);
+}
+
+/* --- sockets ---------------------------------------------------------------
+ *
+ * See <socket.h>. The stack names a connection with a number; these wrap that
+ * number in a descriptor, so that everything which already works on one works
+ * on a connection too.
+ *
+ * A socket's kfd holds which: a positive number is a connection, a negative
+ * one is minus the port being listened on, and zero is a socket that has been
+ * made and not yet used for anything. Three states in one field because they
+ * are three states of one thing, and a second field would let them disagree.
+ */
+
+int net_listen(unsigned short port)
+{
+    struct ipc_message q, a;
+    memset(&q, 0, sizeof(q));
+    q.tag = NET_TCP_LISTEN;
+    q.word[0] = (long)port;
+    if (ask(&q, &a) != 0 || a.word[0] < 0)
+        return -1;
+    return 0;
+}
+
+void net_unlisten(unsigned short port)
+{
+    struct ipc_message q, a;
+    memset(&q, 0, sizeof(q));
+    q.tag = NET_TCP_UNLISTEN;
+    q.word[0] = (long)port;
+    ask(&q, &a);
+}
+
+int net_accept(unsigned short port, uint32_t* peer, uint16_t* peer_port)
+{
+    struct ipc_message q, a;
+    memset(&q, 0, sizeof(q));
+    q.tag = NET_TCP_ACCEPT;
+    q.word[0] = (long)port;
+    /* This one waits: the reply does not come back until somebody connects,
+     * which is what accept means and why the stack keeps the request rather
+     * than answering it. */
+    if (ask(&q, &a) != 0 || a.word[0] < 0)
+        return -1;
+    if (peer != 0)      *peer = (uint32_t)a.word[1];
+    if (peer_port != 0) *peer_port = (uint16_t)a.word[2];
+    return (int)a.word[0];
+}
+
+/* --- the descriptor side ---------------------------------------------------
+ *
+ * These live here rather than in fs.c because what they are made of is the
+ * stack, not the filesystem. The one thing they need from over there is a
+ * descriptor, which __fd_adopt_socket hands out.
+ */
+
+int socket(int domain, int type, int protocol)
+{
+    if (domain != AF_INET || type != SOCK_STREAM || protocol != 0) {
+        /* Refused rather than approximated: a socket that claimed to be UDP
+         * and behaved like TCP would be found out somewhere much less
+         * convenient than here. */
+        errno = EINVAL;
+        return -1;
+    }
+    return __fd_adopt_socket(0);
+}
+
+int bind(int fd, uint32_t address, uint16_t port)
+{
+    /* Every address this machine has, which on a machine with one address is
+     * the only thing it can mean. A particular one is accepted and ignored
+     * rather than refused, because the answer would be the same. */
+    (void)address;
+    return __fd_socket_bind(fd, port);
+}
+
+int listen(int fd, int backlog)
+{
+    (void)backlog;      /* the stack's queue is fixed; see BACKLOG_MAX */
+    const int port = __fd_socket_port(fd);
+    if (port <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (net_listen((unsigned short)port) != 0) {
+        errno = EADDRINUSE;
+        return -1;
+    }
+    return 0;
+}
+
+int accept(int fd, uint32_t* peer, uint16_t* peer_port)
+{
+    const int port = __fd_socket_port(fd);
+    if (port <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    const int conn = net_accept((unsigned short)port, peer, peer_port);
+    if (conn < 0) {
+        errno = EIO;
+        return -1;
+    }
+    return __fd_adopt_socket(conn);
+}
+
+int connect(int fd, uint32_t address, uint16_t port)
+{
+    const int conn = tcp_connect(address, port);
+    if (conn < 0) {
+        errno = ECONNREFUSED;
+        return -1;
+    }
+    return __fd_socket_connected(fd, conn);
+}
+
+long send(int fd, const void* buffer, unsigned long bytes, int flags)
+{
+    (void)flags;
+    return write(fd, buffer, bytes);
+}
+
+long recv(int fd, void* buffer, unsigned long bytes, int flags)
+{
+    (void)flags;
+    return read(fd, buffer, bytes);
 }

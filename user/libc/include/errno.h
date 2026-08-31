@@ -55,6 +55,7 @@
 #define ENOTEMPTY       39  /* a directory with things still in it */
 #define ELOOP           40  /* too many symbolic links */
 #define ETIMEDOUT      110  /* it took too long */
+#define EADDRINUSE      98  /* that port is already claimed */
 #define ECONNREFUSED   111  /* nothing listening there */
 #define EHOSTUNREACH   113  /* no route */
 

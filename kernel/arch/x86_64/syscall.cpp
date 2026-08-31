@@ -1,5 +1,7 @@
 #include <leah/console.hpp>
 #include <leah/cpu.hpp>
+#include <leah/image.hpp>
+#include <leah/object.hpp>
 #include <leah/file.hpp>
 #include <leah/gdt.hpp>
 #include <leah/interrupts.hpp>
@@ -90,6 +92,26 @@ i64 sys_sbrk(i64 increment)
 // supported: file-backed mmap needs a page cache to be worth having, and the
 // programs that want memory here want it zeroed, not shared with a file.
 // Returns the base address, or -1.
+/* A NUL-terminated string out of user memory, bounded.
+ *
+ * Every byte is checked before it is read: a string is the one argument whose
+ * length the caller does not have to tell the truth about, and walking off the
+ * end of the user half looking for a NUL is how a kernel reads its own memory
+ * on somebody else's behalf. */
+bool copy_user_string(u64 address, char* into, usize max)
+{
+    if (address == 0 || max == 0)
+        return false;
+    for (usize i = 0; i < max; ++i) {
+        if (!user_range_ok(address + i, 1))
+            return false;
+        into[i] = *reinterpret_cast<const char*>(address + i);
+        if (into[i] == '\0')
+            return true;
+    }
+    return false;                       // longer than the caller allowed for
+}
+
 i64 sys_mmap(u64 addr, u64 length, u64 prot, u64 flags)
 {
     if (length == 0)
@@ -1128,7 +1150,7 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         /* execve(image, bytes, argv, entry, segments, count). The caller read
          * the program *and* worked out what its segments are; the kernel maps
          * what it is told and knows nothing about the format they came in. */
-        if (!user_range_ok(frame->r10, 16 + 16 * 40)) {
+        if (!user_range_ok(frame->r10, 16 + 16 * 40 + 32 * 8)) {
             frame->rax = static_cast<u64>(-1);
             break;
         }
@@ -1136,6 +1158,10 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
             const auto* request = reinterpret_cast<const u64*>(frame->r10);
             const u64 entry_point = request[0];
             const u32 count = static_cast<u32>(request[1] & 0xFFFFFFFFu);
+            /* The auxiliary vector sits after the segment array, and its
+             * length is the high half of the same word the count is in. */
+            const u32 auxc = static_cast<u32>(request[1] >> 32);
+            const u64* aux = request + 2 + (16 * 40) / sizeof(u64);
             /* r8 is the environment, which may be null - a program started
              * with none is a program with none, not an error. */
             process::exec(*frame, reinterpret_cast<const u8*>(frame->rdi),
@@ -1143,7 +1169,8 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
                           reinterpret_cast<char**>(frame->rdx),
                           reinterpret_cast<char**>(frame->r8),
                           entry_point,
-                          reinterpret_cast<const u8*>(frame->r10) + 16, count);
+                          reinterpret_cast<const u8*>(frame->r10) + 16, count,
+                          aux, auxc > 32 ? 0 : auxc);
         }
         // A new image knows nothing of the old one's handlers, and their
         // addresses no longer mean anything, so dispositions go back to default.
@@ -1325,6 +1352,80 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         }
         frame->rax = static_cast<u64>(
             pty::control(object, static_cast<int>(frame->rsi), frame->rdx));
+        break;
+    }
+
+    case ImageFind: {
+        /* Is this program already held? A name and a version, both from
+         * userland, both opaque here - the kernel cannot resolve a path, and
+         * this does not teach it to. */
+        char name[image::kNameMax];
+        if (!copy_user_string(frame->rdi, name, sizeof(name))) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = static_cast<u64>(image::find(name, frame->rsi));
+        break;
+    }
+
+    case ImageCreate: {
+        char name[image::kNameMax];
+        if (!copy_user_string(frame->rdi, name, sizeof(name)) ||
+            frame->r10 == 0 || frame->r10 > image::kMaxBytes ||
+            !user_range_ok(frame->rdx, frame->r10)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = static_cast<u64>(
+            image::create(name, frame->rsi,
+                          reinterpret_cast<const u8*>(frame->rdx), frame->r10));
+        break;
+    }
+
+    case ImageRead: {
+        /* Reading an image back is how the loader parses a program it did not
+         * have to read: the headers come out of the pages the kernel already
+         * holds, so an exec of something that has been run before touches the
+         * filesystem not at all. */
+        if (frame->r10 == 0 || !user_range_ok(frame->rdx, frame->r10)) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        frame->rax = image::read(static_cast<i32>(frame->rdi), frame->rsi,
+                                 reinterpret_cast<void*>(frame->rdx),
+                                 frame->r10)
+                         ? 0
+                         : static_cast<u64>(-1);
+        break;
+    }
+
+    case HandleClose:
+        frame->rax = static_cast<u64>(
+            object::close(scheduler::current_tgid(),
+                          static_cast<object::Handle>(frame->rdi)) ? 0 : -1);
+        break;
+
+    case HandleDup:
+        /* rsi is the rights mask. It can only narrow: asking for a right the
+         * original does not carry does not produce it. */
+        frame->rax = static_cast<u64>(
+            object::duplicate(scheduler::current_tgid(),
+                              static_cast<object::Handle>(frame->rdi),
+                              static_cast<u32>(frame->rsi)));
+        break;
+
+    case HandleInfo: {
+        /* The type in the low half and the rights in the high half, so a
+         * caller learns both without a second call and without a struct to
+         * copy across the boundary. */
+        const u32 pid = scheduler::current_tgid();
+        const auto type = object::type_of(pid, static_cast<object::Handle>(frame->rdi));
+        if (type == object::Type::None) {
+            frame->rax = static_cast<u64>(-1);
+            break;
+        }
+        const u64 rights = object::rights_of(pid, static_cast<object::Handle>(frame->rdi));
+        frame->rax = static_cast<u32>(type) | (rights << 32);
         break;
     }
 

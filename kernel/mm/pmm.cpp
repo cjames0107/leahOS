@@ -1,3 +1,4 @@
+#include <leah/console.hpp>
 #include <leah/memory.hpp>
 #include <leah/panic.hpp>
 #include <leah/heap.hpp>
@@ -31,6 +32,14 @@ u64 g_search_hint = 0;
 
 bool test(u64 frame)
 {
+    /* Outside the bitmap is "not free", which is the safe answer and the true
+     * one: a frame the allocator does not own is not a frame it can hand out.
+     * Without the bound this read ran off the end of the bitmap - a mapped
+     * framebuffer is at 0xfd000000 on this machine, three megabytes of frames
+     * the allocator has never heard of, and every process that unmaps one asks
+     * about them. */
+    if (frame >= g_frame_count)
+        return true;
     return (g_bitmap[frame / 64] >> (frame % 64) & 1) != 0;
 }
 
@@ -72,6 +81,61 @@ void release(u64 base, u64 length)
     const u64 last  = page_align_down(base + length) >> kPageShift;
     for (u64 frame = first; frame < last; ++frame)
         mark_free(frame);
+}
+
+/* Freed frames are filled with 0xCC, and checked on the way back out.
+ *
+ * A frame handed to a second owner while the first still maps it is the one
+ * failure this allocator cannot report on its own: both sides are doing
+ * something legitimate and the damage appears somewhere else entirely, as a
+ * page of a program's code reading back as zeros long afterwards.
+ *
+ * 0xCC is int3, so the first owner executing out of a page it has lost traps
+ * immediately and says where. Reading one gets an unmistakable pattern rather
+ * than plausible data. And a frame that comes back out of the allocator only
+ * partly poisoned was written to after it was freed, which is the other half
+ * of the same bug seen from the other side.
+ *
+ * Costs a page-sized store per free. Worth it while there is a bug like that
+ * to find; turn it off when there is not.
+ */
+constexpr bool kPoisonFreedFrames = true;
+constexpr u64  kPoisonWord = 0xCCCCCCCCCCCCCCCCull;
+
+/* Reaching a frame by its physical address needs the direct map, and the
+ * direct map is built out of frames - so there is a window early in the boot
+ * where freeing one cannot touch it. */
+bool g_can_reach_frames = false;
+
+void poison(paddr_t frame)
+{
+    if (!kPoisonFreedFrames || !g_can_reach_frames)
+        return;
+    auto* words = reinterpret_cast<u64*>(memory::phys_to_direct(frame));
+    for (usize i = 0; i < kPageSize / sizeof(u64); ++i)
+        words[i] = kPoisonWord;
+}
+
+/* Whether this frame was poisoned and then written to. Frames that have been
+ * free since boot hold whatever the firmware left and are not poisoned, so the
+ * first word is what says whether there is anything to check. */
+void check_poison(paddr_t frame)
+{
+    if (!kPoisonFreedFrames || !g_can_reach_frames)
+        return;
+    const auto* words =
+        reinterpret_cast<const u64*>(memory::phys_to_direct(frame));
+    if (words[0] != kPoisonWord)
+        return;                         // never poisoned: nothing to say
+    for (usize i = 1; i < kPageSize / sizeof(u64); ++i) {
+        if (words[i] == kPoisonWord)
+            continue;
+        console::printf("  pmm: frame %p was written to after it was freed "
+                        "(word %u is %016llx)\n",
+                        reinterpret_cast<void*>(frame),
+                        static_cast<unsigned>(i), words[i]);
+        return;
+    }
 }
 
 } // namespace
@@ -170,6 +234,7 @@ paddr_t alloc()
                     continue;
                 mark_used(frame);
                 g_search_hint = word;
+                check_poison(frame << kPageShift);
                 return frame << kPageShift;
             }
         }
@@ -210,6 +275,8 @@ void free(paddr_t frame)
     if (frame == 0)
         return;
     const u64 index = frame >> kPageShift;
+    if (index < g_frame_count && test(index))
+        poison(frame);
     mark_free(index);
     if (index / 64 < g_search_hint)
         g_search_hint = index / 64;
@@ -273,6 +340,7 @@ void free_contiguous(paddr_t base, usize frames)
 
 void use_direct_map()
 {
+    g_can_reach_frames = true;
     // The low identity map is gone; reach the bitmap through the direct map.
     g_bitmap = reinterpret_cast<u64*>(memory::phys_to_direct(g_bitmap_phys));
 }
