@@ -5,6 +5,7 @@
 #include <leah/percpu.hpp>
 #include <leah/apic.hpp>
 #include <leah/interrupts.hpp>
+#include <leah/lock.hpp>
 #include <leah/pmm.hpp>
 #include <leah/string.hpp>
 #include <leah/vmm.hpp>
@@ -48,6 +49,8 @@ u64* table_of(u64 entry)
 {
     return phys_ptr(entry & kAddressMask);
 }
+
+sync::RankedLock g_lock(sync::Rank::Vmm, "vmm");
 
 u64 index_of(vaddr_t virt, int level)   // level 4 = PML4 ... 1 = PT
 {
@@ -347,6 +350,7 @@ void free_table_tree(u64 table_phys, int level)
 
 bool map(vaddr_t virt, paddr_t phys, u64 flags)
 {
+    sync::Guard guard(g_lock);
     return map_into(current_pml4(), virt, phys, flags);
 }
 
@@ -479,6 +483,7 @@ u64 entry_for(vaddr_t virt)
 
 bool handle_lazy_fault(vaddr_t virt)
 {
+    sync::Guard guard(g_lock);
     u64* pt_entry = walk_to_pte(current_pml4(), virt);
     if (pt_entry == nullptr)
         return false;
@@ -503,6 +508,7 @@ bool handle_lazy_fault(vaddr_t virt)
 
 bool handle_cow_fault(vaddr_t virt)
 {
+    sync::Guard guard(g_lock);
     u64* pt_entry = walk_to_pte(current_pml4(), virt);
     if (pt_entry == nullptr)
         return false;
@@ -558,11 +564,13 @@ bool handle_cow_fault(vaddr_t virt)
 
 bool unmap(vaddr_t virt)
 {
+    sync::Guard guard(g_lock);
     return unmap_into(current_pml4(), virt);
 }
 
 paddr_t translate(vaddr_t virt)
 {
+    sync::Guard guard(g_lock);
     return translate_into(current_pml4(), virt);
 }
 
@@ -584,7 +592,37 @@ bool map_mmio(vaddr_t virt, paddr_t phys, usize bytes)
 AddressSpace kernel_space()  { return g_pml4_phys; }
 AddressSpace current_space() { return loaded_pml4(); }
 
+/* Defined further down, next to fork, which is their only inside caller. */
+AddressSpace create_address_space_locked();
+void destroy_address_space_locked(AddressSpace space);
+
 AddressSpace create_address_space()
+{
+    sync::Guard guard(g_lock);
+    return create_address_space_locked();
+}
+
+// Write down what a page is going to be, without giving it anything yet.
+bool reserve(vaddr_t virt, u64 flags)
+{
+    sync::Guard guard(g_lock);
+    u64* pt_entry = walk_to_pte_making(current_pml4(), virt);
+    if (pt_entry == nullptr)
+        return false;
+    if ((*pt_entry & Present) != 0)
+        return true;                    // already backed; leave it alone
+    *pt_entry = (flags & (Write | User | NoExecute)) | Lazy;
+    return true;
+}
+
+/* Making one and tearing one down, with the lock already held.
+ *
+ * A fork builds the child's space and then walks the parent's into it, and the
+ * two halves are one critical section - a parent whose tables moved underneath
+ * the walk would hand the child a space that never existed. So fork holds the
+ * lock across both, and reaches these rather than the public forms.
+ */
+AddressSpace create_address_space_locked()
 {
     const paddr_t space_phys = alloc_table();
     if (space_phys == 0)
@@ -602,21 +640,36 @@ AddressSpace create_address_space()
     return space_phys;
 }
 
-// Write down what a page is going to be, without giving it anything yet.
-bool reserve(vaddr_t virt, u64 flags)
+void destroy_address_space_locked(AddressSpace space)
 {
-    u64* pt_entry = walk_to_pte_making(current_pml4(), virt);
-    if (pt_entry == nullptr)
-        return false;
-    if ((*pt_entry & Present) != 0)
-        return true;                    // already backed; leave it alone
-    *pt_entry = (flags & (Write | User | NoExecute)) | Lazy;
-    return true;
+    if (space == 0 || space == g_pml4_phys)
+        return;
+
+    // Never free while it is the active table; the caller switches away first.
+    if (space == loaded_pml4())
+        switch_address_space(g_pml4_phys);
+
+    u64* pml4 = phys_ptr(space);
+    u64* kernel = kernel_pml4();
+
+    // Only the slots this space added - the ones the kernel does not share -
+    // are ours to free. Freeing a shared kernel sub-tree would unmap the kernel
+    // out from under every other space.
+    for (u64 i = 0; i < kEntriesPerTable; ++i) {
+        if ((pml4[i] & Present) == 0)
+            continue;
+        if (pml4[i] == kernel[i])
+            continue;                       // shared with the kernel, leave it
+        free_table_tree(pml4[i] & kAddressMask, 3);
+    }
+
+    pmm::free(space);
 }
 
 AddressSpace fork_address_space(AddressSpace parent)
 {
-    const AddressSpace child = create_address_space();
+    sync::Guard guard(g_lock);
+    const AddressSpace child = create_address_space_locked();
     if (child == 0)
         return 0;
 
@@ -658,7 +711,7 @@ AddressSpace fork_address_space(AddressSpace parent)
                                 m << 39 | p << 30 | d << 21 | t << 12;
                             u64* into = walk_to_pte_making(child_pml4, at);
                             if (into == nullptr) {
-                                destroy_address_space(child);
+                                destroy_address_space_locked(child);
                                 return 0;
                             }
                             *into = entry;      /* reserved there too */
@@ -683,7 +736,7 @@ AddressSpace fork_address_space(AddressSpace parent)
                         pmm::share(source);
                         if (!map_into(child_pml4, virt, source, flags | Shared)) {
                             pmm::release(source);
-                            destroy_address_space(child);
+                            destroy_address_space_locked(child);
                             return 0;
                         }
                         continue;
@@ -710,7 +763,7 @@ AddressSpace fork_address_space(AddressSpace parent)
                             : flags;
                         if (!map_into(child_pml4, virt, source, shared_flags)) {
                             pmm::release(source);
-                            destroy_address_space(child);
+                            destroy_address_space_locked(child);
                             return 0;
                         }
                         if (needs_cow) {
@@ -727,14 +780,14 @@ AddressSpace fork_address_space(AddressSpace parent)
                     // correct, just slower.
                     const paddr_t frame = pmm::alloc();
                     if (frame == 0) {
-                        destroy_address_space(child);
+                        destroy_address_space_locked(child);
                         return 0;
                     }
                     memcpy(phys_ptr(frame), phys_ptr(source), kPageSize);
 
                     if (!map_into(child_pml4, virt, frame, flags)) {
                         pmm::free(frame);
-                        destroy_address_space(child);
+                        destroy_address_space_locked(child);
                         return 0;
                     }
                 }
@@ -747,28 +800,8 @@ AddressSpace fork_address_space(AddressSpace parent)
 
 void destroy_address_space(AddressSpace space)
 {
-    if (space == 0 || space == g_pml4_phys)
-        return;
-
-    // Never free while it is the active table; the caller switches away first.
-    if (space == loaded_pml4())
-        switch_address_space(g_pml4_phys);
-
-    u64* pml4 = phys_ptr(space);
-    u64* kernel = kernel_pml4();
-
-    // Only the slots this space added - the ones the kernel does not share -
-    // are ours to free. Freeing a shared kernel sub-tree would unmap the kernel
-    // out from under every other space.
-    for (u64 i = 0; i < kEntriesPerTable; ++i) {
-        if ((pml4[i] & Present) == 0)
-            continue;
-        if (pml4[i] == kernel[i])
-            continue;                       // shared with the kernel, leave it
-        free_table_tree(pml4[i] & kAddressMask, 3);
-    }
-
-    pmm::free(space);
+    sync::Guard guard(g_lock);
+    destroy_address_space_locked(space);
 }
 
 void switch_address_space(AddressSpace space)

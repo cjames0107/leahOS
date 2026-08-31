@@ -36,16 +36,21 @@ Held& mine()
 void RankedLock::acquire()
 {
     Held& held = mine();
+    /* Kept for the report below: "taking X while holding X" says what happened
+     * and not where, and where is the only thing worth knowing. */
+    void* const from  = __builtin_return_address(0);
+    void* const from2 = __builtin_return_address(1);
 
     /* The check happens before the lock is taken, deliberately. A violation
      * detected afterwards has already had the chance to deadlock. */
     if (held.count > 0 && static_cast<u32>(m_rank) <=
                               static_cast<u32>(held.rank[held.count - 1])) {
         console::printf("\n  lock order: taking %s (rank %u) while holding "
-                        "%s (rank %u)\n",
+                        "%s (rank %u)\n    from %p, called from %p\n",
                         m_name, static_cast<u32>(m_rank),
                         held.name[held.count - 1],
-                        static_cast<u32>(held.rank[held.count - 1]));
+                        static_cast<u32>(held.rank[held.count - 1]),
+                        from, from2);
         panic("locks taken out of order");
     }
     if (held.count >= kMaxDepth) {
