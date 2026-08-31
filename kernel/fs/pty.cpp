@@ -80,6 +80,43 @@ Pty g_ptys[kMaxPtys];
  * in this file is short enough that one lock costs nothing. */
 sync::RankedLock g_lock(sync::Rank::Pty, "pty");
 
+/* What to wake, once the lock is off.
+ *
+ * Nothing here may call the scheduler while holding the terminal's lock.
+ * scheduler::wake takes the big kernel lock, and taking that while holding a
+ * finer one is the deadlock the ordering exists to prevent: one processor
+ * waits for the big lock holding this, another holds the big lock and waits
+ * for this. It has been safe only by accident - every syscall already holds
+ * the big lock on entry, so the acquire is recursive and returns at once - and
+ * "safe by accident" stopped being good enough the moment the descriptor table
+ * was locked as well.
+ *
+ * So the work happens under the lock, what needs waking is written down, and
+ * the waking happens after. */
+struct Wakes {
+    u64 channel[3];
+    u32 count;
+    i32 pgid;                   /* a group to signal, or 0 */
+    int signo;
+
+    void add(u64 c)
+    {
+        for (u32 i = 0; i < count; ++i)
+            if (channel[i] == c)
+                return;         /* one wake is as good as two */
+        if (count < 3)
+            channel[count++] = c;
+    }
+};
+
+void flush(const Wakes& w)
+{
+    if (w.pgid > 0 && w.signo != 0)
+        scheduler::signal_send_group(static_cast<u32>(w.pgid), w.signo);
+    for (u32 i = 0; i < w.count; ++i)
+        scheduler::wake(w.channel[i]);
+}
+
 /* One channel per direction per pty, as pipes have. The addresses are distinct
  * because they are inside distinct objects. */
 u64 slave_channel(Pty* p)  { return reinterpret_cast<u64>(&p->to_slave); }
@@ -108,7 +145,7 @@ void commit_line(Pty* p)
 
 /* One key, through the line discipline. This is the whole of what a terminal
  * program used to do for itself. */
-void key(Pty* p, u8 c)
+void key(Pty* p, u8 c, Wakes& wake)
 {
     if ((p->lflag & kIsig) != 0) {
         int signo = 0;
@@ -120,10 +157,10 @@ void key(Pty* p, u8 c)
              * cancelled must not turn up as the next command. */
             p->line_len = 0;
             echo_text(p, "^C\r\n");
-            if (p->fg_pgid > 0)
-                scheduler::signal_send_group(static_cast<u32>(p->fg_pgid), signo);
-            scheduler::wake(slave_channel(p));
-            scheduler::wake(master_channel(p));
+            wake.pgid = p->fg_pgid;
+            wake.signo = signo;
+            wake.add(slave_channel(p));
+            wake.add(master_channel(p));
             return;
         }
     }
@@ -209,28 +246,35 @@ bool exists(int index)
 
 i64 control(void* object, int op, u64 argument)
 {
-    sync::Guard guard(g_lock);
-    auto* p = static_cast<Pty*>(object);
-    if (p == nullptr || !p->used)
-        return -1;
-    switch (op) {
-    case kGetPgrp:  return p->fg_pgid;
-    case kSetPgrp:  p->fg_pgid = static_cast<i32>(argument); return 0;
-    case kGetFlags: return p->lflag;
-    case kSetFlags:
-        p->lflag = static_cast<u32>(argument);
-        /* Leaving canonical mode hands over whatever was half typed rather
-         * than stranding it: a program that switches to raw mode wants the
-         * keys, not a line that will never be finished. */
-        if ((p->lflag & kIcanon) == 0 && p->line_len > 0) {
-            commit_line(p);
-            scheduler::wake(slave_channel(p));
+    Wakes wake{};
+    i64 answer;
+    {
+        sync::Guard guard(g_lock);
+        auto* p = static_cast<Pty*>(object);
+        if (p == nullptr || !p->used)
+            return -1;
+        switch (op) {
+        case kGetPgrp:  answer = p->fg_pgid; break;
+        case kSetPgrp:  p->fg_pgid = static_cast<i32>(argument); answer = 0; break;
+        case kGetFlags: answer = p->lflag; break;
+        case kSetFlags:
+            p->lflag = static_cast<u32>(argument);
+            /* Leaving canonical mode hands over whatever was half typed rather
+             * than stranding it: a program that switches to raw mode wants the
+             * keys, not a line that will never be finished. */
+            if ((p->lflag & kIcanon) == 0 && p->line_len > 0) {
+                commit_line(p);
+                wake.add(slave_channel(p));
+            }
+            answer = 0;
+            break;
+        case kGetSize:  answer = p->size; break;
+        case kSetSize:  p->size = static_cast<u32>(argument); answer = 0; break;
+        default:        answer = -1; break;
         }
-        return 0;
-    case kGetSize:  return p->size;
-    case kSetSize:  p->size = static_cast<u32>(argument); return 0;
-    default:        return -1;
     }
+    flush(wake);
+    return answer;
 }
 
 i64 read(void* object, bool master, void* buffer, usize count)
@@ -243,6 +287,9 @@ i64 read(void* object, bool master, void* buffer, usize count)
     Ring& ring = master ? p->to_master : p->to_slave;
     const u64 channel = master ? master_channel(p) : slave_channel(p);
 
+    i64  done = -1;
+    bool poll = false;
+    {
     sync::Guard guard(g_lock);
     for (;;) {
         if (ring.count > 0) {
@@ -256,51 +303,68 @@ i64 read(void* object, bool master, void* buffer, usize count)
                 if (!master && (p->lflag & kIcanon) != 0 && c == '\n')
                     break;
             }
-            scheduler::wake(scheduler::kPollChannel);
-            return static_cast<i64>(n);
+            /* Noted, not done: the lock is still on. */
+            done = static_cast<i64>(n);
+            poll = true;
+            break;
         }
         /* The other end has gone: end of file, which is what closes a shell
          * whose terminal window was shut. */
-        if (master ? (p->slaves == 0) : (p->masters == 0))
-            return 0;
+        if (master ? (p->slaves == 0) : (p->masters == 0)) {
+            done = 0;
+            break;
+        }
         /* Held across the check above and dropped inside the block, so a
          * writer cannot put a byte in and wake between the two. */
         scheduler::block_on_releasing(channel, g_lock);
-        if (scheduler::signal_pending())
-            return files::kInterrupted;
+        if (scheduler::signal_pending()) {
+            done = files::kInterrupted;
+            break;
+        }
     }
+    }
+    if (poll)
+        scheduler::wake(scheduler::kPollChannel);
+    return done;
 }
 
 i64 write(void* object, bool master, const void* buffer, usize count)
 {
-    sync::Guard guard(g_lock);
-    auto* p = static_cast<Pty*>(object);
-    const auto* in = static_cast<const u8*>(buffer);
-    if (p == nullptr || !p->used)
-        return -1;
+    Wakes wake{};
+    i64 answer;
+    {
+        sync::Guard guard(g_lock);
+        auto* p = static_cast<Pty*>(object);
+        const auto* in = static_cast<const u8*>(buffer);
+        if (p == nullptr || !p->used)
+            return -1;
 
-    if (master) {
-        /* Keys. Through the line discipline, one at a time, because what each
-         * one does depends on the ones before it. */
-        for (usize i = 0; i < count; ++i)
-            key(p, in[i]);
-        scheduler::wake(slave_channel(p));
-        scheduler::wake(master_channel(p));     /* the echo */
-        scheduler::wake(scheduler::kPollChannel);
-        return static_cast<i64>(count);
+        if (master) {
+            /* Keys. Through the line discipline, one at a time, because what
+             * each one does depends on the ones before it. */
+            for (usize i = 0; i < count; ++i)
+                key(p, in[i], wake);
+            wake.add(slave_channel(p));
+            wake.add(master_channel(p));        /* the echo */
+            wake.add(scheduler::kPollChannel);
+            answer = static_cast<i64>(count);
+        } else if (p->masters == 0) {
+            /* Output with nobody at the master end is thrown away rather than
+             * blocking: the alternative is a program wedged forever because
+             * its window was closed. */
+            answer = static_cast<i64>(count);
+        } else {
+            /* Nothing is done to it - a terminal shows what a program
+             * printed. */
+            for (usize i = 0; i < count; ++i)
+                p->to_master.put(in[i]);
+            wake.add(master_channel(p));
+            wake.add(scheduler::kPollChannel);
+            answer = static_cast<i64>(count);
+        }
     }
-
-    /* Output. Nothing is done to it - a terminal shows what a program printed.
-     * A write with nobody at the master end is thrown away rather than
-     * blocking: the alternative is a program wedged forever because its window
-     * was closed. */
-    if (p->masters == 0)
-        return static_cast<i64>(count);
-    for (usize i = 0; i < count; ++i)
-        p->to_master.put(in[i]);
-    scheduler::wake(master_channel(p));
-    scheduler::wake(scheduler::kPollChannel);
-    return static_cast<i64>(count);
+    flush(wake);
+    return answer;
 }
 
 void reopen(void* object, bool master)
@@ -315,26 +379,30 @@ void reopen(void* object, bool master)
 
 void close(void* object, bool master)
 {
-    sync::Guard guard(g_lock);
-    auto* p = static_cast<Pty*>(object);
-    if (p == nullptr || !p->used)
-        return;
-    if (master) {
-        if (--p->masters <= 0) {
-            p->masters = 0;
-            /* Everything on the far end is reading a terminal that has gone.
-             * Waking them is how they find out. */
-            scheduler::wake(slave_channel(p));
+    Wakes wake{};
+    {
+        sync::Guard guard(g_lock);
+        auto* p = static_cast<Pty*>(object);
+        if (p == nullptr || !p->used)
+            return;
+        if (master) {
+            if (--p->masters <= 0) {
+                p->masters = 0;
+                /* Everything on the far end is reading a terminal that has
+                 * gone. Waking them is how they find out. */
+                wake.add(slave_channel(p));
+            }
+        } else {
+            if (--p->slaves <= 0) {
+                p->slaves = 0;
+                wake.add(master_channel(p));
+            }
         }
-    } else {
-        if (--p->slaves <= 0) {
-            p->slaves = 0;
-            scheduler::wake(master_channel(p));
-        }
+        if (p->masters == 0 && p->slaves == 0)
+            p->used = false;
+        wake.add(scheduler::kPollChannel);
     }
-    if (p->masters == 0 && p->slaves == 0)
-        p->used = false;
-    scheduler::wake(scheduler::kPollChannel);
+    flush(wake);
 }
 
 bool readable(void* object, bool master)

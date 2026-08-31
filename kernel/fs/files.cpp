@@ -53,6 +53,32 @@ struct Pipe {
  * kernel lock had no place in the order, so a path that took it while holding
  * this one was a hang rather than a complaint. It now says so. */
 sync::RankedLock g_lock(sync::Rank::Files, "files");
+
+/* What to wake once the lock is off - the same discipline the terminal keeps,
+ * and for the same reason. scheduler::wake takes the big kernel lock, and
+ * taking that while holding a finer one is the deadlock the ordering exists to
+ * prevent. It has been safe only because every syscall already holds the big
+ * lock on entry, which makes the acquire recursive; that is an accident, not a
+ * guarantee. */
+struct Wakes {
+    u64 channel[3];
+    u32 count;
+
+    void add(u64 c)
+    {
+        for (u32 i = 0; i < count; ++i)
+            if (channel[i] == c)
+                return;
+        if (count < 3)
+            channel[count++] = c;
+    }
+};
+
+void flush(const Wakes& w)
+{
+    for (u32 i = 0; i < w.count; ++i)
+        scheduler::wake(w.channel[i]);
+}
 u64 read_channel(Pipe* p)  { return reinterpret_cast<u64>(p); }
 u64 write_channel(Pipe* p) { return reinterpret_cast<u64>(p) + 1; }
 
@@ -160,22 +186,22 @@ i64 pipe_write(Pipe* p, const void* buffer, usize count)
 
 // Drop this descriptor's hold on its pipe end; free the pipe when both ends are
 // fully closed, and wake the other side so it notices.
-void release_pipe(Descriptor& d)
+void release_pipe(Descriptor& d, Wakes& wake)
 {
     auto* p = static_cast<Pipe*>(d.pipe);
     if (p == nullptr)
         return;
     if ((d.flags & kRead) != 0) {
         if (--p->readers == 0)
-            scheduler::wake(write_channel(p));
+            wake.add(write_channel(p));
     } else {
         if (--p->writers == 0)
-            scheduler::wake(read_channel(p));
+            wake.add(read_channel(p));
     }
     /* An end closing changes what the other end can do without waiting - a
      * reader with no writers left is readable, at end of file. A poller that
      * was not told would sit through the one event it was waiting for. */
-    scheduler::wake(scheduler::kPollChannel);
+    wake.add(scheduler::kPollChannel);
     if (p->readers == 0 && p->writers == 0) {
         /* And its name, if it had one. A FIFO with nobody at either end is
          * not a FIFO; the next open makes a fresh one, which is right - what
@@ -315,20 +341,34 @@ void init_table(Table& t)
 
 i64 close(int fd)
 {
-    if (!valid_fd(fd) || table().fds[fd].kind == Kind::None)
-        return -1;
-    Descriptor& d = table().fds[fd];
-    if (d.kind == Kind::Pipe)
-        release_pipe(d);
-    else if (d.kind == Kind::PtyMaster || d.kind == Kind::PtySlave)
-        pty::close(d.pipe, d.kind == Kind::PtyMaster);
-    d.kind = Kind::None;
-    d.pipe = nullptr;
+    Wakes wake{};
+    void* pty_end = nullptr;
+    bool  pty_master = false;
+    {
+        sync::Guard guard(g_lock);
+        if (!valid_fd(fd) || table().fds[fd].kind == Kind::None)
+            return -1;
+        Descriptor& d = table().fds[fd];
+        if (d.kind == Kind::Pipe) {
+            release_pipe(d, wake);
+        } else if (d.kind == Kind::PtyMaster || d.kind == Kind::PtySlave) {
+            /* Closed after this lock is off: the terminal takes its own, and
+             * it wakes people, which reaches the scheduler. */
+            pty_end = d.pipe;
+            pty_master = d.kind == Kind::PtyMaster;
+        }
+        d.kind = Kind::None;
+        d.pipe = nullptr;
+    }
+    if (pty_end != nullptr)
+        pty::close(pty_end, pty_master);
+    flush(wake);
     return 0;
 }
 
 bool pty_of(int fd, void** out_object, bool* out_master)
 {
+    sync::Guard guard(g_lock);
     if (!valid_fd(fd))
         return false;
     const Descriptor& d = table().fds[fd];
@@ -341,6 +381,7 @@ bool pty_of(int fd, void** out_object, bool* out_master)
 
 i64 adopt_pty(void* object, bool master)
 {
+    sync::Guard guard(g_lock);
     const int fd = alloc_fd();
     if (fd < 0)
         return -1;
@@ -369,6 +410,7 @@ i64 read(int fd, void* buffer, usize count)
     Kind  kind   = Kind::None;
     void* object = nullptr;
     {
+        sync::Guard guard(g_lock);
         if (!valid_fd(fd))
             return -1;
         Descriptor& d = table().fds[fd];
@@ -399,6 +441,7 @@ i64 read(int fd, void* buffer, usize count)
     }
 
     if (kind == Kind::Pipe) {
+        sync::Guard guard(g_lock);
         drop_pipe(static_cast<Pipe*>(object));
     }
     return result;
@@ -409,6 +452,7 @@ i64 write(int fd, const void* buffer, usize count)
     Kind  kind   = Kind::None;
     void* object = nullptr;
     {
+        sync::Guard guard(g_lock);
         if (!valid_fd(fd))
             return -1;
         Descriptor& d = table().fds[fd];
@@ -446,6 +490,7 @@ i64 write(int fd, const void* buffer, usize count)
     }
 
     if (kind == Kind::Pipe) {
+        sync::Guard guard(g_lock);
         drop_pipe(static_cast<Pipe*>(object));
     }
     return result;
@@ -518,7 +563,7 @@ i64 open_fifo(u64 key, bool for_writing, bool nonblocking)
             scheduler::block_on_until(for_writing ? write_channel(p)
                                                   : read_channel(p), 1);
             if (scheduler::signal_pending()) {
-                release_pipe(table().fds[fd]);
+                { Wakes w{}; release_pipe(table().fds[fd], w); flush(w); }
                 table().fds[fd].kind = Kind::None;
                 return kInterrupted;
             }
@@ -529,6 +574,7 @@ i64 open_fifo(u64 key, bool for_writing, bool nonblocking)
 
 i64 pipe(int* out_fds)
 {
+    sync::Guard guard(g_lock);
     const int read_fd = alloc_fd();
     if (read_fd < 0)
         return -1;
@@ -591,7 +637,7 @@ void close_all(Table& t)
 {
     for (int fd = 0; fd < kMaxFds; ++fd) {
         if (t.fds[fd].kind == Kind::Pipe)
-            release_pipe(t.fds[fd]);
+            { Wakes w{}; release_pipe(t.fds[fd], w); flush(w); }
         else if (t.fds[fd].kind == Kind::PtyMaster ||
                  t.fds[fd].kind == Kind::PtySlave)
             pty::close(t.fds[fd].pipe, t.fds[fd].kind == Kind::PtyMaster);
