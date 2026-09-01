@@ -268,12 +268,23 @@ int main(void)
         fflush(stdout);
     }
 
-    /* A file, mapped rather than read. */
+    /* A file, mapped rather than read.
+     *
+     * Its own copy in /tmp, deliberately. An earlier version of this mapped
+     * /etc/passwd and wrote a byte into it to prove writeback, restoring it
+     * afterwards - which is fine until the process dies in between, and then
+     * the machine has no accounts and nobody knows why. A test that can break
+     * the system it is testing is not worth the file it saved. */
     {
-        const int fd = open("/etc/passwd", O_RDONLY);
+        char* const mk[] = { (char*)"cp", (char*)"/etc/passwd",
+                             (char*)"/tmp/mapped", 0 };
+        int kid = fork();
+        if (kid == 0) { execve("/bin/cp", mk, 0); exit(127); }
+        wait(0);
+
+        const int fd = open("/tmp/mapped", O_RDONLY);
         char first[16];
         long got = fd < 0 ? -1 : read(fd, first, sizeof(first));
-        if (fd >= 0) lseek(fd, 0, SEEK_SET);
         char* p = fd < 0 ? MAP_FAILED
                          : mmap(0, 4096, PROT_READ | PROT_WRITE,
                                 MAP_PRIVATE, fd, 0);
@@ -285,14 +296,23 @@ int main(void)
                 if (p[i] != first[i]) same = 0;
             printf("mapfile: mapped = yes, contents match = %s\n",
                    same ? "yes" : "NO");
+
             /* Private: writing changes this copy and not the file. */
             p[0] = 'Z';
-            const int again = open("/etc/passwd", O_RDONLY);
+            int again = open("/tmp/mapped", O_RDONLY);
             char check = 0;
-            read(again, &check, 1);
-            close(again);
+            if (again >= 0) { read(again, &check, 1); close(again); }
             printf("mapfile: write stayed private = %s\n",
                    (p[0] == 'Z' && check == first[0]) ? "yes" : "NO");
+
+            /* And writeback, which is the explicit half: the change is in
+             * this process's copy until msync puts it in the file. */
+            const int synced = msync(p, 16, MS_SYNC);
+            again = open("/tmp/mapped", O_RDONLY);
+            char after = 0;
+            if (again >= 0) { read(again, &after, 1); close(again); }
+            printf("msync: wrote back = %s\n",
+                   (synced == 0 && after == 'Z') ? "yes" : "NO");
         }
         if (fd >= 0) close(fd);
         fflush(stdout);
