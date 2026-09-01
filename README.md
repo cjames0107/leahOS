@@ -31,7 +31,7 @@ Knobs, overridable on the command line:
 | Variable | Default | |
 |---|---|---|
 | `MEM` | `512M` | guest RAM — the kernel reads it back out of E820 |
-| `CPUS` | `1` | `-smp`; nothing uses more than one yet |
+| `CPUS` | `1` | `-smp`; tasks run on all of them. `-smp 8` saturates an 8-core host, so slowness there is the host, not the kernel |
 | `TIMEOUT` | `6` | seconds `make headless` lets the guest run |
 | `QEMU_EXTRA` | | appended to the QEMU command line |
 
@@ -159,29 +159,41 @@ tools/          run-headless.sh, mkfs_fat32.py
 
 ## Status
 
-Boots to long mode, owns its descriptor tables, handles interrupts, manages
-physical and virtual memory, enumerates PCI, and reads and writes ATA disks. It
-mounts an **ext4 root filesystem** (a unified ext2/3/4 driver, read and write)
-and still reads and writes FAT32. It loads ELF programs and runs them in ring 3
-over a `SYSCALL` ABI — as processes in their own private address spaces — and
-time-slices them with a preemptive scheduler. Processes `fork`,
-`execve` and `wait`, open files through a per-process descriptor table, and run
-an interactive **shell** with real commands (`ls`, `cat`, `echo`, `pwd`, `cp`,
-`mv`, `rm`, and more), pipes and redirection. Processes catch **signals**, run
-**threads** that share their address space, map anonymous memory with **mmap**,
-and run under **users and permissions** enforced against the ext inode's own
-mode and owner bits. An **e1000 NIC driver** and a
-small **IPv4 stack** (Ethernet, ARP, ICMP, UDP, and a minimal DNS resolver)
-bring up networking, with `ifconfig`, `arp`, `ping` and `nslookup` talking to
-QEMU's virtual network — `ping example.com` resolves and reaches the host.
+A **microkernel**. The filesystem, the block and disk drivers, the network
+stack, audio, USB, PS/2, authentication and the window server are ordinary
+ring-3 processes that talk over synchronous IPC; what is left in ring 0 is
+scheduling, memory, capabilities, pseudo-terminals and the message passing
+itself. The kernel does not know what an ELF is and cannot read a file.
 
-It runs tasks on **all** its processors, not just the one it booted on. A
-**window server** — an ordinary process, not kernel code — composites a Windows
-3.1 / Mac OS 7 style desktop over the linear framebuffer, driven by a **PS/2
-mouse**, and `login` starts it as soon as a password is accepted; clients draw
-into **shared memory** and never touch the screen. User programs are C linked
-against leahOS's own libc. Faults produce a register dump instead of a silent
-reset.
+It boots to long mode, owns its descriptor tables, manages physical and virtual
+memory, and mounts an **ext4 root filesystem** served by `vfsd`. Programs run in
+ring 3 over a `SYSCALL` ABI in private address spaces, time-sliced across **all**
+processors. They `fork`, `execve` and `wait`, catch **signals**, run **threads**,
+and live under users and permissions enforced by the server that owns the file.
+
+Everything on the disk is **dynamically linked** against one `/lib/libc.so`
+through a two-hundred-line `ld.so`, and a program's text is *mapped* from a
+kernel-held image rather than copied — so libc exists once in memory instead of
+once per process, and a program that has been run before is not read at all.
+Twelve processes cost about 167 KiB each, which is less than libc's text.
+
+Authority is moving to **capabilities**: typed kernel objects with rights, held
+by handle, passed over IPC by what they name rather than by number. The first
+thing they enforce is one nothing else could — a program's right to be executed,
+issued by the filesystem server, which is the only party that can see the file,
+its mode bits and the caller's credentials together.
+
+A **window server** composites a desktop over the linear framebuffer with a dock
+and a status bar; clients draw into shared memory and never touch the screen.
+There is a terminal with real **pseudo-terminals**, a shell with `if`, `while`,
+`for`, `case` and functions, a `vi` that needs no window server, **TCP sockets**
+that can be listened on — `httpd` serves files over the network — and real
+timezones read from TZif.
+
+The **big kernel lock is gone from the system call path**. Eleven subsystems
+have locks of their own, each carrying a rank checked on every acquisition, so
+taking them out of order is a panic naming both rather than a hang once every
+few hundred boots.
 
 ## Memory management
 
@@ -1365,6 +1377,69 @@ would not fail loudly, it would silently make two accounts the same person.
 Passwords are in `tools/mkaccounts.py`, written down rather than pretended to be
 secret: `root`/`toor`, `leah`/`leah`, `guest`/`guest`.
 
+## Capabilities and handles
+
+A handle is an index into a table the process does not own and cannot write.
+That is the whole of "unforgeable": there is no bit pattern a program can invent
+that names an object it was not given, because the naming happens on the other
+side of the boundary. Each carries rights — read, write, execute, map, signal,
+wait, duplicate, transfer — and `duplicate` may only ever narrow them, so a
+process can hand out less authority than it holds and never more.
+
+They travel over IPC by what they name rather than by number, because a number
+means nothing outside the table it came from. The kernel resolves one in the
+sender's table, installs the object it names in the receiver's, and writes the
+receiver's own numbers back into the message.
+
+What this bought first was a check that could not be made anywhere else.
+`execve` is handed bytes and never learns which file they came from, so the only
+place to enforce an execute bit was libc — the process's own code, checking
+itself, which any program wanting to skip it simply would not call. `vfsd` issues
+the image now: it has the file, its mode bits and the caller's credentials in one
+place, and answers with a capability rather than with something the caller could
+disbelieve. A file with mode 644 is refused, stays perfectly readable, and runs
+the moment the bit is set.
+
+Much of this system was already capability-shaped without the word. Port I/O
+permission is one. A shared-memory id is a slot and a generation. `authd` owning
+`/etc/shadow` so that nothing needs a setuid bit is the capability answer to
+privilege, arrived at years earlier.
+
+## Locking, and the order it goes in
+
+There was one lock around the whole kernel, taken on entry to every system call,
+which meant the kernel ran one call at a time however many processors it had. It
+is off that path. Eleven subsystems have locks of their own — the frame
+allocator, the page tables, the heap, shared memory, program images, capability
+tables, ports, terminals, the descriptor table, the keyboard, the mouse.
+
+Each carries a **rank**, and a processor may only take one whose rank is
+strictly greater than everything it already holds. There is no cycle in a strict
+ordering, so deadlock between ranked locks cannot happen; getting the order
+wrong is a panic naming both locks rather than a hang once every few hundred
+boots. The ranks read as a dependency graph: blocking subsystems first, because
+a pipe with nothing in it holds its own lock and then asks the scheduler to
+block; the scheduler next; memory after that, because a page-table walk
+allocates frames and never the reverse; the console last, because anything may
+print while holding anything.
+
+What is left of the big lock is what it should always have been — the lock over
+the task table and the run queue — and it stays on the *interrupt* path, because
+that is where preemption happens. Taking it off there let two processors into
+the same task, which the scheduler noticed and said so.
+
+Two rules fell out and are enforced rather than remembered. No subsystem lock is
+held across a call into the scheduler: collect what needs waking, drop the lock,
+then wake. And no ranked lock is held across a context switch — these are spin
+locks, and a sleeping holder leaves other processors waiting on something that
+is not running.
+
+Every one of these was found by the instrument rather than by reasoning. Seven
+nested acquisitions, each a subsystem written with one of its functions in terms
+of another; two subsystems calling the scheduler under their own lock, safe only
+because the big lock happened to be held already. None would have crashed. All
+would have hung, rarely, and been blamed on something else.
+
 ## Copy-on-write
 
 `fork` used to deep-copy every page of the parent's address space. Now both
@@ -1434,7 +1509,7 @@ process still mapped them.
 - [x] futex-backed mutexes, so threads can synchronise
 - [x] signal delivery on the interrupt return path, not just at syscalls
 - [x] copy-on-write fork with reference-counted frames
-- [ ] demand paging: anonymous pages allocated on first touch
+- [x] demand paging for anonymous pages: `.bss` reserved, allocated on first touch
 - [x] ACPI table discovery: RSDP, RSDT/XSDT, MADT and HPET
 - [x] the local APIC and I/O APIC, with the PIC masked and the PIT retired
 - [x] the HPET as a monotonic clock, and a calibrated local APIC timer
@@ -1476,3 +1551,25 @@ process still mapped them.
 - [ ] a bundle's `Icon.png` drawn in place of the generic application glyph
 - [ ] a real type for a file, so opening one need not guess from its name
 - [ ] reflowing a terminal's scrollback when it is resized
+- [x] a microkernel: filesystem, drivers, network, audio, USB, PS/2 and auth in ring 3
+- [x] pseudo-terminals as a kernel object, with a line discipline and process groups
+- [x] a shell that is a language: `if`, `while`, `for`, `case`, functions
+- [x] TCP that can be listened on, `accept`, and `httpd` serving files
+- [x] `vi`, so a file can be edited without the window server
+- [x] real timezones, parsed from TZif
+- [x] a dock and a status bar, and windows that keep off them
+- [x] dynamic linking: one `/lib/libc.so`, a `ld.so`, everything built `-pie`
+- [x] program images held by the kernel and *mapped*, not copied, into each process
+- [x] an auxiliary vector, so software written elsewhere can find its headers
+- [x] file-backed `mmap`, private and copy-on-write
+- [x] capabilities: typed handles with rights, passed over IPC by what they name
+- [x] execute permission enforced by the filesystem, which is the only party that can
+- [x] ranked locks, and the big kernel lock off the system call path
+- [ ] demand paging for mapped files — written, not merged; see `s3-demand-paging`
+- [ ] writeback, so a shared writable mapping can reach the file
+- [ ] swap
+- [ ] the intermittent stall: the desktop comes up and login's terminal does not
+- [ ] reliable signals: `sigaction`, masks, `alarm`
+- [ ] `fcntl`, `umask`, supplementary groups, resource limits
+- [ ] sed, awk, cut, tr, xargs
+- [ ] a self-hosting compiler
