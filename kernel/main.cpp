@@ -23,6 +23,8 @@
 #include <leah/scheduler.hpp>
 #include <leah/image.hpp>
 #include <leah/object.hpp>
+#include <leah/region.hpp>
+#include <leah/tunable.hpp>
 #include <leah/shm.hpp>
 #include <leah/smp.hpp>
 #include <leah/timer.hpp>
@@ -531,6 +533,8 @@ extern "C" void kernel_main(const boot::Info* boot_info)
     shm::init();
     image::init();
     object::init();
+    region::init();
+    tunable::init();
     ipc::init();
     syscall::init();
     step("SYSCALL/SYSRET enabled, ring 3 ready");

@@ -54,6 +54,7 @@ enum class Rank : u32 {
     Device    = 18,     // the keyboard and mouse rings, written from an IRQ
     Scheduler = 20,     // the task table and the run queue
     Handles   = 30,     // per-process capability tables
+    Region    = 32,     // what backs a range of addresses
     Image     = 34,     // held program images
     Shm       = 38,     // shared memory segments
     Heap      = 49,     // kmalloc, which grows by mapping pages

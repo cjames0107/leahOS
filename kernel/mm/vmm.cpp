@@ -5,7 +5,10 @@
 #include <leah/percpu.hpp>
 #include <leah/apic.hpp>
 #include <leah/interrupts.hpp>
+#include <leah/image.hpp>
 #include <leah/lock.hpp>
+#include <leah/region.hpp>
+#include <leah/tunable.hpp>
 #include <leah/pmm.hpp>
 #include <leah/string.hpp>
 #include <leah/vmm.hpp>
@@ -481,8 +484,18 @@ u64 entry_for(vaddr_t virt)
     return pt_entry != nullptr ? *pt_entry : 0;
 }
 
+bool fill_from_file(vaddr_t virt);
+
 bool handle_lazy_fault(vaddr_t virt)
 {
+    /* A file-backed page first, if this address is inside a mapping.
+     *
+     * Asked before the lock is taken because answering it reaches the image
+     * cache, which ranks above this - and the whole of the work is done there,
+     * with the page tables touched only at the end. */
+    if (fill_from_file(virt))
+        return true;
+
     sync::Guard guard(g_lock);
     u64* pt_entry = walk_to_pte(current_pml4(), virt);
     if (pt_entry == nullptr)
@@ -591,6 +604,62 @@ bool map_mmio(vaddr_t virt, paddr_t phys, usize bytes)
 
 AddressSpace kernel_space()  { return g_pml4_phys; }
 AddressSpace current_space() { return loaded_pml4(); }
+
+/* A page of a mapped file, brought in because it was touched.
+ *
+ * This is the half of demand paging the kernel could not do before: it had
+ * nowhere to look up what belonged at an address, so a file mapping had to be
+ * built in full up front. The region table is that record, and this is what
+ * reads it.
+ *
+ * More than one page at a time when the machine is told to - see
+ * tunable::MapAhead. One is pure demand paging and is the default; higher
+ * trades memory for fewer faults, which is worth it for a file read front to
+ * back and wasted on one poked at in a few places.
+ */
+bool fill_from_file(vaddr_t virt)
+{
+    /* Nothing to look up when file mappings are built eagerly: every page of
+     * one is already mapped, so a lazy fault here is .bss and nothing else.
+     * Asked first because this is the hot path - every zero-fill fault in the
+     * system comes through here - and a table walk per fault is a cost the
+     * default configuration should not pay for a feature it is not using. */
+    if (tunable::map_file_eager())
+        return false;
+
+    const vmm::AddressSpace space = current_space();
+    void* image = nullptr;
+    u64 offset = 0, flags = 0;
+    if (!region::find(space, virt, &image, &offset, &flags))
+        return false;
+
+    const u64 first = virt & ~(kPageSize - 1);
+    const u32 ahead = tunable::map_ahead();
+    bool any = false;
+
+    for (u32 i = 0; i < ahead; ++i) {
+        const u64 at = first + static_cast<u64>(i) * kPageSize;
+        void* page_image = nullptr;
+        u64 page_offset = 0, page_flags = 0;
+        /* Each page is looked up on its own: read-ahead must not run off the
+         * end of the mapping and into whatever is next. */
+        if (!region::find(space, at, &page_image, &page_offset, &page_flags))
+            break;
+        const paddr_t frame = image::frame_at(page_image, page_offset);
+        if (frame == 0)
+            break;                      /* past the end of the file */
+        if (translate(at) != 0) {
+            any = any || at == first;
+            continue;                   /* already there */
+        }
+        if (!image::share_frame(page_image, page_offset))
+            break;
+        if (!map(at, frame, page_flags))
+            break;
+        any = any || at == first;
+    }
+    return any;
+}
 
 /* Defined further down, next to fork, which is their only inside caller. */
 AddressSpace create_address_space_locked();
@@ -795,11 +864,20 @@ AddressSpace fork_address_space(AddressSpace parent)
         }
     }
 
+    /* The child sees the same file mappings. Outside the page-table lock,
+     * because the region table ranks below it - and after the walk, so a
+     * failure here does not leave a space half described. */
     return child;
 }
 
 void destroy_address_space(AddressSpace space)
 {
+    /* Only when there is anything to forget. The record must not outlive the
+     * space - the next space handed the same value would inherit it - but
+     * while file mappings are built eagerly there are no records at all, and
+     * this is on the path of every process that exits. */
+    if (!tunable::map_file_eager())
+        region::forget(space);
     sync::Guard guard(g_lock);
     destroy_address_space_locked(space);
 }

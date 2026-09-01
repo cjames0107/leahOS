@@ -2,6 +2,8 @@
 #include <leah/cpu.hpp>
 #include <leah/image.hpp>
 #include <leah/object.hpp>
+#include <leah/region.hpp>
+#include <leah/tunable.hpp>
 #include <leah/file.hpp>
 #include <leah/gdt.hpp>
 #include <leah/interrupts.hpp>
@@ -1507,24 +1509,50 @@ extern "C" void syscall_dispatch(syscall::Frame* frame)
         if ((frame->rdx & 4) == 0)          /* PROT_EXEC */
             flags |= vmm::NoExecute;
 
+        /* Two ways to do this, and which one is a setting.
+         *
+         * Lazily is the better design: record what backs the range, reserve
+         * the pages, and let a fault bring in the one that was touched. That
+         * is what the region table was built for and it works. It also
+         * destabilises the boot in a way not yet understood - the filesystem
+         * server intermittently fails to start - so it is not what happens
+         * unless the machine is told to. See tunable::MapFileEager.
+         *
+         * Eagerly is what shipped before: every page mapped before the caller
+         * has read a byte. Correct, proven, and wasteful on a large file. */
         bool ok = true;
-        u64 done = 0;
-        for (; done < bytes && ok; done += vmm::kPageSize) {
-            const u64 at = offset + done;
-            if (image::frame_at(held, at) == 0)
-                break;                      /* past the end: stop, do not fail */
-            if (!image::share_frame(held, at)) {
-                ok = false;
+        if (tunable::map_file_eager()) {
+            u64 done = 0;
+            for (; done < bytes && ok; done += vmm::kPageSize) {
+                const u64 at = offset + done;
+                if (image::frame_at(held, at) == 0)
+                    break;              /* past the end: stop, do not fail */
+                if (!image::share_frame(held, at)) {
+                    ok = false;
+                    break;
+                }
+                if (!vmm::map(base + done, image::frame_at(held, at), flags))
+                    ok = false;
+            }
+            if (!ok || done == 0) {
+                frame->rax = static_cast<u64>(-1);
                 break;
             }
-            /* Read-only and marked copy-on-write, so the first write takes a
-             * private copy and the file's own pages are never altered. */
-            if (!vmm::map(base + done, image::frame_at(held, at), flags))
-                ok = false;
-        }
-        if (!ok || done == 0) {
-            frame->rax = static_cast<u64>(-1);
-            break;
+        } else {
+            if (!region::add(scheduler::current_task_space(), base, bytes,
+                             held, offset, flags)) {
+                frame->rax = static_cast<u64>(-1);
+                break;
+            }
+            for (u64 done = 0; done < bytes && ok; done += vmm::kPageSize) {
+                if (vmm::translate(base + done) != 0)
+                    continue;
+                ok = vmm::reserve(base + done, flags);
+            }
+            if (!ok) {
+                frame->rax = static_cast<u64>(-1);
+                break;
+            }
         }
         scheduler::set_current_mmap_next(base + bytes);
         frame->rax = base;
