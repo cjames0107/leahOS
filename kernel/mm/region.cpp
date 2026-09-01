@@ -19,6 +19,13 @@ struct Region {
 
 Region g_regions[kMaxRegions];
 
+/* How many are live, read without the lock on purpose. Every fork asks whether
+ * there is anything to copy and every teardown whether there is anything to
+ * forget; on this system the answer is almost always no. Walking the table to
+ * learn that, on every fork, while holding the scheduler's lock with
+ * interrupts masked, is not free. */
+volatile u32 g_live = 0;
+
 /* Below the image cache it names and above nothing in particular: a fault
  * asks this what belongs at an address, and then asks the image for the page. */
 sync::RankedLock g_lock(sync::Rank::Region, "region");
@@ -41,6 +48,7 @@ bool add(vmm::AddressSpace space, u64 base, u64 bytes, void* image, u64 offset,
         if (g_regions[i].used)
             continue;
         g_regions[i] = { true, space, base, bytes, image, offset, flags };
+        __atomic_add_fetch(&g_live, 1u, __ATOMIC_SEQ_CST);
         return true;
     }
     return false;
@@ -49,6 +57,8 @@ bool add(vmm::AddressSpace space, u64 base, u64 bytes, void* image, u64 offset,
 bool find(vmm::AddressSpace space, u64 address, void** out_image,
           u64* out_offset, u64* out_flags)
 {
+    if (__atomic_load_n(&g_live, __ATOMIC_SEQ_CST) == 0)
+        return false;
     sync::Guard guard(g_lock);
     for (usize i = 0; i < kMaxRegions; ++i) {
         const Region& r = g_regions[i];
@@ -69,6 +79,8 @@ bool find(vmm::AddressSpace space, u64 address, void** out_image,
 
 bool inherit(vmm::AddressSpace from, vmm::AddressSpace to)
 {
+    if (__atomic_load_n(&g_live, __ATOMIC_SEQ_CST) == 0)
+        return true;
     sync::Guard guard(g_lock);
     /* Counted first. Copying half the parent's mappings into a child and then
      * running out would leave it with a space that faults where the parent
@@ -92,6 +104,7 @@ bool inherit(vmm::AddressSpace from, vmm::AddressSpace to)
                 continue;
             g_regions[j] = g_regions[i];
             g_regions[j].space = to;
+            __atomic_add_fetch(&g_live, 1u, __ATOMIC_SEQ_CST);
             break;
         }
     }
@@ -100,10 +113,14 @@ bool inherit(vmm::AddressSpace from, vmm::AddressSpace to)
 
 void forget(vmm::AddressSpace space)
 {
+    if (__atomic_load_n(&g_live, __ATOMIC_SEQ_CST) == 0)
+        return;
     sync::Guard guard(g_lock);
     for (usize i = 0; i < kMaxRegions; ++i)
-        if (g_regions[i].used && g_regions[i].space == space)
+        if (g_regions[i].used && g_regions[i].space == space) {
             g_regions[i].used = false;
+            __atomic_sub_fetch(&g_live, 1u, __ATOMIC_SEQ_CST);
+        }
 }
 
 } // namespace region

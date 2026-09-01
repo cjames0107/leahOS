@@ -627,6 +627,13 @@ bool fill_from_file(vaddr_t virt)
     if (tunable::map_file_eager())
         return false;
 
+    /* Only the mmap arena can be file backed, and this is the hot path. Every
+     * zero-fill fault in the system arrives here - .bss, heap, thread stacks -
+     * and without this they all took the region lock to be told what the
+     * address range already said. */
+    if (virt < memory::kUserMmapBase || virt >= memory::kUserMmapEnd)
+        return false;
+
     const vmm::AddressSpace space = current_space();
     void* image = nullptr;
     u64 offset = 0, flags = 0;
