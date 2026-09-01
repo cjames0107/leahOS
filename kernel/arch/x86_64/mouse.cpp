@@ -1,5 +1,6 @@
 #include <leah/framebuffer.hpp>
 #include <leah/mouse.hpp>
+#include <leah/lock.hpp>
 
 // Where the pointer is - and nothing about how it got there.
 //
@@ -15,6 +16,10 @@
 
 namespace mouse {
 namespace {
+
+/* Read whole and written whole, from an interrupt and from a syscall. A
+ * partially updated position is a pointer that jumps. */
+sync::RankedLock g_lock(sync::Rank::Device, "mouse");
 
 State g_state{};
 
@@ -34,11 +39,16 @@ void clamp(i32& x, i32& y)
 
 void init() {}
 
-State state() { return g_state; }
+State state()
+{
+    sync::Guard guard(g_lock);
+    return g_state;
+}
 
 void set_state(i32 x, i32 y, u32 buttons, i32 wheel_delta)
 {
     clamp(x, y);
+    sync::Guard guard(g_lock);
     g_state.x = x;
     g_state.y = y;
     g_state.left   = (buttons & 1) != 0;

@@ -1,5 +1,6 @@
 #include <leah/heap.hpp>
 #include <leah/memory.hpp>
+#include <leah/lock.hpp>
 #include <leah/panic.hpp>
 #include <leah/pmm.hpp>
 #include <leah/spinlock.hpp>
@@ -24,7 +25,11 @@ namespace {
 // grow() is inside the lock and stays safe there: it asks the physical
 // allocator and the page tables for memory, and neither of those comes back
 // through the heap.
-sync::Spinlock g_lock;
+/* Ranked below the page tables it grows through and above everything that
+ * allocates. It always had a lock; what it did not have was a place in the
+ * order, so nothing checked that growing the heap - which maps a page - was
+ * being done in a direction that cannot deadlock. */
+sync::RankedLock g_lock(sync::Rank::Heap, "heap");
 
 // Well clear of both the identity map and anything the firmware described, so
 // a stray heap pointer lands somewhere obviously wrong rather than quietly on
@@ -173,7 +178,7 @@ void* allocate(usize bytes)
     if (bytes == 0)
         return nullptr;
 
-    sync::IrqScopedLock guard(g_lock);
+    sync::Guard guard(g_lock);
     const usize wanted = align_up(bytes, 16);
 
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -213,7 +218,7 @@ void release(void* pointer)
     if (pointer == nullptr)
         return;
 
-    sync::IrqScopedLock guard(g_lock);
+    sync::Guard guard(g_lock);
     Block* block = payload_to_block(pointer);
     if (block->magic != kMagic) {
         // Probably an aligned allocation; step back to the real header.

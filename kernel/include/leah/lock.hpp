@@ -51,10 +51,12 @@ enum class Rank : u32 {
     Files     = 10,     // pipes, the console device, the descriptor table
     Pty       = 12,     // pseudo-terminals, which files reaches into
     Ipc       = 15,     // ports and requests in flight
+    Device    = 18,     // the keyboard and mouse rings, written from an IRQ
     Scheduler = 20,     // the task table and the run queue
     Handles   = 30,     // per-process capability tables
     Image     = 34,     // held program images
     Shm       = 38,     // shared memory segments
+    Heap      = 49,     // kmalloc, which grows by mapping pages
     Vmm       = 50,     // address spaces and page tables
     Pmm       = 60,     // the physical frame bitmap
     Console   = 70,     // printing, which anything may do while holding others
@@ -125,5 +127,14 @@ void note_release(Rank rank);
 // the right moment - see block_on_releasing - and this asserts that nothing
 // else slipped through.
 void assert_none_held(const char* where);
+
+// Panic unless everything this processor holds ranks below `limit`.
+//
+// What the big lock needs. It cannot be a RankedLock - it is recursive and is
+// handed between tasks at a context switch - but it sits at Rank::Scheduler in
+// the order all the same, because that is what it is: the lock over the task
+// table and the run queue. A subsystem below that rank may reach it, which is
+// how a pipe with nothing in it asks to be blocked. One above it may not.
+void assert_below(Rank limit, const char* where);
 
 } // namespace sync

@@ -129,6 +129,20 @@ void assert_none_held(const char* where)
     panic("a ranked lock was held across a context switch");
 }
 
+void assert_below(Rank limit, const char* where)
+{
+    const Held& held = mine();
+    if (held.count == 0)
+        return;
+    const Rank top = held.rank[held.count - 1];
+    if (static_cast<u32>(top) < static_cast<u32>(limit))
+        return;
+    console::printf("\n  %s (rank %u) while holding %s (rank %u)\n", where,
+                    static_cast<u32>(limit), held.name[held.count - 1],
+                    static_cast<u32>(top));
+    panic("locks taken out of order");
+}
+
 bool holding(Rank rank)
 {
     const Held& held = mine();

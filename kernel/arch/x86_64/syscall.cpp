@@ -528,10 +528,22 @@ void init() { init_this_cpu(); }
 
 extern "C" void syscall_dispatch(syscall::Frame* frame)
 {
-    // One lock around the whole kernel. Released on every path out, including
-    // the one sigreturn takes, which does not return here.
-    sync::bkl::acquire();
-    struct Unlock { ~Unlock() { sync::bkl::release(); } } unlock;
+    /* No lock here any more.
+     *
+     * There was one around the whole kernel, taken on entry and released on
+     * every path out, and every syscall in the system ran inside it - which is
+     * to say the kernel ran one syscall at a time however many processors were
+     * present. Each subsystem it was standing in for now has a lock of its
+     * own: the frame allocator, the page tables, the heap, shared memory,
+     * program images, capability tables, ports, terminals, the descriptor
+     * table, the keyboard and the mouse. What is left of the big lock is the
+     * scheduler's, taken inside the scheduler, and it is ranked as such.
+     *
+     * The one thing that must stay true is the direction: a subsystem ranked
+     * below the scheduler may reach it, and one ranked above may not. That is
+     * checked on every acquisition rather than believed - see
+     * sync::assert_below in sched/bkl.cpp.
+     */
 
     using namespace syscall;
 

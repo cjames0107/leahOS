@@ -40,10 +40,12 @@ void acquire()
      * scratch while holding something else", which needs no bookkeeping to
      * notice.
      *
-     * The nested case is safe and is the common one: every syscall takes this
-     * on entry, so a subsystem reaching the scheduler finds it already held by
-     * this processor and never reaches the wait below. */
-    sync::assert_none_held("acquiring the kernel lock");
+     * Below Rank::Scheduler is allowed, and is the point. This lock *is* the
+     * scheduler's - the task table and the run queue - so a subsystem ranked
+     * under it may reach it, which is how a pipe with nothing in it asks to be
+     * blocked. Anything ranked above it may not, and that is the direction the
+     * deadlock came from. */
+    sync::assert_below(sync::Rank::Scheduler, "acquiring the kernel lock");
 
     u64 flags;
     asm volatile("pushfq; pop %0" : "=r"(flags));

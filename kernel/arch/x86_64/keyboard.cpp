@@ -1,4 +1,5 @@
 #include <leah/keyboard.hpp>
+#include <leah/lock.hpp>
 #include <leah/scheduler.hpp>
 
 // The queue a blocked reader sleeps on - and nothing that produces keys.
@@ -28,6 +29,13 @@ char g_buffer[kBufferSize];
 // could tell shift+left from left, and no text field could be selected with
 // the keyboard.
 u8 g_buffer_mods[kBufferSize];
+/* The ring is written from an interrupt and read from a syscall, which is
+ * two processors on a machine with more than one - volatile says the compiler
+ * must not cache it and says nothing at all about that. Ranked below the
+ * scheduler because an arriving key wakes a reader, and above the descriptor
+ * layer because that is what reads it. */
+sync::RankedLock g_lock(sync::Rank::Device, "keyboard");
+
 volatile u32 g_read = 0;
 volatile u32 g_write = 0;
 
@@ -50,19 +58,28 @@ void inject_char(char c)
 {
     if (c == 0)
         return;
-    const u32 next = (g_write + 1) % kBufferSize;
-    if (next == g_read)
-        return;                 // full; drop rather than overwrite unread input
-    g_buffer[g_write] = c;
-    g_buffer_mods[g_write] = static_cast<u8>(g_mods);
-    g_write = next;
-    scheduler::wake(scheduler::kKeyboardChannel);
+    bool arrived = false;
+    {
+        sync::Guard guard(g_lock);
+        const u32 next = (g_write + 1) % kBufferSize;
+        if (next != g_read) {   // full: drop rather than overwrite unread input
+            g_buffer[g_write] = c;
+            g_buffer_mods[g_write] = static_cast<u8>(g_mods);
+            g_write = next;
+            arrived = true;
+        }
+    }
+    /* Outside the lock. Waking reaches the scheduler, and no subsystem lock is
+     * held across a call into it - see the note in fs/pty.cpp. */
+    if (arrived)
+        scheduler::wake(scheduler::kKeyboardChannel);
 }
 
 bool has_input() { return g_read != g_write; }
 
 char read()
 {
+    sync::Guard guard(g_lock);
     if (g_read == g_write)
         return 0;
     const char c = g_buffer[g_read];

@@ -94,7 +94,10 @@ bool valid_port(i32 port)
 
 /* With the lock already held: abandon() closes every port a dying process
  * owned, and would otherwise take it once per port. */
-i64 port_destroy_locked(i32 port)
+/* Collects what to wake rather than waking. Its two callers both hold the
+ * lock, and waking reaches the scheduler - which nothing here does while
+ * holding a lock of its own. */
+i64 port_destroy_locked(i32 port, u64* wake, u32* count, u32 max)
 {
     if (!valid_port(port) || g_ports[port].owner_pid != scheduler::current_pid())
         return -1;
@@ -104,7 +107,8 @@ i64 port_destroy_locked(i32 port)
         if (g_requests[i].port != port || g_requests[i].state == State::Free)
             continue;
         g_requests[i].state = State::Abandoned;
-        scheduler::wake(request_channel(static_cast<i32>(i)));
+        if (*count < max)
+            wake[(*count)++] = request_channel(static_cast<i32>(i));
     }
     return 0;
 }
@@ -141,8 +145,16 @@ i64 port_open(u32 name)
 
 i64 port_destroy(i32 port)
 {
-    sync::Guard guard(g_lock);
-    return port_destroy_locked(port);
+    i64 answer;
+    u64 wake_channel[8];
+    u32 wake_count = 0;
+    {
+        sync::Guard inner(g_lock);
+        answer = port_destroy_locked(port, wake_channel, &wake_count, 8);
+    }
+    for (u32 i = 0; i < wake_count; ++i)
+        scheduler::wake(wake_channel[i]);
+    return answer;
 }
 
 // How long to sleep to reach a given moment.
@@ -174,14 +186,16 @@ static i64 stop_waiting(Request& r, i64 code)
 i64 call(i32 port, const Message* request, Message* reply_out,
          u64 deadline_ticks)
 {
-    /* Held across the whole exchange, and handed to the scheduler each time
-     * this sleeps: a reply that lands between the check and the block would
-     * otherwise be a wakeup with nobody left awake to see it. */
+    i32 handle = -1;
+    {
+    /* Queued under the lock, and the lock let go before the server is woken:
+     * waking reaches the scheduler, and no subsystem lock is held across a
+     * call into it. Nothing is lost in the gap - the answer is written under
+     * this same lock, and the wait below re-checks under it. */
     sync::Guard guard(g_lock);
     if (!valid_port(port) || request == nullptr || reply_out == nullptr)
         return -1;
 
-    i32 handle = -1;
     for (usize i = 0; i < kMaxRequests; ++i) {
         if (g_requests[i].state == State::Free) {
             handle = static_cast<i32>(i);
@@ -198,11 +212,13 @@ i64 call(i32 port, const Message* request, Message* reply_out,
     r.server_pid = 0;
     memcpy(&r.body, request, sizeof(Message));
 
-    // Wake a server that is waiting, then sleep until it answers. The order
-    // matters and the interrupt state is why: syscalls are entered with
-    // interrupts masked, so nothing can slip between marking this queued and
-    // going to sleep on it.
+    }
+
+    // Wake a server that is waiting, then sleep until it answers.
     scheduler::wake(port_channel(port));
+
+    sync::Guard guard(g_lock);
+    Request& r = g_requests[handle];
     while (r.state != State::Answered && r.state != State::Abandoned) {
         if (deadline_ticks == 0) {
             scheduler::block_on_releasing(request_channel(handle), g_lock);
@@ -322,6 +338,7 @@ i64 recv(i32 port, Message* out, u32* caller_pid, u64 deadline_ticks)
 
 i64 reply(i32 handle, const Message* msg)
 {
+    {
     sync::Guard guard(g_lock);
     if (handle < 0 || handle >= static_cast<i32>(kMaxRequests) || msg == nullptr)
         return -1;
@@ -362,16 +379,20 @@ i64 reply(i32 handle, const Message* msg)
     r.body.handles = r.carried_n;
 
     r.state = State::Answered;
+    }
     scheduler::wake(request_channel(handle));
     return 0;
 }
 
 void abandon(u32 pid)
 {
+    u64 wake_channel[8];
+    u32 wake_count = 0;
+    {
     sync::Guard guard(g_lock);
     for (usize i = 0; i < kMaxPorts; ++i)
         if (g_ports[i].used && g_ports[i].owner_pid == pid)
-            port_destroy_locked(static_cast<i32>(i));
+            port_destroy_locked(static_cast<i32>(i), wake_channel, &wake_count, 8);
 
     for (usize i = 0; i < kMaxRequests; ++i) {
         Request& r = g_requests[i];
@@ -384,7 +405,8 @@ void abandon(u32 pid)
             r.state = State::Free;      // held for an answer that will not come
         } else if (r.server_pid == pid && r.state == State::Taken) {
             r.state = State::Abandoned;
-            scheduler::wake(request_channel(static_cast<i32>(i)));
+            if (wake_count < 8)
+                wake_channel[wake_count++] = request_channel(static_cast<i32>(i));
         } else if (r.caller_pid == pid) {
             // Freeing this outright was wrong while a server still held it.
             // The slot would go back to the pool with a reply still coming,
@@ -394,6 +416,11 @@ void abandon(u32 pid)
             r.state = r.state == State::Taken ? State::Dropped : State::Free;
         }
     }
+    }
+    /* Outside the lock, for the reason every other subsystem now has the same
+     * note about: waking reaches the scheduler. */
+    for (u32 i = 0; i < wake_count; ++i)
+        scheduler::wake(wake_channel[i]);
 }
 
 } // namespace ipc

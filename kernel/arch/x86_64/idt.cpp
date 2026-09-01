@@ -248,8 +248,16 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
         vmm::note_fault_mapping(address, vmm::entry_for(address));
     }
 
-    // The same lock as the syscall path, and recursive for the same reason: a
-    // syscall that enabled interrupts may already hold it on this CPU.
+    /* The scheduler's lock, and it stays.
+     *
+     * This is not the syscall path and the difference is preemption: a timer
+     * interrupt is where a task is taken off a processor and another put on,
+     * which is the scheduler's own business. Taking it off here let two
+     * processors into the same task, which the scheduler noticed and said so.
+     *
+     * So the big lock ends up being what it always should have been - the lock
+     * over the task table and the run queue, held where scheduling happens.
+     * What it is no longer is a lock around every system call. */
     sync::bkl::acquire();
     struct Unlock { ~Unlock() { sync::bkl::release(); } } unlock;
 
