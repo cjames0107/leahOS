@@ -110,6 +110,15 @@ struct Task {
     vmm::AddressSpace space; // 0 for kernel threads (they use the kernel space)
     i32   exit_code;
     u64   wait_channel;      // when Blocked on block_on(); 0 otherwise
+    /* Armed to wait, but not yet asleep.
+     *
+     * Set by a task that has decided to block and has not yet let go of the
+     * lock protecting the thing it waits for. A wake for that channel clears
+     * it, so the sleep that follows finds itself already woken and does not
+     * happen. That is what closes the gap between dropping the lock and going
+     * to sleep - without needing the big lock taken while a spin lock is still
+     * held, which is what the obvious version does and which can wedge. */
+    volatile u64 armed_channel;
     u32   bkl_depth;         // kernel-lock depth this task was suspended holding
     u64   ticks;             // slices given to this task, for a resource monitor
     // True from the moment a CPU commits to running this task until the CPU it
@@ -891,14 +900,32 @@ void block_on_until(u64 channel, u64 ticks)
  */
 void block_on_releasing(u64 channel, sync::RankedLock& held)
 {
+    /* Arm first, while the caller's lock is still held. Only this task ever
+     * writes this field, so it needs no lock of its own. */
+    Task* self = current();
+    __atomic_store_n(&self->armed_channel, channel, __ATOMIC_SEQ_CST);
+
+    /* Then let go, and only then wait for the big lock.
+     *
+     * The order is the point. Taking the big lock first - which is what this
+     * did - means spinning for it while still holding a spin lock, with
+     * interrupts masked; and the big lock is handed to the task being switched
+     * to, so it can be held by a task that is asleep. A processor waiting for
+     * it in that state waits forever, and the machine stops finishing its
+     * boot. */
+    held.release();
+
     {
         KernelLock lock;
-        Task* self = current();
-        self->wait_channel = channel;
-        self->state = State::Blocked;
-        held.release();
-        switch_to(pick_next());
-        self->wait_channel = 0;
+        /* Woken between arming and here? Then there is nothing to wait for -
+         * the wake already happened, and sleeping now would miss it. */
+        if (__atomic_load_n(&self->armed_channel, __ATOMIC_SEQ_CST) != 0) {
+            self->armed_channel = 0;
+            self->wait_channel = channel;
+            self->state = State::Blocked;
+            switch_to(pick_next());
+            self->wait_channel = 0;
+        }
     }
     held.acquire();
 }
@@ -907,17 +934,22 @@ void block_on_releasing(u64 channel, sync::RankedLock& held)
  * come needs both: the lock handed over, and a moment to give up at. */
 void block_on_until_releasing(u64 channel, u64 ticks, sync::RankedLock& held)
 {
+    Task* self = current();
+    __atomic_store_n(&self->armed_channel, channel, __ATOMIC_SEQ_CST);
+    held.release();
+
     {
         KernelLock lock;
-        Task* self = current();
-        self->wait_channel = channel;
-        if (ticks != 0)
-            self->wake_tick = timer::ticks() + ticks;
-        self->state = State::Blocked;
-        held.release();
-        switch_to(pick_next());
-        self->wake_tick = 0;
-        self->wait_channel = 0;
+        if (__atomic_load_n(&self->armed_channel, __ATOMIC_SEQ_CST) != 0) {
+            self->armed_channel = 0;
+            self->wait_channel = channel;
+            if (ticks != 0)
+                self->wake_tick = timer::ticks() + ticks;
+            self->state = State::Blocked;
+            switch_to(pick_next());
+            self->wake_tick = 0;
+            self->wait_channel = 0;
+        }
     }
     held.acquire();
 }
@@ -926,6 +958,10 @@ void wake(u64 channel)
 {
     KernelLock lock;
     for (u32 i = 0; i < g_task_count; ++i) {
+        /* Armed but not yet asleep counts as woken: clearing it is what makes
+         * the sleep about to happen not happen. */
+        if (g_tasks[i].armed_channel == channel)
+            __atomic_store_n(&g_tasks[i].armed_channel, 0ull, __ATOMIC_SEQ_CST);
         if (g_tasks[i].state == State::Blocked && g_tasks[i].wait_channel == channel) {
             g_tasks[i].state = State::Ready;
             g_tasks[i].wait_channel = 0;
