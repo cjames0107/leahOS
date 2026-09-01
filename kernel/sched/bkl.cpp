@@ -47,6 +47,22 @@ void acquire()
      * deadlock came from. */
     sync::assert_below(sync::Rank::Scheduler, "acquiring the kernel lock");
 
+    /* Whether it is safe to wait with interrupts on.
+     *
+     * The loop below re-enables them deliberately, and the reason is sound:
+     * nothing is held yet, every device interrupt in the machine goes to one
+     * processor, and a syscall waiting here with them masked stops the
+     * keyboard and the mouse dead.
+     *
+     * It stopped being unconditionally true when subsystems got locks of
+     * their own. A caller holding one of those arrives here with interrupts
+     * masked *by that lock* - and turning them back on lets this task be
+     * preempted while it holds a spin lock, at which point every other
+     * processor waiting for that lock is waiting for something that is not
+     * running. That is the hang, and it presented as the filesystem server
+     * failing to finish mounting, sometimes. */
+    const bool may_listen = sync::held_count() == 0;
+
     u64 flags;
     asm volatile("pushfq; pop %0" : "=r"(flags));
     while (!g_lock.try_acquire()) {
@@ -71,7 +87,10 @@ void acquire()
         // which means the lock is already held by this CPU and the acquire it
         // does is a nested one that never reaches this loop - so no wake can
         // slip in between such a check and its block.
-        asm volatile("sti; pause; cli");
+        if (may_listen)
+            asm volatile("sti; pause; cli");
+        else
+            asm volatile("pause");
     }
     // Leave interrupts as the caller had them.
     if ((flags & (1ull << 9)) != 0)

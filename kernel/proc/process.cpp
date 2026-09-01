@@ -320,6 +320,24 @@ vmm::AddressSpace build_image(const char* name, const Args& args,
                               u64 entry, const Segment* segments, u32 count,
                               const u8* blob, u64 blob_size)
 {
+    /* Interrupts off for the borrow.
+     *
+     * This switches CR3 to the space being built, fills it in, and switches
+     * back - and the switch is not recorded anywhere the scheduler can see.
+     * A timer interrupt part way through would preempt this task, and putting
+     * it back would restore the address space the *task* is recorded as
+     * having, which is the old one. Everything mapped after that would land
+     * somewhere else entirely.
+     *
+     * It was survivable while every system call held a lock on the whole
+     * kernel, because so little else ran. With that gone it is a race that
+     * shows up as the filesystem server failing to start, sometimes.
+     *
+     * The masked window is short: segments are mapped from held images rather
+     * than copied, so what happens in here is page table writes and a memcpy
+     * of the data segment. */
+    cpu::InterruptGuard guard;
+
     const vmm::AddressSpace previous = vmm::current_space();
 
     const vmm::AddressSpace space = vmm::create_address_space();
