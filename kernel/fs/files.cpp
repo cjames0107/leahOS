@@ -524,6 +524,17 @@ i64 open_fifo(u64 key, bool for_writing, bool nonblocking)
         named->used = true;
         named->key = key;
         named->pipe = p;
+        /* And the two flags, which are about *this* conversation.
+         *
+         * They were left as the last FIFO in this slot finished with them, so
+         * a reused slot began life believing both ends had already arrived.
+         * An open for writing then did not wait for a reader, wrote into a
+         * pipe that had none, and got a broken pipe for it; the reader turned
+         * up afterwards and found end of file. The first FIFO on a freshly
+         * booted machine worked and every later one did not, which read as a
+         * rare fault because most programs open one FIFO and stop. */
+        named->seen_reader = false;
+        named->seen_writer = false;
     }
 
     Pipe* p = named->pipe;

@@ -129,7 +129,7 @@ BIN_PROGRAMS  := sh cat ls cp mv rm mkdir touch echo pwd clear su id whoami date
                  gunzip ps kill sleep ln mount uptime readlink basename dirname tee uniq man df printf mkfifo mknod fsck sync shutdown test true false vi dyntest
 USRBIN_PROGRAMS := hello gui tone say httpd lspci ping ping6 arp nslookup fetch fetch6 env \
                  screenshot tests fsbench ipctest nictest nettest blktest vfstest \
-                 mvtest v6test churn wintest
+                 mvtest v6test churn wintest fifoloop
 APP_PROGRAMS := paint clock term uitest browse edit calc settings imgview taskman player \
                 diskutil netutil calendar resmon console web write \
                 archiver grab fonts help
