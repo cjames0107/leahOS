@@ -2,6 +2,7 @@
 #include <leah/cpu.hpp>
 #include <leah/file.hpp>
 #include <leah/lock.hpp>
+#include <leah/waitqueue.hpp>
 #include <leah/heap.hpp>
 #include <leah/keyboard.hpp>
 #include <leah/pty.hpp>
@@ -40,6 +41,16 @@ struct Pipe {
      * marks it and the last one out does the freeing. */
     int   busy;
     bool  doomed;
+
+    /* One queue per direction, belonging to this pipe.
+     *
+     * They replace two channels derived from the pipe's address - itself and
+     * itself plus one - which worked and told you nothing. A queue you can see
+     * in the struct is a queue you can reason about, and waiting on one
+     * requires the lock that protects the counts above, which is the whole
+     * point. */
+    sched::WaitQueue readable;
+    sched::WaitQueue writable;
 };
 
 /* The descriptor table, and nothing else.
@@ -53,6 +64,15 @@ struct Pipe {
  * kernel lock had no place in the order, so a path that took it while holding
  * this one was a hang rather than a complaint. It now says so. */
 sync::RankedLock g_lock(sync::Rank::Files, "files");
+
+/* The pipes, separately from the table that names them.
+ *
+ * The table's lock is held for a lookup and let go; a pipe's is held across a
+ * read that may sleep. Using one lock for both would mean a read waiting on an
+ * empty pipe holding the descriptor table against every process in the
+ * machine. Ranked just above the table, because a close holds the table and
+ * reaches in here. */
+sync::RankedLock g_pipe_lock(sync::Rank::Pipe, "pipe");
 
 /* What to wake once the lock is off - the same discipline the terminal keeps,
  * and for the same reason. scheduler::wake takes the big kernel lock, and
@@ -130,58 +150,95 @@ NamedPipe* find_named(u64 key)
 i64 pipe_read(Pipe* p, void* buffer, usize count)
 {
     auto* out = static_cast<u8*>(buffer);
-    for (;;) {
-        if (p->count > 0) {
-            usize n = 0;
-            while (n < count && p->count > 0) {
-                out[n++] = p->buffer[p->head];
-                p->head = (p->head + 1) % Pipe::kSize;
-                --p->count;
+    i64  answer = 0;
+    bool room = false;
+    {
+        sync::Guard guard(g_pipe_lock);
+        for (;;) {
+            if (p->count > 0) {
+                usize n = 0;
+                while (n < count && p->count > 0) {
+                    out[n++] = p->buffer[p->head];
+                    p->head = (p->head + 1) % Pipe::kSize;
+                    --p->count;
+                }
+                answer = static_cast<i64>(n);
+                room = true;
+                break;
             }
-            scheduler::wake(write_channel(p));      // freed space
-            scheduler::wake(scheduler::kPollChannel);
-            return static_cast<i64>(n);
+            if (p->writers == 0)
+                break;                              // end of file, answer is 0
+
+            /* The check above and this sleep are one step: the lock is held
+             * across both and handed over inside. A writer that fills the pipe
+             * and closes it cannot slip between them. */
+            p->readable.wait(g_pipe_lock);
+
+            /* Woken with a signal waiting - being killed, most likely. Going
+             * back to sleep here is how a process ends up impossible to kill.
+             *
+             * Interrupted, though, and said so: this used to be a plain -1,
+             * which libc turned into "read failed" and a shell reading its own
+             * terminal took for end of input. Pressing Ctrl-C at a prompt
+             * closed the terminal, because the shell's read came back looking
+             * exactly like the pipe having been closed. */
+            if (scheduler::signal_pending()) {
+                answer = kInterrupted;
+                break;
+            }
         }
-        if (p->writers == 0)
-            return 0;                               // end of file
-        scheduler::block_on(read_channel(p));
-        // Woken with a signal waiting - being killed, most likely. Going back
-        // to sleep here is how a process ends up impossible to kill.
-        //
-        // Interrupted, though, and said so: this used to be a plain -1, which
-        // libc turned into "read failed" and a shell reading its own terminal
-        // took for end of input. Pressing Ctrl-C at a prompt closed the
-        // terminal, because the shell's read came back looking exactly like
-        // the pipe having been closed.
-        if (scheduler::signal_pending())
-            return kInterrupted;
     }
+    /* Outside the lock. Waking reaches the scheduler, and no subsystem lock is
+     * held across a call into it - the rule the terminal already keeps, and
+     * the one I broke here first time round by waking under the guard. */
+    if (room) {
+        p->writable.wake_one();
+        scheduler::wake(scheduler::kPollChannel);
+    }
+    return answer;
 }
 
 i64 pipe_write(Pipe* p, const void* buffer, usize count)
 {
     const auto* in = static_cast<const u8*>(buffer);
     usize written = 0;
-    while (written < count) {
-        if (p->readers == 0)
-            return written > 0 ? static_cast<i64>(written) : -1;   // broken pipe
-        if (p->count == Pipe::kSize) {
-            scheduler::block_on(write_channel(p));
-            // What did get through still counts; only a write that managed
-            // nothing at all reports the interruption.
-            if (scheduler::signal_pending())
-                return written > 0 ? static_cast<i64>(written) : kInterrupted;
-            continue;
+    i64  answer = 0;
+    bool arrived = false;
+    {
+        sync::Guard guard(g_pipe_lock);
+        for (;;) {
+            if (written >= count) {
+                answer = static_cast<i64>(written);
+                break;
+            }
+            if (p->readers == 0) {                  // broken pipe
+                answer = written > 0 ? static_cast<i64>(written) : -1;
+                break;
+            }
+            if (p->count == Pipe::kSize) {
+                p->writable.wait(g_pipe_lock);
+                /* What did get through still counts; only a write that managed
+                 * nothing at all reports the interruption. */
+                if (scheduler::signal_pending()) {
+                    answer = written > 0 ? static_cast<i64>(written)
+                                         : kInterrupted;
+                    break;
+                }
+                continue;
+            }
+            while (written < count && p->count < Pipe::kSize) {
+                p->buffer[p->tail] = in[written++];
+                p->tail = (p->tail + 1) % Pipe::kSize;
+                ++p->count;
+            }
+            arrived = true;
         }
-        while (written < count && p->count < Pipe::kSize) {
-            p->buffer[p->tail] = in[written++];
-            p->tail = (p->tail + 1) % Pipe::kSize;
-            ++p->count;
-        }
-        scheduler::wake(read_channel(p));           // data available
+    }
+    if (arrived) {
+        p->readable.wake_one();                     // data available
         scheduler::wake(scheduler::kPollChannel);
     }
-    return static_cast<i64>(written);
+    return answer;
 }
 
 // Drop this descriptor's hold on its pipe end; free the pipe when both ends are
@@ -191,13 +248,21 @@ void release_pipe(Descriptor& d, Wakes& wake)
     auto* p = static_cast<Pipe*>(d.pipe);
     if (p == nullptr)
         return;
-    if ((d.flags & kRead) != 0) {
-        if (--p->readers == 0)
-            wake.add(write_channel(p));
-    } else {
-        if (--p->writers == 0)
-            wake.add(read_channel(p));
+    bool tell_writers = false, tell_readers = false;
+    {
+        sync::Guard guard(g_pipe_lock);
+        if ((d.flags & kRead) != 0)
+            tell_writers = (--p->readers == 0);     // no reader: writers fail
+        else
+            tell_readers = (--p->writers == 0);     // no writer: readers see EOF
     }
+    /* Outside that lock, and note this still runs with the descriptor table's
+     * lock held by the caller - which is why these go through the queues
+     * rather than the scheduler directly. */
+    if (tell_writers)
+        p->writable.wake_all();
+    if (tell_readers)
+        p->readable.wake_all();
     /* An end closing changes what the other end can do without waiting - a
      * reader with no writers left is readable, at end of file. A poller that
      * was not told would sit through the one event it was waiting for. */
@@ -552,9 +617,14 @@ i64 open_fifo(u64 key, bool for_writing, bool nonblocking)
 
     /* Now that this end is counted, wake anybody waiting for it and wait for
      * the other - in that order, or two processes arriving together each miss
-     * the other's arrival and both wait forever. */
-    scheduler::wake(read_channel(p));
-    scheduler::wake(write_channel(p));
+     * the other's arrival and both wait forever.
+     *
+     * Through the pipe's own queues, which is what everything else uses now.
+     * Waking the old address-derived channels reached nobody: the waiters
+     * moved and this did not, and the rendezvous fell back on the nap below
+     * for every open. */
+    p->readable.wake_all();
+    p->writable.wake_all();
     scheduler::wake(scheduler::kPollChannel);
 
     if (!nonblocking) {
@@ -570,9 +640,16 @@ i64 open_fifo(u64 key, bool for_writing, bool nonblocking)
          * The channel still does the work: an arrival wakes this immediately.
          * The deadline only bounds what a missed one costs, which is one tick
          * rather than the rest of the session. */
+        sync::Guard guard(g_pipe_lock);
         while (for_writing ? !named->seen_reader : !named->seen_writer) {
-            scheduler::block_on_until(for_writing ? write_channel(p)
-                                                  : read_channel(p), 1);
+            /* The lock is held across the check and handed over inside, so
+             * the other end arriving between the two cannot be missed. The
+             * one-tick deadline that used to bound a lost wake is gone with
+             * the thing that lost it. */
+            if (for_writing)
+                p->writable.wait(g_pipe_lock);
+            else
+                p->readable.wait(g_pipe_lock);
             if (scheduler::signal_pending()) {
                 { Wakes w{}; release_pipe(table().fds[fd], w); flush(w); }
                 table().fds[fd].kind = Kind::None;
