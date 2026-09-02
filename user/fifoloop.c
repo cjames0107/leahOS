@@ -74,11 +74,82 @@ static long plain_pipe_round(char* got, long* n)
     return WEXITSTATUS(status);
 }
 
+/* A shell pipeline, which is what `tests` actually fails.
+ *
+ * `echo one | wc -l` is not the same exercise as writing down a pipe and
+ * reading up it. The shell makes the pipe, forks twice, and each child dup2s
+ * an end onto a standard descriptor and execs - so this covers dup2, the
+ * descriptor table being saved across an exec, and two processes closing ends
+ * they no longer want, none of which the plain loop touches.
+ *
+ * The pipeline's output is collected through a pipe of our own, because that
+ * is what the test does and what makes the answer checkable.
+ */
+static long shell_round(char* got, long* n)
+{
+    int fds[2];
+    if (pipe(fds) != 0)
+        return -1;
+
+    const int pid = fork();
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], 1);
+        close(fds[1]);
+        char* const argv[] = { (char*)"sh", (char*)"-c",
+                               (char*)"echo one | wc -l", 0 };
+        execve("/bin/sh", argv, 0);
+        exit(127);
+    }
+    close(fds[1]);
+
+    long total = 0;
+    for (;;) {
+        const long k = read(fds[0], got + total, 63 - total);
+        if (k <= 0)
+            break;
+        total += k;
+        if (total >= 63)
+            break;
+    }
+    close(fds[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    *n = total;
+    return WEXITSTATUS(status);
+}
+
 int main(int argc, char** argv)
 {
-    cli_begin(argc, argv, "[-n rounds] [-p]", "n:p#");
+    cli_begin(argc, argv, "[-n rounds] [-p] [-s]", "n:ps#");
     const long rounds = cli_count("-n", 200);
     const int plain = cli_flag("-p");
+    const int shell = cli_flag("-s");
+
+    if (shell) {
+        long failures = 0;
+        for (long round = 0; round < rounds; ++round) {
+            char got[64];
+            long n = 0;
+            memset(got, 0, sizeof(got));
+            const long exited = shell_round(got, &n);
+            /* The pipeline counts one line, so somewhere in the output there
+             * is a 1. Anything else - nothing at all, or a different number -
+             * is the failure `tests` reports as "a pipe carries output". */
+            if (n <= 0 || strchr(got, '1') == 0) {
+                ++failures;
+                if (failures <= REPORT_MAX) {
+                    printf("shellpipe: round %ld: read %ld, sh exited %ld, "
+                           "got \"%s\"\n", round, n, exited, got);
+                    fflush(stdout);
+                }
+            }
+        }
+        printf("shellpipe: %ld rounds, %ld failures\n", rounds, failures);
+        fflush(stdout);
+        return failures == 0 ? 0 : 1;
+    }
 
     if (plain) {
         long failures = 0;

@@ -238,14 +238,29 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
             asm volatile("cli; hlt");
     }
 
-    // Capture what the page tables said *at the moment of the fault*. Waiting
-    // for the kernel lock below can block, and blocking can switch tasks - so by
-    // the time a report is printed CR3 may describe an entirely different
-    // address space, and a walk done then would quote the wrong mapping.
+    /* The faulting address, read once, here, before anything else.
+     *
+     * CR2 holds the address of the *last* fault this processor took, and it is
+     * a single register that the next one overwrites. Everything below used to
+     * read it a second time after taking the kernel lock - and taking that lock
+     * can spin, and spinning can end in this task being preempted and another
+     * running on this processor, faulting, and moving CR2 out from under it.
+     *
+     * That is not only a misleading report. The address read late is the one
+     * handed to the copy-on-write and demand-paging handlers, so a fault that
+     * should have been resolved is looked up at some other address, fails to
+     * resolve, and kills the process. It presents as a page that is present in
+     * the tables being reported as unmapped, which is exactly the fault this
+     * system has been unable to explain: the two disagree because they are not
+     * describing the same address.
+     *
+     * The mapping is captured here too, for the same reason it always was: by
+     * the time a report is printed CR3 may describe a different address space
+     * entirely. */
+    u64 fault_address = 0;
     if (frame->vector == 14) {
-        u64 address;
-        asm volatile("mov %%cr2, %0" : "=r"(address));
-        vmm::note_fault_mapping(address, vmm::entry_for(address));
+        asm volatile("mov %%cr2, %0" : "=r"(fault_address));
+        vmm::note_fault_mapping(fault_address, vmm::entry_for(fault_address));
     }
 
     /* The scheduler's lock, and it stays.
@@ -268,8 +283,6 @@ extern "C" void interrupt_dispatch(interrupts::Frame* frame)
         // copy-on-write page is the normal way a forked process takes private
         // ownership of a page. Error-code bit 0 says the page was present and
         // bit 1 that the access was a write - exactly a CoW fault.
-        u64 fault_address;
-        asm volatile("mov %%cr2, %0" : "=r"(fault_address));
         constexpr u64 kPresent = 1, kWrite = 2;
         if ((frame->error_code & kPresent) != 0 && (frame->error_code & kWrite) != 0 &&
             vmm::handle_cow_fault(fault_address))
