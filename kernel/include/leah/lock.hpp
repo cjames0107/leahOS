@@ -49,7 +49,6 @@ enum class Rank : u32 {
     None      = 0,
     Kernel    = 5,      // the big lock, while it is still taken at every entry
     Files     = 10,     // pipes, the console device, the descriptor table
-    Pipe      = 11,     // one pipe's ring, reached while holding the table
     Pty       = 12,     // pseudo-terminals, which files reaches into
     Ipc       = 15,     // ports and requests in flight
     Device    = 18,     // the keyboard and mouse rings, written from an IRQ
