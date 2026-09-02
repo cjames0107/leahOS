@@ -54,12 +54,23 @@ struct Pipe {
  * this one was a hang rather than a complaint. It now says so. */
 sync::RankedLock g_lock(sync::Rank::Files, "files");
 
+/* The pipes, separately from the table that names them.
+ *
+ * A first attempt used the table's lock for both, which is correct and far too
+ * coarse: a read that blocks on an empty pipe would hold the descriptor table
+ * against every other process in the machine for as long as it waited. Two
+ * boots in five stopped finishing. Ranked just above the table, because a
+ * close holds the table and reaches in here. */
+sync::RankedLock g_pipe_lock(sync::Rank::Pipe, "pipe");
+
 /* What to wake once the lock is off - the same discipline the terminal keeps,
  * and for the same reason. scheduler::wake takes the big kernel lock, and
  * taking that while holding a finer one is the deadlock the ordering exists to
  * prevent. It has been safe only because every syscall already holds the big
  * lock on entry, which makes the acquire recursive; that is an accident, not a
  * guarantee. */
+/* Waking reaches the scheduler, and no subsystem lock is held across a call
+ * into it - so these two go together: let the guard go, then wake. */
 struct Wakes {
     u64 channel[3];
     u32 count;
@@ -130,58 +141,93 @@ NamedPipe* find_named(u64 key)
 i64 pipe_read(Pipe* p, void* buffer, usize count)
 {
     auto* out = static_cast<u8*>(buffer);
-    for (;;) {
-        if (p->count > 0) {
-            usize n = 0;
-            while (n < count && p->count > 0) {
-                out[n++] = p->buffer[p->head];
-                p->head = (p->head + 1) % Pipe::kSize;
-                --p->count;
+    Wakes wake{};
+    i64 answer = 0;
+    {
+        /* Held across the check and handed to the scheduler for the sleep.
+         *
+         * This used to check and then block with nothing held, which was safe
+         * only because every system call held a lock on the whole kernel - a
+         * writer could not run between the two. That lock is off the system
+         * call path now, so the gap is real: a writer that fills the pipe and
+         * closes it in that window sends a wake to a task not yet asleep, and
+         * the reader then sleeps on a pipe that already has its data and no
+         * writer left to send another. */
+        sync::Guard guard(g_pipe_lock);
+        for (;;) {
+            if (p->count > 0) {
+                usize n = 0;
+                while (n < count && p->count > 0) {
+                    out[n++] = p->buffer[p->head];
+                    p->head = (p->head + 1) % Pipe::kSize;
+                    --p->count;
+                }
+                wake.add(write_channel(p));         // freed space
+                wake.add(scheduler::kPollChannel);
+                answer = static_cast<i64>(n);
+                break;
             }
-            scheduler::wake(write_channel(p));      // freed space
-            scheduler::wake(scheduler::kPollChannel);
-            return static_cast<i64>(n);
+            if (p->writers == 0)
+                break;                              // end of file, answer is 0
+            scheduler::block_on_releasing(read_channel(p), g_pipe_lock);
+            /* Woken with a signal waiting - being killed, most likely. Going
+             * back to sleep here is how a process ends up impossible to kill.
+             *
+             * Interrupted, though, and said so: this used to be a plain -1,
+             * which libc turned into "read failed" and a shell reading its own
+             * terminal took for end of input. Pressing Ctrl-C at a prompt
+             * closed the terminal, because the shell's read came back looking
+             * exactly like the pipe having been closed. */
+            if (scheduler::signal_pending()) {
+                answer = kInterrupted;
+                break;
+            }
         }
-        if (p->writers == 0)
-            return 0;                               // end of file
-        scheduler::block_on(read_channel(p));
-        // Woken with a signal waiting - being killed, most likely. Going back
-        // to sleep here is how a process ends up impossible to kill.
-        //
-        // Interrupted, though, and said so: this used to be a plain -1, which
-        // libc turned into "read failed" and a shell reading its own terminal
-        // took for end of input. Pressing Ctrl-C at a prompt closed the
-        // terminal, because the shell's read came back looking exactly like
-        // the pipe having been closed.
-        if (scheduler::signal_pending())
-            return kInterrupted;
     }
+    flush(wake);
+    return answer;
 }
 
 i64 pipe_write(Pipe* p, const void* buffer, usize count)
 {
     const auto* in = static_cast<const u8*>(buffer);
     usize written = 0;
-    while (written < count) {
-        if (p->readers == 0)
-            return written > 0 ? static_cast<i64>(written) : -1;   // broken pipe
-        if (p->count == Pipe::kSize) {
-            scheduler::block_on(write_channel(p));
-            // What did get through still counts; only a write that managed
-            // nothing at all reports the interruption.
-            if (scheduler::signal_pending())
-                return written > 0 ? static_cast<i64>(written) : kInterrupted;
-            continue;
+    Wakes wake{};
+    i64 answer = 0;
+    {
+        /* Same reasoning as pipe_read: the check and the sleep are one step. */
+        sync::Guard guard(g_pipe_lock);
+        for (;;) {
+            if (written >= count) {
+                answer = static_cast<i64>(written);
+                break;
+            }
+            if (p->readers == 0) {                  // broken pipe
+                answer = written > 0 ? static_cast<i64>(written) : -1;
+                break;
+            }
+            if (p->count == Pipe::kSize) {
+                scheduler::block_on_releasing(write_channel(p), g_pipe_lock);
+                /* What did get through still counts; only a write that managed
+                 * nothing at all reports the interruption. */
+                if (scheduler::signal_pending()) {
+                    answer = written > 0 ? static_cast<i64>(written)
+                                         : kInterrupted;
+                    break;
+                }
+                continue;
+            }
+            while (written < count && p->count < Pipe::kSize) {
+                p->buffer[p->tail] = in[written++];
+                p->tail = (p->tail + 1) % Pipe::kSize;
+                ++p->count;
+            }
+            wake.add(read_channel(p));              // data available
+            wake.add(scheduler::kPollChannel);
         }
-        while (written < count && p->count < Pipe::kSize) {
-            p->buffer[p->tail] = in[written++];
-            p->tail = (p->tail + 1) % Pipe::kSize;
-            ++p->count;
-        }
-        scheduler::wake(read_channel(p));           // data available
-        scheduler::wake(scheduler::kPollChannel);
     }
-    return static_cast<i64>(written);
+    flush(wake);
+    return answer;
 }
 
 // Drop this descriptor's hold on its pipe end; free the pipe when both ends are
@@ -191,6 +237,7 @@ void release_pipe(Descriptor& d, Wakes& wake)
     auto* p = static_cast<Pipe*>(d.pipe);
     if (p == nullptr)
         return;
+    sync::Guard guard(g_pipe_lock);
     if ((d.flags & kRead) != 0) {
         if (--p->readers == 0)
             wake.add(write_channel(p));
@@ -224,13 +271,24 @@ void release_pipe(Descriptor& d, Wakes& wake)
  *
  * Both are called with the table lock held, which is what makes "still open"
  * and "reference taken" one step rather than two. */
-void hold_pipe(Pipe* p) { if (p != nullptr) ++p->busy; }
+void hold_pipe(Pipe* p)
+{
+    if (p == nullptr)
+        return;
+    sync::Guard guard(g_pipe_lock);
+    ++p->busy;
+}
 
 void drop_pipe(Pipe* p)
 {
     if (p == nullptr)
         return;
-    if (--p->busy == 0 && p->doomed)
+    bool last = false;
+    {
+        sync::Guard guard(g_pipe_lock);
+        last = (--p->busy == 0 && p->doomed);
+    }
+    if (last)
         kfree(p);
 }
 
